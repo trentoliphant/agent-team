@@ -18,7 +18,7 @@ API SDKs, server, or repository-installed agent framework.
   reports it, reviewed commit, findings, and validation results.
 - Supports bounded revisions, subscription cooldowns, explicit crash recovery,
   pause/resume, and read-only discovery that opens issues for human triage.
-- Never merges, enables auto-merge, closes GitHub issues, or changes branch rules.
+- Never merges PRs, enables auto-merge, closes GitHub issues, or changes branch rules.
 
 ## Install
 

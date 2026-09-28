@@ -62,6 +62,11 @@ class Coordinator:
                 self.reconcile(project, run)
                 if run.get("notification_pending"):
                     self.notify(project, run)
+            elif run["stage"] == "stale":
+                pr = self.github.pr(project["repo"], run["pr"])
+                if pr.get("merged") or pr["state"] == "closed":
+                    self.store.save(run, stage="merged" if pr.get("merged") else "closed", notification_pending=True)
+                    self.notify(project, run)
         active = next((r for r in runs if r["stage"] in ACTIVE), None)
         if not active:
             if any(r["stage"] in {"blocked", "quota_wait"} for r in runs):

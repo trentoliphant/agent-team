@@ -25,14 +25,16 @@ def execute(args, *, cwd=None, env=None, input=None, timeout=120, check=True):
         raise TeamError(f"Cannot start {args[0]}: {exc}") from exc
     try:
         out, err = proc.communicate(input, timeout=timeout)
-    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
         os.killpg(proc.pid, signal.SIGTERM)
         try:
             proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate()
-        raise TeamError(f"Interrupted or timed out: {args[0]} (limit {timeout}s)")
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        raise TeamError(f"Timed out: {args[0]} (limit {timeout}s)")
     result = subprocess.CompletedProcess(args, proc.returncode, out, err)
     if check and proc.returncode:
         raise TeamError(f"{args[0]} failed ({proc.returncode}): {(err or out)[-3000:]}")

@@ -233,6 +233,13 @@ class WorkflowTests(unittest.TestCase):
         self.tick()
         self.assertEqual(self.store.get(run["id"])["stage"], "merged")
 
+    def test_stale_pr_is_still_observed_when_merged(self):
+        run = self.tick(6)
+        self.store.save(run, stage="stale")
+        self.github.pull.update(state="closed", merged=True)
+        self.tick()
+        self.assertEqual(self.store.get(run["id"])["stage"], "merged")
+
     def test_ci_pending_and_failure_never_ready(self):
         run = self.tick(5)
         self.github.check_state = "pending"
@@ -333,6 +340,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["stage"], "blocked")
         self.assertIn("no new commit", run["error"])
 
+    def test_failed_revision_status_targets_only_published_commit(self):
+        self.agents.reject = True
+        self.tick(6)  # revised files exist; new candidate not yet published
+        self.project.update(tests=["exit 1"], max_revisions=1)
+        self.store.save_project(self.project)
+        real_status = self.github.status
+        def require_remote_commit(repo, sha, state, description):
+            git(self.remote, "cat-file", "-e", sha + "^{commit}")
+            real_status(repo, sha, state, description)
+        with patch.object(self.github, "status", side_effect=require_remote_commit):
+            run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertNotEqual(run["sha"], run["published_sha"])
+        self.assertEqual(self.github.statuses[-1], (run["published_sha"], "failure"))
+
     def test_repeated_quota_wait_is_bounded(self):
         self.tick()
         for attempt in range(3):
@@ -407,6 +429,17 @@ class ContractTests(unittest.TestCase):
     def test_non_utf8_output_is_preserved_with_replacement(self):
         result = execute(["/bin/sh", "-c", "printf '\\377'"])
         self.assertIn("\ufffd", result.stdout)
+
+    def test_keyboard_interrupt_stops_watcher_instead_of_becoming_task_failure(self):
+        from unittest.mock import MagicMock
+        process = MagicMock()
+        process.pid = 12345
+        process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        with patch("agent_team.process.subprocess.Popen", return_value=process), \
+                patch("agent_team.process.os.killpg") as kill:
+            with self.assertRaises(KeyboardInterrupt):
+                execute(["fake-worker"])
+            kill.assert_called_once()
 
     def test_duplicate_registration_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
