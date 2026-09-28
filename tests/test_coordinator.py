@@ -441,6 +441,16 @@ class ContractTests(unittest.TestCase):
                 execute(["fake-worker"])
             kill.assert_called_once()
 
+    def test_interrupt_still_propagates_if_process_group_already_exited(self):
+        from unittest.mock import MagicMock
+        process = MagicMock()
+        process.pid = 12345
+        process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        with patch("agent_team.process.subprocess.Popen", return_value=process), \
+                patch("agent_team.process.os.killpg", side_effect=ProcessLookupError):
+            with self.assertRaises(KeyboardInterrupt):
+                execute(["fake-worker"])
+
     def test_duplicate_registration_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(tmp)

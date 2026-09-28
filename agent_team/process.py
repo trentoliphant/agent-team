@@ -1,6 +1,7 @@
 """Bounded subprocesses; never interpolate task text into shell commands."""
 import os
 import hashlib
+from contextlib import suppress
 from pathlib import Path
 import signal
 import subprocess
@@ -26,11 +27,13 @@ def execute(args, *, cwd=None, env=None, input=None, timeout=120, check=True):
     try:
         out, err = proc.communicate(input, timeout=timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
-        os.killpg(proc.pid, signal.SIGTERM)
+        with suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
         try:
             proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            with suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
             proc.communicate()
         if isinstance(exc, KeyboardInterrupt):
             raise

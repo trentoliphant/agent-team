@@ -150,7 +150,7 @@ def dispatch(args, store):
                 print(f"{run['id']}  {run['project']}  #{run['issue']}  {run['stage']}  "
                       f"{run['author']} → {run['reviewer']}  PR {run.get('pr') or '-'}")
             if not runs:
-                print("No runs. Register a project and label an issue agent:ready.")
+                print("No runs. Approve a registered project's issue with: agent-team approve PROJECT NUMBER")
     elif args.command == "inspect":
         emit(store.get(args.run_id))
     elif args.command == "resume":
