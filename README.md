@@ -12,7 +12,7 @@ API SDKs, server, or repository-installed agent framework.
 
 - Alternates implementation between OpenAI/Codex and Anthropic/Claude across
   registered projects; assigns the other family to review in a fresh checkout.
-- Claims open issues labeled `agent:ready`, validates changes with commands you
+- Claims approved open issues labeled `agent:ready`, validates changes with commands you
   configure, and opens draft PRs. Checks and review must pass before marking ready.
 - Records family, CLI version, requested model, observed model when the CLI
   reports it, reviewed commit, findings, and validation results.
@@ -70,18 +70,20 @@ agent-team project show example
 ```
 
 `--test` is repeatable and required. These are operator-approved shell commands,
-run from the isolated author checkout; agents cannot replace them. Use your
+run from a fresh clone of the candidate commit; agents cannot replace them. Use your
 project's existing environment manager in the command when needed. Commands
 must be self-contained: do not depend on a development checkout elsewhere.
 `project setup` creates only two GitHub labels: `agent:ready` and
 `agent:discovered`. The default base branch comes from GitHub; override it with
 `--base BRANCH` during registration.
 
-Choose a small GitHub issue with clear acceptance criteria and add `agent:ready`.
-That label authorizes the coordinator to implement the issue and publish a PR.
-Review who can apply the label, especially in public repositories.
+Choose a small GitHub issue with clear acceptance criteria, then approve its
+current content. Approval records a SHA-256 fingerprint in a GitHub comment and
+adds `agent:ready`. Both the matching approval and label are required. A label
+alone cannot authorize a task that someone edits later.
 
 ```sh
+agent-team approve example 123   # authorize issue #123 as currently written
 agent-team run example           # advance one durable stage
 agent-team run example --watch   # poll every 30 seconds; Ctrl-C stops
 agent-team status
@@ -118,11 +120,15 @@ agent-team refresh RUN_ID
 agent-team close RUN_ID
 agent-team project configure example --timeout 1800 --max-revisions 2
 agent-team project configure example --quota-cooldown 3600
+agent-team project configure example --max-quota-retries 3
 ```
 
 - Pause takes effect between stages; it does not interrupt an in-flight call.
+  You can request pause while a worker is running. Configuration changes require
+  an idle worker lock; pause first if a watch loop is active.
 - `resume` retries the recorded stage after you inspect a blocked run. Quota
-  waits resume automatically on a later watch tick after their cooldown.
+  waits resume automatically after their cooldown, up to three consecutive
+  attempts by default. Exhaustion blocks until you explicitly resume.
 - `refresh` explicitly adopts the current PR head, merges the current registered
   base into a new checkout, preserves the previous author checkout, and requires
   new tests and review. Conflicts stop without overwriting previous work.
@@ -130,9 +136,14 @@ agent-team project configure example --quota-cooldown 3600
   GitHub issue and PR open for your decision.
 - One issue has one run. Closed runs are not silently re-created. Track a new
   attempt in a new linked issue when needed.
+- Editing the title/body after approval requires reapproval before assignment.
+  Once assigned, the snapshot is immutable: restore it to resume, or close the
+  run and create a new linked issue for changed scope.
 
 An unresolved blocked/quota run stops new assignments for that project. Ready
-PRs do not stop new assignments. Selection is oldest eligible issue first.
+and stale PRs do not stop new assignments. A changed PR head/base becomes stale
+and requires `refresh`; `resume` cannot reuse its old evidence.
+Selection is oldest eligible issue first.
 The author rotation is global to this state directory and persists across restarts.
 Two processes sharing the same directory cannot execute stages concurrently.
 Use **one coordinator state directory per set of repositories**; separate hosts
@@ -169,6 +180,7 @@ Override with `AGENT_TEAM_HOME` or the global `--home PATH` option.
 ```text
 state.sqlite3          projects, runs, rotation, transition journal
 runs/<id>/author/     isolated Git clone
+runs/<id>/validation-*/ fresh clones of the exact candidate for test execution
 runs/<id>/review-*/   separate candidate review clones
 runs/<id>/artifacts/  prompts, structured reports, local test and worker logs
 discovery/            read-only investigation clones and reports

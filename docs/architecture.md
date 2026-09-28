@@ -32,11 +32,15 @@ branches make retries idempotent in a single coordinator installation.
 GitHub and SQLite do not share a transaction. A crash during publication can
 leave a pushed branch or PR before the local record catches up. Inspect the
 run and remote branch before resuming. Existing PRs on the same branch are reused;
-unexpected remote heads require explicit refresh. The coordinator does not
+the pending push SHA is journaled before publication, so a lost response after
+a successful push can be reconciled without treating it as an external edit.
+Unexpected remote heads require explicit refresh. The coordinator does not
 force-push or reset the author's checkout.
 
 One global advisory process lock serializes mutating commands on a single host.
-Pause waits for the current stage to finish. Read-only status works during a run.
+Pause is stored immediately and takes effect after the current stage finishes.
+Read-only status works during a run. Other mutating commands fail with a clear
+busy message if they cannot acquire the worker lock.
 The watch loop releases the lock between ticks. A service manager may restart a
 watch process, but interrupted agent work still requires explicit recovery.
 
@@ -50,7 +54,8 @@ Reviewer modifications invalidate the report. A passing report with findings is
 rejected as ambiguous.
 
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
-remote head/base changes block the run and invalidate readiness. `refresh`
+remote head/base changes make the run stale and invalidate readiness without
+blocking new issue intake. `refresh`
 adopts those changes only when requested, preserving old work and rerunning
 validation and review. CLI metadata is reported without inventing unavailable
 model identifiers. Cross-family review reduces shared context; it does not prove
@@ -58,12 +63,26 @@ correctness or eliminate correlated model errors.
 
 ## Validation and limits
 
-Configured commands execute sequentially from the author checkout. Their results
+The candidate is committed locally and cloned into a fresh validation directory.
+Configured commands execute sequentially there, without ignored files or caches
+from the author checkout. Their results
 are recorded locally and summarized on GitHub; raw test logs stay local. Failed
 validation and review findings share the bounded revision budget. Exhausting that
 budget requires human attention. Explicit refresh starts new validation and review
 even if the old budget was exhausted; it does not silently authorize unlimited
 automatic revisions.
+
+Candidate SHA and tree are checked again before publication. Git configuration,
+excludes, and local attributes are fingerprinted; changes stop orchestration
+before further coordinator Git calls. Revision requests that produce no new
+commit cannot reroll a rejected review. Review comments include the round so
+explicit revalidation does not overwrite earlier verdicts.
+
+Issue approval is an explicit command that posts the current content fingerprint
+and applies the ready label. Intake requires a matching comment from the current
+coordinator identity. The assigned issue snapshot is immutable; later title/body
+edits stop execution. Quota detection uses structured failure messages rather than
+arbitrary transcript text, and consecutive quota retries are bounded.
 
 GitHub checks and commit statuses are inspected before marking ready. Pending
 checks wait, failures block, and more than 100 results stop for manual inspection.

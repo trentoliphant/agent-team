@@ -1,5 +1,6 @@
 """Bounded subprocesses; never interpolate task text into shell commands."""
 import os
+import hashlib
 from pathlib import Path
 import signal
 import subprocess
@@ -16,7 +17,7 @@ class QuotaError(TeamError):
 def execute(args, *, cwd=None, env=None, input=None, timeout=120, check=True):
     try:
         proc = subprocess.Popen(
-            [str(a) for a in args], cwd=cwd, env=env, text=True,
+            [str(a) for a in args], cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         )
@@ -51,4 +52,38 @@ def worker_env():
 
 
 def git(cwd: Path, *args):
-    return execute(["git", "-c", "core.hooksPath=/dev/null", "-C", cwd, *args]).stdout.strip()
+    return execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                    "-c", "core.untrackedCache=false", "-C", cwd, *args], env=git_env()).stdout.strip()
+
+
+def git_env():
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+def metadata(cwd):
+    """Read configuration directly, before invoking Git against a worker checkout."""
+    root = Path(cwd) / ".git"
+    if root.is_symlink() or not root.is_dir():
+        raise TeamError("Checkout Git metadata must be a real directory")
+    result = {}
+    for rel in ("config", "info/exclude", "info/attributes"):
+        path = root / rel
+        if path.is_symlink() or path.parent.is_symlink():
+            raise TeamError("Symlinked Git configuration is not allowed")
+        result[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+    return result
+
+
+def assert_metadata(cwd, expected):
+    if metadata(cwd) != expected:
+        raise TeamError("Checkout Git configuration changed; inspect before any Git operations")
+
+
+def clone_repository(repo, destination, base, timeout):
+    # Force HTTPS/gh credentials so an app token is not accidentally replaced by
+    # a personal SSH identity selected in the operator's global gh settings.
+    execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+             "-c", "credential.helper=!gh auth git-credential", "clone", "--branch", base,
+             f"https://github.com/{repo}.git", str(destination)], timeout=timeout, env=git_env())

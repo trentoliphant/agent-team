@@ -42,12 +42,16 @@ def parser():
     configure.add_argument("--timeout", type=int)
     configure.add_argument("--max-revisions", type=int)
     configure.add_argument("--quota-cooldown", type=int)
+    configure.add_argument("--max-quota-retries", type=int)
     configure.add_argument("--codex-model")
     configure.add_argument("--claude-model")
     run = commands.add_parser("run", help="Advance one stage, or poll with --watch")
     run.add_argument("project")
     run.add_argument("--watch", action="store_true")
     run.add_argument("--interval", type=int, default=30)
+    approve = commands.add_parser("approve", help="Approve current issue content and add the ready label")
+    approve.add_argument("project")
+    approve.add_argument("issue", type=int)
     status = commands.add_parser("status")
     status.add_argument("--project")
     status.add_argument("--json", action="store_true")
@@ -113,10 +117,9 @@ def dispatch(args, store):
             if verb == "setup":
                 github.setup(project)
             elif verb in {"pause", "resume"}:
-                project["paused"] = verb == "pause"
-                store.save_project(project)
+                project = store.pause(args.name, verb == "pause")
             elif verb == "configure":
-                for key in ("timeout", "max_revisions", "quota_cooldown", "codex_model", "claude_model"):
+                for key in ("timeout", "max_revisions", "quota_cooldown", "max_quota_retries", "codex_model", "claude_model"):
                     value = getattr(args, key)
                     if value is not None:
                         minimum = 0 if key == "max_revisions" else 1
@@ -125,6 +128,8 @@ def dispatch(args, store):
                         project[key] = value
                 store.save_project(project)
             emit(project)
+    elif args.command == "approve":
+        emit(github.approve(store.project(args.project), args.issue))
     elif args.command == "run":
         if args.interval < 1:
             raise TeamError("Polling interval must be positive")
@@ -152,7 +157,7 @@ def dispatch(args, store):
         run = store.get(args.run_id)
         if run["stage"] not in {"blocked", "quota_wait"}:
             raise TeamError("Only blocked or quota-waiting runs can be resumed")
-        store.save(run, stage=run["resume_stage"], error=None, in_flight=False)
+        store.save(run, stage=run["resume_stage"], error=None, in_flight=False, quota_attempts=0)
         emit(run)
     elif args.command == "close":
         run = store.get(args.run_id)
@@ -171,7 +176,8 @@ def main(argv=None):
     args = parser().parse_args(argv)
     store = Store(args.home)
     try:
-        if args.command in {"run", "status", "inspect", "doctor", "smoke", "init"}:
+        if (args.command in {"run", "status", "inspect", "doctor", "smoke", "init"} or
+                (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"})):
             code = dispatch(args, store)
         else:
             with store.lock():

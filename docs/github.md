@@ -20,8 +20,11 @@ Do not use a personal subscription login as a shared account for other people.
 ## Labels and issue authorization
 
 `agent-team project setup PROJECT` creates the ready and discovery labels.
-The ready label is the implementation authorization boundary. Only label issues
-whose scope and acceptance criteria are sufficiently clear for autonomous work.
+`agent-team approve PROJECT NUMBER` posts an approval of the current issue
+title/body fingerprint and applies the ready label. Both are required for intake;
+approval must be written by the coordinator's current GitHub identity. Approve
+only issues whose scope and acceptance criteria are clear enough for autonomous
+work. Later edits invalidate approval; edits during a run stop that run.
 Removing the label stops further work on the next active stage. Discovered issues
 remain unready until triaged. One registered project corresponds to one repository.
 

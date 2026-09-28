@@ -1,6 +1,7 @@
 """Single-host durable registry and run journal, outside source checkouts."""
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,11 @@ from .process import TeamError
 
 ACTIVE = {"prepare", "implement", "validate", "publish", "review", "ci"}
 TERMINAL = {"merged", "closed"}
+
+
+def issue_fingerprint(issue):
+    value = {"title": issue["title"], "body": issue.get("body") or ""}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def default_home():
@@ -64,6 +70,15 @@ class Store:
                         (project["name"], json.dumps(project)))
         self.db.commit()
 
+    def pause(self, name, paused):
+        # Short independent transaction: works while an agent holds the worker lock.
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            project = self.project(name)
+            project["paused"] = paused
+            self.db.execute("UPDATE projects SET data=? WHERE name=?", (json.dumps(project), name))
+        return project
+
     def register(self, name, repo, base, tests, **options):
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", name):
             raise TeamError("Project name must contain only letters, digits, underscore, or dash")
@@ -75,7 +90,7 @@ class Store:
             raise TeamError("At least one --test command is required")
         project = dict(name=name, repo=repo, base=base, tests=tests, paused=False,
                        ready_label="agent:ready", timeout=1800, max_revisions=2,
-                       quota_cooldown=3600, codex_model=None, claude_model=None)
+                       quota_cooldown=3600, max_quota_retries=3, codex_model=None, claude_model=None)
         project.update(options)
         self.save_project(project)
         return project
@@ -110,6 +125,7 @@ class Store:
                    author=author, reviewer="claude" if author == "codex" else "codex",
                    stage="prepare", round=0, pr=None, sha=None, base_sha=None,
                    in_flight=False, feedback="", created=time.time())
+        run.update(issue_digest=issue_fingerprint(issue), quota_attempts=0, needs_revision=False)
         run["branch"] = f"agent-team/{run['issue']}-{run['id']}"
         self.db.execute("INSERT INTO runs VALUES (?,?,?,?)",
                         (run["id"], run["project"], run["issue"], json.dumps(run)))

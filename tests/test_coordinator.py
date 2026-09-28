@@ -28,6 +28,9 @@ class FakeGitHub:
     def issues(self, project, ready=True):
         return self.items
 
+    def authorized(self, project, issue):
+        return issue.get("approved", True)
+
     def issue(self, repo, number):
         return next(i for i in self.items if i["number"] == number)
 
@@ -98,10 +101,8 @@ class WorkflowTests(unittest.TestCase):
         self.agents = FakeAgents()
         self.team = Coordinator(self.store, self.github, self.agents)
 
-        def local_execute(args, **kwargs):
-            if args[:3] == ["gh", "repo", "clone"]:
-                return execute(["git", "clone", "--branch", args[-1], str(self.remote), args[4]], **kwargs)
-            return execute(args, **kwargs)
+        def local_clone(repo, destination, base, timeout):
+            return execute(["git", "clone", "--branch", base, str(self.remote), str(destination)], timeout=timeout)
 
         def local_git(cwd, *args):
             args = list(args)
@@ -110,7 +111,7 @@ class WorkflowTests(unittest.TestCase):
                 args[index + 1] = str(self.remote)
             return git(cwd, *args)
 
-        self.exec_patch = patch("agent_team.coordinator.execute", side_effect=local_execute)
+        self.exec_patch = patch("agent_team.coordinator.clone_repository", side_effect=local_clone)
         self.git_patch = patch("agent_team.coordinator.git", side_effect=local_git)
         self.exec_patch.start()
         self.git_patch.start()
@@ -223,7 +224,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.tick(6)
         self.github.external_sha = "a" * 40
         self.tick()
-        self.assertEqual(self.store.get(run["id"])["stage"], "blocked")
+        self.assertEqual(self.store.get(run["id"])["stage"], "stale")
         self.assertEqual(self.github.statuses[-1], ("a" * 40, "pending"))
 
     def test_merged_pr_is_observed_not_reopened(self):
@@ -263,6 +264,103 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(refreshed["reviewed_sha"])
         self.assertTrue(list(self.store.workspace(run).parent.glob("author-preserved-*")))
         self.assertEqual(self.tick(4)["stage"], "ready")
+
+    def test_unapproved_issue_is_not_claimed(self):
+        self.github.items[0]["approved"] = False
+        self.assertEqual(self.tick()["stage"], "idle")
+        self.assertEqual(self.store.runs(), [])
+
+    def test_issue_edit_after_approval_blocks(self):
+        self.tick()
+        self.github.items[0]["body"] = "Different task"
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertIn("Issue content changed", run["error"])
+
+    def test_ignored_author_file_cannot_satisfy_validation(self):
+        run = self.tick(2)
+        author = self.store.workspace(run)
+        (author / ".gitignore").write_text("hidden.txt\n")
+        (author / "hidden.txt").write_text("not committed")
+        self.project.update(tests=["test -f hidden.txt"], max_revisions=0)
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(self.github.creates, 0)
+
+    def test_git_config_tamper_stops_before_publication(self):
+        run = self.tick(3)
+        config = self.store.workspace(run) / ".git/config"
+        with config.open("a") as handle:
+            handle.write('\n[url "https://example.invalid/"]\n\tinsteadOf = https://github.com/\n')
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertIn("Git configuration changed", run["error"])
+        self.assertEqual(self.github.creates, 0)
+
+    def test_validation_config_tamper_stops_before_git_command(self):
+        self.project["tests"] = ["printf '\\n[core]\\nfsmonitor = bad-command\\n' >> .git/config"]
+        self.store.save_project(self.project)
+        run = self.tick(3)
+        self.assertEqual(run["stage"], "blocked")
+        self.assertIn("Git configuration changed", run["error"])
+
+    def test_push_timeout_after_remote_acceptance_is_recoverable(self):
+        self.agents.reject = True
+        run = self.tick(7)  # revised candidate validated, old PR still published
+        def timeout_after_push(cwd, *args):
+            args = list(args)
+            if "push" in args:
+                args[args.index("push") + 1] = str(self.remote)
+                git(cwd, *args)
+                raise TeamError("Simulated lost push response")
+            return git(cwd, *args)
+        with patch("agent_team.coordinator.git", side_effect=timeout_after_push):
+            run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(run["pending_push_sha"], run["sha"])
+        self.store.save(run, stage=run["resume_stage"], error=None)
+        run = self.tick(3)
+        self.assertEqual(run["stage"], "ready")
+        self.assertEqual(self.github.creates, 1)
+
+    def test_no_change_revision_cannot_reroll_review(self):
+        self.agents.reject = True
+        self.tick(5)
+        run = self.store.runs()[0]
+        self.store.save(run, stage="validate")  # a worker returns without editing
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertIn("no new commit", run["error"])
+
+    def test_repeated_quota_wait_is_bounded(self):
+        self.tick()
+        for attempt in range(3):
+            self.agents.quota = True
+            run = self.tick()
+            if attempt < 2:
+                self.assertEqual(run["stage"], "quota_wait")
+                self.store.save(run, retry_at=time.time() - 1)
+        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(run["quota_attempts"], 3)
+
+    def test_base_movement_makes_ready_stale_without_blocking_intake(self):
+        run = self.tick(6)
+        self.github.items.append(dict(self.github.items[0], number=2, title="Next"))
+        actual_pr = self.github.pr
+        def moved(repo, number):
+            pr = actual_pr(repo, number)
+            pr["base"]["sha"] = "b" * 40
+            return pr
+        with patch.object(self.github, "pr", side_effect=moved):
+            next_run = self.tick()
+        self.assertEqual(self.store.get(run["id"])["stage"], "stale")
+        self.assertEqual(next_run["issue"], 2)
+
+    def test_pause_can_be_recorded_during_worker_lock(self):
+        with self.store.lock():
+            self.store.pause("demo", True)
+        self.assertEqual(self.tick()["stage"], "paused")
 
 
 class ContractTests(unittest.TestCase):
@@ -305,6 +403,10 @@ class ContractTests(unittest.TestCase):
     def test_process_timeout_is_bounded(self):
         with self.assertRaises(TeamError):
             execute(["/bin/sh", "-c", "sleep 10"], timeout=0.1)
+
+    def test_non_utf8_output_is_preserved_with_replacement(self):
+        result = execute(["/bin/sh", "-c", "printf '\\377'"])
+        self.assertIn("\ufffd", result.stdout)
 
     def test_duplicate_registration_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

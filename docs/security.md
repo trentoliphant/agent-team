@@ -41,16 +41,19 @@ Official references:
 The coordinator uses `gh`'s existing identity or a dedicated GitHub App token
 provided to the coordinator process. GitHub credentials are not forwarded in the
 worker environment. Git push destinations are constructed from the registered
-repository, not from agent-authored output or modified remote configuration.
+repository. Coordinator Git calls ignore global/system configuration and disable
+filesystem monitors and hooks. Local config, excludes, and attributes are
+fingerprinted before workers run; changes block later coordinator Git operations.
 Worker Git configuration does not inherit global credential helpers. An empty
 GitHub CLI configuration directory discourages accidental worker authentication.
 These measures do not make credentials on the same OS account inaccessible to
 arbitrary code. Use a dedicated OS account or VM for stronger isolation.
 
 Only register repositories you trust. Validation commands and project code execute
-locally with the operator's filesystem access. Issue text is untrusted input, and
+in fresh candidate clones with the operator's filesystem access. Issue text is untrusted input, and
 prompts tell workers it cannot expand permissions. Prompts are not a security
-boundary. Limit who can apply the ready label; use repository rulesets and a
+boundary. Issue approval records a content fingerprint, and subsequent edits
+invalidate approval. Protect the coordinator's GitHub identity; use repository rulesets and a
 separate automation identity to protect branches. Do not grant that identity
 branch-rule bypass or administration privileges.
 

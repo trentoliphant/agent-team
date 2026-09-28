@@ -3,6 +3,7 @@ import json
 from urllib.parse import urlencode
 
 from .process import execute, TeamError
+from .state import issue_fingerprint
 
 
 class GitHub:
@@ -22,7 +23,12 @@ class GitHub:
 
     def login(self):
         if self._login is None:
-            self._login = self.api("user")["login"]
+            # GraphQL viewer also represents installation-token app identities;
+            # REST /user is only available to user authentication.
+            result = self.api("graphql", "POST", {"query": "query { viewer { login } }"})
+            if result.get("errors") or not result.get("data", {}).get("viewer"):
+                raise TeamError("Cannot determine the authenticated GitHub identity")
+            self._login = result["data"]["viewer"]["login"]
         return self._login
 
     def repo(self, repo):
@@ -37,6 +43,24 @@ class GitHub:
 
     def issue(self, repo, number):
         return self.api(f"repos/{repo}/issues/{number}")
+
+    def approve(self, project, number):
+        issue = self.issue(project["repo"], number)
+        if issue["state"] != "open" or "pull_request" in issue:
+            raise TeamError("Only open issues can be approved")
+        self.setup(project)
+        self.comment(project["repo"], number, f"approval-{number}",
+                     f"Approved for Agent Team implementation.\n\nIssue content SHA-256: `{issue_fingerprint(issue)}`\n\n"
+                     "Changing the title or body invalidates this approval.")
+        self.api(f"repos/{project['repo']}/issues/{number}/labels", "POST", {"labels": [project["ready_label"]]})
+        return {"issue": number, "digest": issue_fingerprint(issue)}
+
+    def authorized(self, project, issue):
+        tag = f"<!-- agent-team:approval-{issue['number']} -->"
+        fingerprint = f"Issue content SHA-256: `{issue_fingerprint(issue)}`"
+        comments = self.pages(f"repos/{project['repo']}/issues/{issue['number']}/comments?per_page=100")
+        return any(tag in c["body"] and fingerprint in c["body"] and
+                   c["user"]["login"] == self.login() for c in comments)
 
     def setup(self, project):
         existing = {l["name"] for l in self.pages(f"repos/{project['repo']}/labels?per_page=100")}

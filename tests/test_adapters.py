@@ -44,6 +44,12 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(QuotaError):
             self.call("codex", {"type": "error", "message": "Usage limit reached"})
 
+    def test_transcript_mention_of_rate_limit_does_not_trigger_retry(self):
+        with self.assertRaises(TeamError) as raised:
+            self.call("codex", {"type": "item.completed", "item": {"text": "Implement rate limit handling"}},
+                      exit_code=1, stderr="Process failed")
+        self.assertNotIsInstance(raised.exception, QuotaError)
+
     def test_claude_review_has_no_shell_or_edit_tools(self):
         result = self.call("claude", {"is_error": False, "modelUsage": {"a-model": {}},
                                      "structured_output": {"verdict": "pass", "summary": "ok", "findings": []}})
@@ -69,6 +75,27 @@ class AdapterTests(unittest.TestCase):
 
 
 class GitHubTests(unittest.TestCase):
+    def test_approval_requires_current_content_and_trusted_identity(self):
+        from agent_team.state import issue_fingerprint
+        github = GitHub()
+        github._login = "operator"
+        issue = {"number": 1, "title": "Task", "body": "Original"}
+        comment = {"body": f"<!-- agent-team:approval-1 -->\nIssue content SHA-256: `{issue_fingerprint(issue)}`",
+                   "user": {"login": "operator"}}
+        with patch.object(github, "pages", return_value=[comment]):
+            self.assertTrue(github.authorized({"repo": "example/repo"}, issue))
+            self.assertFalse(github.authorized({"repo": "example/repo"}, dict(issue, body="Edited")))
+            comment["user"]["login"] = "outsider"
+            self.assertFalse(github.authorized({"repo": "example/repo"}, issue))
+
+    def test_identity_uses_graphql_viewer_for_app_compatibility(self):
+        github = GitHub()
+        with patch.object(github, "api", return_value={"data": {"viewer": {"login": "team[bot]"}}}) as api:
+            self.assertEqual(github.login(), "team[bot]")
+            self.assertEqual(github.login(), "team[bot]")
+            self.assertEqual(api.call_count, 1)
+            self.assertEqual(api.call_args.args[0], "graphql")
+
     def test_own_status_does_not_deadlock_ci(self):
         github = GitHub()
         with patch.object(github, "api", side_effect=[

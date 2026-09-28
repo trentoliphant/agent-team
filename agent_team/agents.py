@@ -113,15 +113,16 @@ class Agents:
                          timeout=project["timeout"], check=False)
         (artifacts / "stdout.log").write_text(result.stdout)
         (artifacts / "stderr.log").write_text(result.stderr)
-        combined = result.stdout + result.stderr
         if agent == "claude":
             try:
                 envelope = json.loads(result.stdout)
             except ValueError as exc:
-                self.raise_failure(combined)
+                if result.returncode:
+                    self.raise_failure(result.stderr)
                 raise TeamError("Claude returned malformed JSON; inspect local logs") from exc
             if result.returncode or envelope.get("is_error"):
-                self.raise_failure(combined)
+                if envelope.get("is_error"):
+                    self.raise_failure(json.dumps({k: envelope.get(k) for k in ("subtype", "error", "result")}))
                 raise TeamError("Claude run failed; inspect local logs")
             report = envelope.get("structured_output")
             models = list(envelope.get("modelUsage", {}))
@@ -133,7 +134,8 @@ class Agents:
                 except ValueError:
                     pass
             if result.returncode or any(e.get("type") in {"error", "turn.failed"} for e in events):
-                self.raise_failure(combined)
+                errors = [e for e in events if e.get("type") in {"error", "turn.failed"}]
+                self.raise_failure(json.dumps(errors) if errors else result.stderr)
                 raise TeamError("Codex run failed; inspect local logs")
             if not output_file.exists():
                 raise TeamError("Codex produced no final report; inspect local logs")
@@ -153,6 +155,6 @@ class Agents:
 
     @staticmethod
     def raise_failure(text):
-        if re.search(r"usage limit|rate.?limit|quota|limit reached|hit your limit|exceeded.*limit",
+        if re.search(r"usage limit|rate.?limit|quota (?:exceeded|exhausted)|hit your limit|insufficient_quota",
                      text, re.I):
             raise QuotaError("Subscription capacity unavailable; queued for retry without API fallback")
