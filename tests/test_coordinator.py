@@ -35,7 +35,7 @@ class FakeGitHub:
     def issue(self, repo, number):
         return next(i for i in self.items if i["number"] == number)
 
-    def comment(self, repo, number, marker, body):
+    def comment(self, repo, number, marker, body, heading=None):
         self.comments[(number, marker)] = body
 
     def create_pr(self, project, run, body):
@@ -86,6 +86,10 @@ class FakeAgents:
             report = {"summary": self.summary, "limitations": "None"}
         elif role == "discover":
             report = {"issues": [{"title": "Found gap", "evidence": self.summary, "acceptance": "Gap closed"}]}
+        elif role == "status":
+            # Deterministic stand-in for styled wording: echo the configured status instructions.
+            style = prompt.split("Writing standard for each status comment", 1)[1].split("Never omit", 1)[0]
+            report = {"message": "Drafted: " + " ".join(style.splitlines()[1:])}
         else:
             report = {"verdict": "changes_requested" if self.reject else "pass", "summary": self.summary,
                       "findings": [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
@@ -469,6 +473,50 @@ class WorkflowTests(unittest.TestCase):
         self.store.save_project(self.project)
         self.team.notify(self.project, self.store.get(run["id"]))
         self.assertEqual(self.github.comments[(1, run["id"])], status)
+
+    def test_status_instructions_shape_published_comments_and_keep_fixed_facts(self):
+        self.store.save_writing({"shared": "Personal shared.", "status": {"instructions": "Write in Spanish."}})
+        run = self.tick(6)
+        self.assertEqual(run["stage"], "ready")
+        self.assertIn(("codex", "status"), self.agents.calls)
+        prompt = self.agents.prompts["status"]
+        self.assertTrue(prompt.startswith(GUIDANCE))
+        self.assertIn("Write in Spanish.", prompt)
+        self.assertIn("Do not add facts", prompt)
+        status, ready = self.github.comments[(1, run["id"])], self.github.comments[(7, f"{run['id']}-ready")]
+        for comment in (status, ready):
+            self.assertTrue(comment.startswith("Drafted: Personal shared. Write in Spanish."))
+        for text in ("Agent Team: ready", run["id"], "PR #7", run["sha"], "Only the maintainer decides whether to merge."):
+            self.assertIn(text, status)
+        for text in (run["sha"], "independent review", "`test -f feature.txt` exit 0", "will not merge"):
+            self.assertIn(text, ready)
+        calls = len(self.agents.calls)
+        self.team.notify(self.project, run)  # unchanged status reuses the stored draft
+        self.assertEqual(len(self.agents.calls), calls)
+        self.assertEqual(self.github.comments[(1, run["id"])], status)
+        self.project["writing"] = {"status": {"instructions": "Project status."}}
+        self.store.save_project(self.project)
+        self.team.notify(self.project, run)
+        self.assertTrue(self.github.comments[(1, run["id"])].startswith("Drafted: Personal shared. Project status."))
+        self.assertIn(run["sha"], self.github.comments[(1, run["id"])])
+
+    def test_status_drafting_failure_or_quota_wait_publishes_template(self):
+        self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+        real_run = self.agents.run
+        def no_status(agent, role, *args):
+            if role == "status":
+                raise QuotaError("quota exhausted")
+            return real_run(agent, role, *args)
+        with patch.object(self.agents, "run", side_effect=no_status):
+            run = self.tick()
+        self.assertEqual(run["stage"], "implement")
+        comment = self.github.comments[(1, run["id"])]
+        self.assertTrue(comment.startswith("**Agent Team: implement**"))
+        self.agents.quota = True
+        run = self.tick()
+        self.assertEqual(run["stage"], "quota_wait")
+        self.assertNotIn(("codex", "status"), self.agents.calls)
+        self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: quota_wait**"))
 
     def test_compact_status_keeps_waiting_notice(self):
         self.store.save_writing({"status": {"words": 1}})

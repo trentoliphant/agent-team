@@ -5,6 +5,20 @@ from urllib.parse import urlencode
 from .process import execute, TeamError
 from .state import issue_fingerprint
 
+# GitHub rejects comment bodies above 65,536 characters; leave room for markers and headings.
+PART = 60000
+
+
+def split_body(body, size=PART):
+    """Split text into ordered parts, preferring line breaks. Nothing is dropped."""
+    parts = []
+    while len(body) > size:
+        cut = body.rfind("\n", size // 2, size)
+        cut = cut + 1 if cut > 0 else size
+        parts.append(body[:cut])
+        body = body[cut:]
+    return parts + [body]
+
 
 class GitHub:
     def __init__(self):
@@ -68,16 +82,31 @@ class GitHub:
             if name not in existing:
                 self.api(f"repos/{project['repo']}/labels", "POST", {"name": name, "color": color})
 
-    def comment(self, repo, number, marker, body):
-        tag = f"<!-- agent-team:{marker} -->"
+    def comment(self, repo, number, marker, body, heading=None):
+        """Create or update a marked comment. Long bodies continue in marked follow-up
+        comments (`heading` names what they continue) instead of being truncated."""
         endpoint = f"repos/{repo}/issues/{number}/comments"
         comments = self.pages(endpoint + "?per_page=100")
-        found = next((c for c in comments if tag in c["body"] and c["user"]["login"] == self.login()), None)
-        payload = {"body": tag + "\n" + body[:60000]}
-        if found:
-            self.api(f"repos/{repo}/issues/comments/{found['id']}", "PATCH", payload)
-        else:
-            self.api(endpoint, "POST", payload)
+        mine = [c for c in comments if c["user"]["login"] == self.login()]
+
+        def existing(tag):
+            return next((c for c in mine if tag in c["body"]), None)
+
+        parts = split_body(body)
+        for index, text in enumerate(parts):
+            tag = f"<!-- agent-team:{marker} -->" if index == 0 else f"<!-- agent-team:{marker}-part-{index + 1} -->"
+            if index:
+                text = f"**{heading or 'Agent Team'} (continued, part {index + 1} of {len(parts)})**\n\n" + text
+            if found := existing(tag):
+                self.api(f"repos/{repo}/issues/comments/{found['id']}", "PATCH", {"body": tag + "\n" + text})
+            else:
+                self.api(endpoint, "POST", {"body": tag + "\n" + text})
+        # Retire continuation parts left over from a longer earlier version.
+        index = len(parts) + 1
+        while found := existing(tag := f"<!-- agent-team:{marker}-part-{index} -->"):
+            self.api(f"repos/{repo}/issues/comments/{found['id']}", "PATCH",
+                     {"body": tag + "\n*No longer used; the updated text is in the comments above.*"})
+            index += 1
 
     def find_pr(self, project, branch):
         query = urlencode({"state": "all", "head": project["repo"].split('/')[0] + ':' + branch})

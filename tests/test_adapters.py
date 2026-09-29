@@ -130,6 +130,62 @@ class GitHubTests(unittest.TestCase):
             self.assertEqual(api.call_args.args[0], "repos/example/repo/issues/comments/2")
             self.assertEqual(api.call_args.args[1], "PATCH")
 
+    def test_long_review_continues_in_marked_comments_without_losing_findings(self):
+        from agent_team.coordinator import review_comment
+        stored = []
+
+        def transport(args, input=None, **kwargs):
+            # Stand-in for `gh api`: an in-memory issue comment thread.
+            if "--paginate" in args:
+                result = [[dict(c) for c in stored]]
+            else:
+                method, endpoint = args[args.index("--method") + 1], args[args.index("--method") + 2]
+                data = json.loads(input) if input else None
+                if endpoint == "graphql":
+                    result = {"data": {"viewer": {"login": "coordinator-bot"}}}
+                elif method == "POST":
+                    self.assertEqual(endpoint, "repos/example/repo/issues/7/comments")
+                    result = {"id": len(stored) + 1, "body": data["body"], "user": {"login": "coordinator-bot"}}
+                    stored.append(result)
+                else:
+                    self.assertEqual(method, "PATCH")
+                    result = next(c for c in stored if endpoint == f"repos/example/repo/issues/comments/{c['id']}")
+                    result["body"] = data["body"]
+            return subprocess.CompletedProcess(args, 0, json.dumps(result), "")
+
+        sha = "c" * 40
+        findings = [{"severity": "high", "location": f"file.py:{n}", "evidence": f"evidence-{n} " + "x" * 30000,
+                     "request": f"request-{n}"} for n in range(4)]
+        record = {"agent": "claude", "family": "anthropic", "cli_version": "test", "requested_model": "test",
+                  "observed_models": [], "report": {"verdict": "changes_requested", "summary": "s" * 70000,
+                                                    "findings": findings}}
+        body = review_comment(sha, record)
+        self.assertGreater(len(body), 180000)
+        github = GitHub()
+        marker = f"run-review-0-{sha}"
+        with patch("agent_team.github.execute", side_effect=transport):
+            github.comment("example/repo", 7, marker, body, heading=f"Independent review of `{sha}`")
+            self.assertGreater(len(stored), 1)
+            self.assertTrue(all(len(c["body"]) <= 65536 for c in stored))
+            self.assertTrue(stored[0]["body"].startswith(f"<!-- agent-team:{marker} -->\n"))
+            published = stored[0]["body"].split("\n", 1)[1]
+            for number, part in enumerate(stored[1:], 2):
+                tag, heading, text = part["body"].split("\n", 1)[0], *part["body"].split("\n", 1)[1].split("\n\n", 1)
+                self.assertEqual(tag, f"<!-- agent-team:{marker}-part-{number} -->")
+                self.assertIn(sha, heading)
+                self.assertIn(f"part {number} of {len(stored)}", heading)
+                published += text
+            self.assertEqual(published, body)
+            for finding in findings:
+                for field in finding.values():
+                    self.assertIn(field, published)
+            count = len(stored)
+            github.comment("example/repo", 7, marker, "Short replacement", heading="Review")
+        self.assertEqual(len(stored), count)  # updates in place; no duplicates
+        self.assertTrue(stored[0]["body"].endswith("Short replacement"))
+        for part in stored[1:]:
+            self.assertIn("No longer used", part["body"])
+
     def test_publication_reuses_existing_pr(self):
         github = GitHub()
         with patch.object(github, "find_pr", return_value={"number": 9}), patch.object(github, "api") as api:

@@ -12,7 +12,7 @@ this package or needs its workflow files.
 | `process.py` | Argument-vector execution, timeout/process-group cleanup, environment filtering |
 | `agents.py` | Subscription authentication checks, official CLI arguments, report contracts |
 | `github.py` | GitHub API reads and coordinator-owned writes through `gh` |
-| `writing.py` | Writing-standard precedence, validation, and prompt text (style only); the coordinator applies the `status` word target to its status comments |
+| `writing.py` | Writing-standard precedence, validation, and prompt text (style only); the coordinator applies the `status` policy to its status comments |
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 
@@ -28,7 +28,15 @@ Every tick saves its intended stage before doing work. If the process disappears
 the next tick moves the run to blocked and requires explicit resume. Finished
 stages are saved before publishing the issue status comment. A pending-notification
 flag lets a later tick retry a failed comment update. Comment markers and PR head
-branches make retries idempotent in a single coordinator installation.
+branches make retries idempotent in a single coordinator installation. Bodies
+over 60,000 characters continue in separately marked comments instead of being
+truncated; a shorter update marks leftover parts as unused.
+
+Status comments come from fixed templates. When writing settings customize the
+shared or `status` instructions, the run's author agent rewrites the template
+through a read-only `status` report. The coordinator appends the compact
+template unchanged and caches the draft per update. Drafting failures fall back
+to the template, and no draft is attempted while waiting for quota.
 
 GitHub and SQLite do not share a transaction. A crash during publication can
 leave a pushed branch or PR before the local record catches up. Inspect the

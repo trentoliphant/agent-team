@@ -31,6 +31,10 @@ DISCOVERY_SCHEMA = {
         "required": ["title", "evidence", "acceptance"],
     }}}, "required": ["issues"],
 }
+STATUS_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"message": {"type": "string"}}, "required": ["message"],
+}
 
 
 def validate_report(value, schema):
@@ -76,7 +80,7 @@ class Agents:
     def run(self, agent, role, prompt, cwd, artifacts, project):
         version = subscription_status(agent)
         schema = {"implement": AUTHOR_SCHEMA, "review": REVIEW_SCHEMA,
-                  "discover": DISCOVERY_SCHEMA}[role]
+                  "discover": DISCOVERY_SCHEMA, "status": STATUS_SCHEMA}[role]
         artifacts = Path(artifacts)
         artifacts.mkdir(parents=True, exist_ok=True)
         schema_file = artifacts / "schema.json"

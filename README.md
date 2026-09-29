@@ -258,15 +258,26 @@ out agent and revision details. Both forms keep the stage, run ID, PR, commit,
 validation results, any waiting notice, and the no-merge statement. For example,
 `agent-team writing set --kind status --words 20` switches to compact status
 comments, and `agent-team writing set --project example --kind status --words 0`
-restores detailed ones for one project. The coordinator cannot interpret
-free-text instructions without a model, so shared and `status` instructions
-apply to chat-drafted status comments. Chat-driven workflows can run
-`writing show --kind` before drafting GitHub text by hand; see the
-[skill](skills/agent-team/SKILL.md).
+restores detailed ones for one project.
+
+When the effective shared or `status` instructions differ from the built-in
+defaults, the run's author agent rewrites each status update to follow them.
+For example, `agent-team writing set --project example --kind status
+--instructions 'Write in Spanish.'` changes that project's issue progress and
+ready comments. The coordinator publishes the agent's wording first, then the
+compact template's facts and safeguards unchanged. Each rewrite is an extra
+subscription call, made once per distinct update and reused on later ticks. The
+agent sees only the template text, never issue text or raw errors. If the call
+fails, or the run is waiting for subscription capacity, the coordinator
+publishes the template. Built-in instructions need no model call. Chat-driven
+workflows can run `writing show --kind` before drafting GitHub text by hand; see
+the [skill](skills/agent-team/SKILL.md).
 
 Standards affect wording only. Word targets are guidance: the coordinator never
 truncates agent text, and prompts say not to shorten findings, failures,
-evidence, verdicts, limitations, or commit identifiers to fit. Required report
+evidence, verdicts, limitations, or commit identifiers to fit. A comment longer
+than GitHub allows continues in marked follow-up comments that name the
+reviewed commit, so every finding is published. Required report
 fields, commit SHAs, approval fingerprints, validation results, review
 independence, and all authorization and execution checks are enforced in code
 and cannot be changed through writing settings.
