@@ -57,6 +57,67 @@ limits still apply; parallel sessions share your account's capacity. Claude's
 `--bare` mode is deliberately avoided because it disables subscription login.
 See [authentication and execution boundaries](docs/security.md).
 
+## Use the skill from other repositories
+
+The canonical [Agent Team skill](skills/agent-team/SKILL.md) is maintained here
+alongside the CLI. Committing the skill does **not** install it automatically;
+installing the Python package does not install it into your chat client either.
+It is operating guidance, not a plugin framework or MCP server.
+
+For a personal Codex installation, copy the complete `skills/agent-team`
+directory from a reviewed revision into your user skill directory. For example,
+run this from an unpacked source release or checkout root:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+test ! -e "$HOME/.agents/skills/agent-team" && \
+  test ! -L "$HOME/.agents/skills/agent-team" && \
+  cp -R skills/agent-team "$HOME/.agents/skills/agent-team"
+```
+
+If that destination already exists, inspect it before replacing it. OpenAI's
+[Codex skills documentation](https://developers.openai.com/codex/skills)
+currently redirects to [Build skills](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills).
+Its “Where Codex loads local skills” section documents `$HOME/.agents/skills`
+as the user location across repositories and explicitly supports symlinked skill
+folders (verified September 28, 2026).
+The copied directory is self-contained; its broader documentation links are
+optional web references. You can remove the source download or checkout after
+copying it. The installed CLI and its external prerequisites are still required.
+No skill files need to be copied into target repositories.
+
+To update, obtain and review the skill directory from the desired revision, move
+your existing personal installation aside (preserving any local edits), and copy
+the complete new directory into its place using the commands above. Replace the
+directory rather than overlaying files, so removed resources do not linger.
+Restart Codex if the change does not appear. Update the installed CLI
+separately and keep it compatible with the installed skill's guidance; check
+`agent-team --help` and subcommand help before using new examples.
+
+For development, an optional symlink exposes edits from a retained checkout:
+after inspecting and moving aside any existing destination, run
+`ln -s "$PWD/skills/agent-team" "$HOME/.agents/skills/agent-team"` from that
+checkout's root. Only this development option requires retaining the checkout;
+if you move it, recreate the link. Review checkout updates before using them.
+
+From a Codex chat opened in another repository, invoke the personal skill, for
+example:
+
+```text
+$agent-team Identify this repository and show its registered project and status.
+$agent-team Prepare registration with this repository's documented validation commands.
+$agent-team Discover onboarding gaps for project example and open issues for triage; do not approve or implement them.
+```
+
+The installed `agent-team` command works across repositories; its project name
+and state directory select the target, not the chat's working directory. Use the
+same `AGENT_TEAM_HOME` or global `--home PATH` option across sessions if you use
+custom state. Without a package installation, run `python3 -m agent_team` from
+the Agent Team checkout, even when operating a different registered project.
+The skill follows each target's `AGENTS.md` and references the existing safety
+rules. Discovery and issue creation do not authorize implementation: explicit
+approval of current issue content is still required, and merging stays human.
+
 ## Register a project
 
 Registration stores configuration outside the target repository. It does not
