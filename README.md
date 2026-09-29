@@ -64,13 +64,15 @@ alongside the CLI. Committing the skill does **not** install it automatically;
 installing the Python package does not install it into your chat client either.
 It is operating guidance, not a plugin framework or MCP server.
 
-For a personal Codex installation, keep a trusted checkout of this repository
-and link its skill into your user skill directory. Run this from the Agent Team
-checkout root, after reviewing the skill:
+For a personal Codex installation, copy the complete `skills/agent-team`
+directory from a reviewed revision into your user skill directory. For example,
+run this from an unpacked source release or checkout root:
 
 ```sh
 mkdir -p "$HOME/.agents/skills"
-ln -s "$PWD/skills/agent-team" "$HOME/.agents/skills/agent-team"
+test ! -e "$HOME/.agents/skills/agent-team" && \
+  test ! -L "$HOME/.agents/skills/agent-team" && \
+  cp -R skills/agent-team "$HOME/.agents/skills/agent-team"
 ```
 
 If that destination already exists, inspect it before replacing it. OpenAI's
@@ -79,15 +81,24 @@ currently redirects to [Build skills](https://learn.chatgpt.com/docs/build-skill
 Its “Where Codex loads local skills” section documents `$HOME/.agents/skills`
 as the user location across repositories and explicitly supports symlinked skill
 folders (verified September 28, 2026).
-Keep the checkout available because the skill links to its maintained project
-documentation. No skill files need to be copied into target repositories.
+The copied directory is self-contained; its broader documentation links are
+optional web references. You can remove the source download or checkout after
+copying it. The installed CLI and its external prerequisites are still required.
+No skill files need to be copied into target repositories.
 
-To update, review and update that trusted checkout to the desired revision using
-your normal Git workflow. The symlink then exposes the updated skill and docs;
-restart Codex if the change does not appear. If you move the checkout, recreate
-the personal link to its new absolute location. Update the installed CLI
-separately and keep it compatible with the checkout's guidance; check
+To update, obtain and review the skill directory from the desired revision, move
+your existing personal installation aside (preserving any local edits), and copy
+the complete new directory into its place using the commands above. Replace the
+directory rather than overlaying files, so removed resources do not linger.
+Restart Codex if the change does not appear. Update the installed CLI
+separately and keep it compatible with the installed skill's guidance; check
 `agent-team --help` and subcommand help before using new examples.
+
+For development, an optional symlink exposes edits from a retained checkout:
+after inspecting and moving aside any existing destination, run
+`ln -s "$PWD/skills/agent-team" "$HOME/.agents/skills/agent-team"` from that
+checkout's root. Only this development option requires retaining the checkout;
+if you move it, recreate the link. Review checkout updates before using them.
 
 From a Codex chat opened in another repository, invoke the personal skill, for
 example:
