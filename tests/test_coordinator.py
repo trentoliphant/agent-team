@@ -446,6 +446,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(self.agents.summary, body)
         self.assertIn("does not authorize implementation", body)
 
+    def test_status_word_target_compacts_comments_without_dropping_required_facts(self):
+        run = self.tick(6)
+        self.assertEqual(run["stage"], "ready")
+        status, ready = self.github.comments[(1, run["id"])], self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertIn("author `codex` (openai)", status)  # built-in: no target, detailed
+        self.assertIn("configured local validation", ready)
+        self.store.save_writing({"status": {"words": 10}})
+        self.team.notify(self.project, run)
+        self.store.save(run, stage="ci")
+        self.tick()
+        compact_status = self.github.comments[(1, run["id"])]
+        compact_ready = self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertNotIn("author `codex`", compact_status)
+        self.assertNotIn("configured local validation", compact_ready)
+        self.assertLess(len(compact_status.split()), len(status.split()))
+        for text in ("Agent Team: ready", run["id"], "PR #7", run["sha"], "Only the maintainer decides whether to merge."):
+            self.assertIn(text, compact_status)
+        for text in (run["sha"], "independent review", "`test -f feature.txt` exit 0", "will not merge"):
+            self.assertIn(text, compact_ready)
+        self.project["writing"] = {"status": {"words": 0}}  # project override clears the personal target
+        self.store.save_project(self.project)
+        self.team.notify(self.project, self.store.get(run["id"]))
+        self.assertEqual(self.github.comments[(1, run["id"])], status)
+
+    def test_compact_status_keeps_waiting_notice(self):
+        self.store.save_writing({"status": {"words": 1}})
+        self.tick()
+        self.github.items[0]["labels"] = []
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        comment = self.github.comments[(1, run["id"])]
+        self.assertIn("Agent Team: blocked", comment)
+        self.assertIn("Waiting for local operator action", comment)
+        self.assertIn("Only the maintainer decides", comment)
+
     def test_invalid_writing_settings_block_before_agent_call(self):
         self.tick()
         self.project["writing"] = {"pr": {"words": -1}}
@@ -453,6 +488,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.tick()
         self.assertEqual(run["stage"], "blocked")
         self.assertEqual(self.agents.calls, [])
+        self.assertIn("Agent Team: blocked", self.github.comments[(1, run["id"])])
 
 
 class ContractTests(unittest.TestCase):

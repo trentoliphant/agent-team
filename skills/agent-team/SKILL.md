@@ -131,7 +131,8 @@ agent-team writing show --project example --kind issue
 The `prompt` field holds the text to follow. Project overrides take precedence
 over personal defaults, which take precedence over built-in defaults. Word
 targets are guidance: never drop findings, failures, evidence, verdicts, commit
-SHAs, or approval fingerprints to meet them. With the operator's authorization,
+SHAs, or approval fingerprints to meet them. Coordinator-published status
+comments follow only the `status` word target (compact or detailed form). With the operator's authorization,
 change standards with `agent-team writing set` or `agent-team writing unset`
 (add `--project example` for a project override; see `--help`). Writing settings
 govern wording only; they never grant approval or change execution policy.

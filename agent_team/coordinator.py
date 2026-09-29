@@ -55,6 +55,41 @@ def pr_body(run):
             "Agent Team never merges. Review evidence follows as commit-bound comments.")
 
 
+def fit(detailed, compact, words):
+    """Pick the detailed status text unless it exceeds the word target.
+    Both forms carry every required fact; the compact form is never cut further."""
+    return compact if words and len(detailed.split()) > words else detailed
+
+
+def status_comment(project, run, words=0):
+    facts = f"Run `{run['id']}`"
+    if run.get("pr"):
+        facts += f" · PR #{run['pr']} · commit `{run.get('sha')}`"
+    # Errors may include process output/paths, so keep raw details local.
+    action = ("Waiting for local operator action or subscription capacity; see coordinator status.\n\n"
+              if run["stage"] in {"blocked", "quota_wait", "stale"} else "")
+    safeguard = "Only the maintainer decides whether to merge."
+    detailed = (f"**Agent Team: {run['stage']}**\n\nRun `{run['id']}` · "
+                f"author `{run['author']}` ({FAMILIES[run['author']]}) · "
+                f"reviewer `{run['reviewer']}` ({FAMILIES[run['reviewer']]}) · "
+                f"revision {run['round']}/{project['max_revisions']}\n\n")
+    if run.get("pr"):
+        detailed += f"PR #{run['pr']} · commit `{run.get('sha')}`\n\n"
+    detailed += action + safeguard
+    compact = f"**Agent Team: {run['stage']}** · {facts}\n\n{action}{safeguard}"
+    return fit(detailed, compact, words)
+
+
+def ready_comment(run, words=0):
+    validation = f"Validation: {validation_text(run['tests'])}\n\n"
+    detailed = (f"**Ready for maintainer decision**\n\nCommit `{run['sha']}` passed the configured "
+                "local validation, observed GitHub checks, and independent review.\n\n"
+                f"{validation}The coordinator will not merge this PR.")
+    compact = (f"**Ready for maintainer decision**\n\nCommit `{run['sha']}` passed validation, "
+               f"checks, and independent review.\n\n{validation}The coordinator will not merge this PR.")
+    return fit(detailed, compact, words)
+
+
 class Coordinator:
     def __init__(self, store, github=None, agents=None):
         self.store = store
@@ -65,17 +100,16 @@ class Coordinator:
         policy, _ = effective(self.store.writing(), project.get("writing"))
         return guidance(policy, kind)
 
+    def status_words(self, project):
+        # Status must still publish when settings are invalid (they block the run elsewhere).
+        try:
+            policy, _ = effective(self.store.writing(), project.get("writing"))
+        except TeamError:
+            policy, _ = effective()
+        return policy["status"]["words"]
+
     def notify(self, project, run):
-        body = (f"**Agent Team: {run['stage']}**\n\nRun `{run['id']}` · "
-                f"author `{run['author']}` ({FAMILIES[run['author']]}) · "
-                f"reviewer `{run['reviewer']}` ({FAMILIES[run['reviewer']]}) · "
-                f"revision {run['round']}/{project['max_revisions']}\n\n")
-        if run.get("pr"):
-            body += f"PR #{run['pr']} · commit `{run.get('sha')}`\n\n"
-        # Errors may include process output/paths, so keep raw details local.
-        if run["stage"] in {"blocked", "quota_wait", "stale"}:
-            body += "Waiting for local operator action or subscription capacity; see coordinator status.\n\n"
-        body += "Only the maintainer decides whether to merge."
+        body = status_comment(project, run, self.status_words(project))
         self.github.comment(project["repo"], run["issue"], run["id"], body)
         self.store.save(run, notification_pending=False)
 
@@ -312,10 +346,7 @@ class Coordinator:
         if self.github.pr(project["repo"], run["pr"]).get("draft"):
             self.github.mark_ready(project["repo"], run["pr"])
         self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready",
-                            f"**Ready for maintainer decision**\n\nCommit `{run['sha']}` passed the configured "
-                            "local validation, observed GitHub checks, and independent review.\n\n"
-                            f"Validation: {validation_text(run['tests'])}\n\n"
-                            "The coordinator will not merge this PR.")
+                            ready_comment(run, self.status_words(project)))
         self.store.save(run, stage="ready")
 
     def discover(self, name, agent, focus):

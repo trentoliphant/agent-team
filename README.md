@@ -250,9 +250,19 @@ Setting instructions to `''` or words to `0` clears a lower-precedence value.
 configuration changes, `set` and `unset` need an idle worker lock.
 
 The coordinator adds the effective standard to discovery, implementation, and
-review prompts, after its fixed rules. Status comments come from fixed,
-concise coordinator templates. Chat-driven workflows can run `writing show --kind`
-before drafting GitHub text by hand; see the [skill](skills/agent-team/SKILL.md).
+review prompts, after its fixed rules. The coordinator writes status comments
+(issue progress and the PR's ready comment) from plain templates without a model.
+Those templates follow the effective `status` word target: when the detailed form
+is longer than the target, the coordinator publishes a compact form that leaves
+out agent and revision details. Both forms keep the stage, run ID, PR, commit,
+validation results, any waiting notice, and the no-merge statement. For example,
+`agent-team writing set --kind status --words 20` switches to compact status
+comments, and `agent-team writing set --project example --kind status --words 0`
+restores detailed ones for one project. The coordinator cannot interpret
+free-text instructions without a model, so shared and `status` instructions
+apply to chat-drafted status comments. Chat-driven workflows can run
+`writing show --kind` before drafting GitHub text by hand; see the
+[skill](skills/agent-team/SKILL.md).
 
 Standards affect wording only. Word targets are guidance: the coordinator never
 truncates agent text, and prompts say not to shorten findings, failures,
