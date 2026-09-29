@@ -219,6 +219,48 @@ agent-team project configure example --codex-model YOUR_MODEL --claude-model YOU
 Without explicit models, the adapters use the CLIs' defaults. An empty observed
 model list means the CLI did not expose the actual model; it is not guessed.
 
+## Writing standards
+
+Writing standards shape the GitHub text that agents generate. They cover four
+kinds of text: `issue` (discovered issues), `pr` (the author's summary and
+limitations in the PR description), `review` (review summary and findings), and
+`status` (status comments). Each kind has instructions and an optional word
+target. One shared instruction applies to all four.
+
+Precedence, highest first: **project override** (`--project NAME`), then
+**personal default** (stored in your state directory), then **built-in
+default**. Each value is resolved separately, so a project can override one
+review word target and keep your personal review instructions. The built-in
+default asks for plain language, concise text, and no repetition.
+
+```sh
+agent-team writing show                                   # effective defaults and their sources
+agent-team writing set --shared 'Plain language. No filler.'
+agent-team writing set --kind review --words 150
+agent-team writing set --project example --kind pr \
+  --instructions 'Lead with user-visible behavior.' --words 120
+agent-team writing set --project example --kind review --words 0   # no target for this project
+agent-team writing show --project example --kind pr               # includes the exact prompt text
+agent-team writing unset --project example --kind pr --field words
+agent-team writing unset --project example --all
+```
+
+Setting instructions to `''` or words to `0` clears a lower-precedence value.
+`unset` removes a setting so the next level applies again. Like other
+configuration changes, `set` and `unset` need an idle worker lock.
+
+The coordinator adds the effective standard to discovery, implementation, and
+review prompts, after its fixed rules. Status comments come from fixed,
+concise coordinator templates. Chat-driven workflows can run `writing show --kind`
+before drafting GitHub text by hand; see the [skill](skills/agent-team/SKILL.md).
+
+Standards affect wording only. Word targets are guidance: the coordinator never
+truncates agent text, and prompts say not to shorten findings, failures,
+evidence, verdicts, limitations, or commit identifiers to fit. Required report
+fields, commit SHAs, approval fingerprints, validation results, review
+independence, and all authorization and execution checks are enforced in code
+and cannot be changed through writing settings.
+
 ## Discover work
 
 ```sh

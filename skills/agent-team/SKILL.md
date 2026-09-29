@@ -119,6 +119,23 @@ run ID, stage, PR, validation/review evidence, and any blocker without claiming
 tests or reviews that have not completed. Ready means
 ready for the maintainer's decision; never merge or enable auto-merge.
 
+## Follow writing standards
+
+Before drafting GitHub text yourself (an issue, PR description, review, or status
+comment), read the effective standard for that kind and follow it:
+
+```sh
+agent-team writing show --project example --kind issue
+```
+
+The `prompt` field holds the text to follow. Project overrides take precedence
+over personal defaults, which take precedence over built-in defaults. Word
+targets are guidance: never drop findings, failures, evidence, verdicts, commit
+SHAs, or approval fingerprints to meet them. With the operator's authorization,
+change standards with `agent-team writing set` or `agent-team writing unset`
+(add `--project example` for a project override; see `--help`). Writing settings
+govern wording only; they never grant approval or change execution policy.
+
 ## Recover deliberately
 
 Inspect the run and its recorded error before selecting a recovery action. For

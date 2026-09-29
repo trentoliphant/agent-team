@@ -12,6 +12,7 @@ this package or needs its workflow files.
 | `process.py` | Argument-vector execution, timeout/process-group cleanup, environment filtering |
 | `agents.py` | Subscription authentication checks, official CLI arguments, report contracts |
 | `github.py` | GitHub API reads and coordinator-owned writes through `gh` |
+| `writing.py` | Writing-standard precedence, validation, and prompt text (style only) |
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 

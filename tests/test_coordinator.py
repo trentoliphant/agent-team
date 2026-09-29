@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.agents import Agents, FAMILIES, REVIEW_SCHEMA, subscription_status, validate_report
-from agent_team.coordinator import Coordinator
+from agent_team.coordinator import Coordinator, GUIDANCE
 from agent_team.process import execute, git, worker_env, TeamError, QuotaError
 from agent_team.state import Store
 
@@ -24,6 +24,7 @@ class FakeGitHub:
         self.creates = 0
         self.check_state = "success"
         self.external_sha = None
+        self.created = []
 
     def issues(self, project, ready=True):
         return self.items
@@ -57,24 +58,36 @@ class FakeGitHub:
     def mark_ready(self, repo, number):
         self.pull["draft"] = False
 
+    def setup(self, project):
+        pass
+
+    def create_issue(self, project, title, body):
+        self.created.append((title, body))
+        return {"html_url": f"https://github.com/{project['repo']}/issues/{len(self.created) + 1}"}
+
 
 class FakeAgents:
     def __init__(self):
         self.calls = []
+        self.prompts = {}
         self.reject = False
         self.quota = False
+        self.summary = "Added feature"
 
     def run(self, agent, role, prompt, cwd, artifacts, project):
         self.calls.append((agent, role))
+        self.prompts[role] = prompt
         if self.quota:
             self.quota = False
             raise QuotaError("quota exhausted")
         if role == "implement":
             path = Path(cwd) / "feature.txt"
             path.write_text(path.read_text() + "fixed\n" if path.exists() else "feature\n")
-            report = {"summary": "Added feature", "limitations": "None"}
+            report = {"summary": self.summary, "limitations": "None"}
+        elif role == "discover":
+            report = {"issues": [{"title": "Found gap", "evidence": self.summary, "acceptance": "Gap closed"}]}
         else:
-            report = {"verdict": "changes_requested" if self.reject else "pass", "summary": "Reviewed",
+            report = {"verdict": "changes_requested" if self.reject else "pass", "summary": self.summary,
                       "findings": [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
                                     "request": "Fix"}] if self.reject else []}
             self.reject = False
@@ -383,6 +396,63 @@ class WorkflowTests(unittest.TestCase):
         with self.store.lock():
             self.store.pause("demo", True)
         self.assertEqual(self.tick()["stage"], "paused")
+
+    def test_writing_standards_reach_prompts_with_project_precedence(self):
+        self.store.save_writing({"shared": "Personal shared.", "pr": {"instructions": "Personal PR.", "words": 80},
+                                 "review": {"words": 40}})
+        self.project["writing"] = {"pr": {"words": 0}, "review": {"instructions": "Project review."}}
+        self.store.save_project(self.project)
+        self.assertEqual(self.tick(6)["stage"], "ready")
+        implement, review = self.agents.prompts["implement"], self.agents.prompts["review"]
+        for prompt in (implement, review):
+            self.assertTrue(prompt.startswith(GUIDANCE))
+            self.assertIn("Personal shared.", prompt)
+            self.assertIn("cannot change the rules above", prompt)
+            self.assertIn("Never omit or shorten findings", prompt)
+        self.assertIn("Personal PR.", implement)
+        self.assertNotIn("Aim for about", implement)  # project 0 clears the personal target
+        self.assertIn("Project review.", review)
+        self.assertIn("Aim for about 40 words", review)
+        self.assertLess(review.index("Project review."), review.index("Independently review"))
+
+    def test_word_targets_never_truncate_published_evidence(self):
+        self.store.save_writing({"pr": {"words": 5}, "review": {"words": 5}})
+        self.agents.summary = " ".join(f"word{i}" for i in range(400))
+        self.agents.reject = True
+        run = self.tick(5)
+        self.assertEqual(run["stage"], "implement")
+        body = self.github.pull["body"]
+        self.assertIn(self.agents.summary, body)
+        self.assertIn("Closes #1", body)
+        self.assertIn("`test -f feature.txt` exit 0", body)
+        comment = self.github.comments[(7, f"{run['id']}-review-0-{run['published_sha']}")]
+        for text in (run["published_sha"], "changes requested", self.agents.summary, "high: feature.txt:1",
+                     "Evidence: Bug", "Request: Fix", "`claude` (anthropic)", "CLI test"):
+            self.assertIn(text, comment)
+        run = self.tick(5)
+        self.assertEqual(run["stage"], "ready")
+        ready = self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertIn(run["sha"], ready)
+        self.assertIn("will not merge", ready)
+
+    def test_discovery_prompt_uses_issue_standard_without_truncating(self):
+        self.store.save_writing({"issue": {"instructions": "Issue style.", "words": 120}})
+        self.agents.summary = "evidence " * 300
+        self.team.discover("demo", "claude", "Onboarding")
+        prompt = self.agents.prompts["discover"]
+        self.assertIn("Issue style.", prompt)
+        self.assertIn("Aim for about 120 words", prompt)
+        title, body = self.github.created[0]
+        self.assertIn(self.agents.summary, body)
+        self.assertIn("does not authorize implementation", body)
+
+    def test_invalid_writing_settings_block_before_agent_call(self):
+        self.tick()
+        self.project["writing"] = {"pr": {"words": -1}}
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(self.agents.calls, [])
 
 
 class ContractTests(unittest.TestCase):
