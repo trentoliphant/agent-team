@@ -57,6 +57,53 @@ limits still apply; parallel sessions share your account's capacity. Claude's
 `--bare` mode is deliberately avoided because it disables subscription login.
 See [authentication and execution boundaries](docs/security.md).
 
+## Use the skill from other repositories
+
+The canonical [Agent Team skill](skills/agent-team/SKILL.md) is maintained here
+alongside the CLI. Committing the skill does **not** install it automatically;
+installing the Python package does not install it into your chat client either.
+It is operating guidance, not a plugin framework or MCP server.
+
+For a personal Codex installation, keep a trusted checkout of this repository
+and link its skill into your user skill directory. Run this from the Agent Team
+checkout root, after reviewing the skill:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/agent-team" "$HOME/.agents/skills/agent-team"
+```
+
+If that destination already exists, inspect it before replacing it. Codex
+supports personal skills and symlinked skill folders; see the
+[official skill documentation](https://learn.chatgpt.com/docs/build-skills).
+Keep the checkout available because the skill links to its maintained project
+documentation. No skill files need to be copied into target repositories.
+
+To update, review and update that trusted checkout to the desired revision using
+your normal Git workflow. The symlink then exposes the updated skill and docs;
+restart Codex if the change does not appear. If you move the checkout, recreate
+the personal link to its new absolute location. Update the installed CLI
+separately and keep it compatible with the checkout's guidance; check
+`agent-team --help` and subcommand help before using new examples.
+
+From a Codex chat opened in another repository, invoke the personal skill, for
+example:
+
+```text
+$agent-team Identify this repository and show its registered project and status.
+$agent-team Prepare registration with this repository's documented validation commands.
+$agent-team Discover onboarding gaps for project example and open issues for triage; do not approve or implement them.
+```
+
+The installed `agent-team` command works across repositories; its project name
+and state directory select the target, not the chat's working directory. Use the
+same `AGENT_TEAM_HOME` or global `--home PATH` option across sessions if you use
+custom state. Without a package installation, run `python3 -m agent_team` from
+the Agent Team checkout, even when operating a different registered project.
+The skill follows each target's `AGENTS.md` and references the existing safety
+rules. Discovery and issue creation do not authorize implementation: explicit
+approval of current issue content is still required, and merging stays human.
+
 ## Register a project
 
 Registration stores configuration outside the target repository. It does not
