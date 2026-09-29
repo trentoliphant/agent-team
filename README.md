@@ -73,9 +73,12 @@ mkdir -p "$HOME/.agents/skills"
 ln -s "$PWD/skills/agent-team" "$HOME/.agents/skills/agent-team"
 ```
 
-If that destination already exists, inspect it before replacing it. Codex
-supports personal skills and symlinked skill folders; see the
-[official skill documentation](https://learn.chatgpt.com/docs/build-skills).
+If that destination already exists, inspect it before replacing it. OpenAI's
+[Codex skills documentation](https://developers.openai.com/codex/skills)
+currently redirects to [Build skills](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills).
+Its “Where Codex loads local skills” section documents `$HOME/.agents/skills`
+as the user location across repositories and explicitly supports symlinked skill
+folders (verified September 28, 2026).
 Keep the checkout available because the skill links to its maintained project
 documentation. No skill files need to be copied into target repositories.
 
