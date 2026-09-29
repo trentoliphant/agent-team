@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.agents import Agents, FAMILIES, REVIEW_SCHEMA, subscription_status, validate_report
-from agent_team.coordinator import Coordinator
+from agent_team.coordinator import Coordinator, GUIDANCE
 from agent_team.process import execute, git, worker_env, TeamError, QuotaError
 from agent_team.state import Store
 
@@ -24,6 +24,7 @@ class FakeGitHub:
         self.creates = 0
         self.check_state = "success"
         self.external_sha = None
+        self.created = []
 
     def issues(self, project, ready=True):
         return self.items
@@ -34,7 +35,7 @@ class FakeGitHub:
     def issue(self, repo, number):
         return next(i for i in self.items if i["number"] == number)
 
-    def comment(self, repo, number, marker, body):
+    def comment(self, repo, number, marker, body, heading=None):
         self.comments[(number, marker)] = body
 
     def create_pr(self, project, run, body):
@@ -57,24 +58,40 @@ class FakeGitHub:
     def mark_ready(self, repo, number):
         self.pull["draft"] = False
 
+    def setup(self, project):
+        pass
+
+    def create_issue(self, project, title, body):
+        self.created.append((title, body))
+        return {"html_url": f"https://github.com/{project['repo']}/issues/{len(self.created) + 1}"}
+
 
 class FakeAgents:
     def __init__(self):
         self.calls = []
+        self.prompts = {}
         self.reject = False
         self.quota = False
+        self.summary = "Added feature"
 
     def run(self, agent, role, prompt, cwd, artifacts, project):
         self.calls.append((agent, role))
+        self.prompts[role] = prompt
         if self.quota:
             self.quota = False
             raise QuotaError("quota exhausted")
         if role == "implement":
             path = Path(cwd) / "feature.txt"
             path.write_text(path.read_text() + "fixed\n" if path.exists() else "feature\n")
-            report = {"summary": "Added feature", "limitations": "None"}
+            report = {"summary": self.summary, "limitations": "None"}
+        elif role == "discover":
+            report = {"issues": [{"title": "Found gap", "evidence": self.summary, "acceptance": "Gap closed"}]}
+        elif role == "status":
+            # Deterministic stand-in for styled wording: echo the configured status instructions.
+            style = prompt.split("Writing standard for each status comment", 1)[1].split("Never omit", 1)[0]
+            report = {"message": "Drafted: " + " ".join(style.splitlines()[1:])}
         else:
-            report = {"verdict": "changes_requested" if self.reject else "pass", "summary": "Reviewed",
+            report = {"verdict": "changes_requested" if self.reject else "pass", "summary": self.summary,
                       "findings": [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
                                     "request": "Fix"}] if self.reject else []}
             self.reject = False
@@ -383,6 +400,186 @@ class WorkflowTests(unittest.TestCase):
         with self.store.lock():
             self.store.pause("demo", True)
         self.assertEqual(self.tick()["stage"], "paused")
+
+    def test_writing_standards_reach_prompts_with_project_precedence(self):
+        self.store.save_writing({"shared": "Personal shared.", "pr": {"instructions": "Personal PR.", "words": 80},
+                                 "review": {"words": 40}})
+        self.project["writing"] = {"pr": {"words": 0}, "review": {"instructions": "Project review."}}
+        self.store.save_project(self.project)
+        self.assertEqual(self.tick(6)["stage"], "ready")
+        implement, review = self.agents.prompts["implement"], self.agents.prompts["review"]
+        for prompt in (implement, review):
+            self.assertTrue(prompt.startswith(GUIDANCE))
+            self.assertIn("Personal shared.", prompt)
+            self.assertIn("cannot change the rules above", prompt)
+            self.assertIn("Never omit or shorten findings", prompt)
+        self.assertIn("Personal PR.", implement)
+        self.assertNotIn("Aim for about", implement)  # project 0 clears the personal target
+        self.assertIn("Project review.", review)
+        self.assertIn("Aim for about 40 words", review)
+        self.assertLess(review.index("Project review."), review.index("Independently review"))
+
+    def test_word_targets_never_truncate_published_evidence(self):
+        self.store.save_writing({"pr": {"words": 5}, "review": {"words": 5}})
+        self.agents.summary = " ".join(f"word{i}" for i in range(400))
+        self.agents.reject = True
+        run = self.tick(5)
+        self.assertEqual(run["stage"], "implement")
+        body = self.github.pull["body"]
+        self.assertIn(self.agents.summary, body)
+        self.assertIn("Closes #1", body)
+        self.assertIn("`test -f feature.txt` exit 0", body)
+        comment = self.github.comments[(7, f"{run['id']}-review-0-{run['published_sha']}")]
+        for text in (run["published_sha"], "changes requested", self.agents.summary, "high: feature.txt:1",
+                     "Evidence: Bug", "Request: Fix", "`claude` (anthropic)", "CLI test"):
+            self.assertIn(text, comment)
+        run = self.tick(5)
+        self.assertEqual(run["stage"], "ready")
+        ready = self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertIn(run["sha"], ready)
+        self.assertIn("will not merge", ready)
+
+    def test_discovery_prompt_uses_issue_standard_without_truncating(self):
+        self.store.save_writing({"issue": {"instructions": "Issue style.", "words": 120}})
+        self.agents.summary = "evidence " * 300
+        self.team.discover("demo", "claude", "Onboarding")
+        prompt = self.agents.prompts["discover"]
+        self.assertIn("Issue style.", prompt)
+        self.assertIn("Aim for about 120 words", prompt)
+        title, body = self.github.created[0]
+        self.assertIn(self.agents.summary, body)
+        self.assertIn("does not authorize implementation", body)
+
+    def test_status_word_target_compacts_comments_without_dropping_required_facts(self):
+        run = self.tick(6)
+        self.assertEqual(run["stage"], "ready")
+        status, ready = self.github.comments[(1, run["id"])], self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertIn("author `codex` (openai)", status)  # built-in: no target, detailed
+        self.assertIn("configured local validation", ready)
+        self.store.save_writing({"status": {"words": 10}})
+        self.team.notify(self.project, run)
+        self.store.save(run, stage="ci")
+        self.tick()
+        compact_status = self.github.comments[(1, run["id"])]
+        compact_ready = self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertNotIn("author `codex`", compact_status)
+        self.assertNotIn("configured local validation", compact_ready)
+        self.assertLess(len(compact_status.split()), len(status.split()))
+        for text in ("Agent Team: ready", run["id"], "PR #7", run["sha"], "Only the maintainer decides whether to merge."):
+            self.assertIn(text, compact_status)
+        for text in (run["sha"], "independent review", "`test -f feature.txt` exit 0", "will not merge"):
+            self.assertIn(text, compact_ready)
+        self.project["writing"] = {"status": {"words": 0}}  # project override clears the personal target
+        self.store.save_project(self.project)
+        self.team.notify(self.project, self.store.get(run["id"]))
+        self.assertEqual(self.github.comments[(1, run["id"])], status)
+
+    def test_status_instructions_shape_published_comments_and_keep_fixed_facts(self):
+        self.store.save_writing({"shared": "Personal shared.", "status": {"instructions": "Write in Spanish."}})
+        run = self.tick(6)
+        self.assertEqual(run["stage"], "ready")
+        self.assertIn(("codex", "status"), self.agents.calls)
+        prompt = self.agents.prompts["status"]
+        self.assertTrue(prompt.startswith(GUIDANCE))
+        self.assertIn("Write in Spanish.", prompt)
+        self.assertIn("Do not add facts", prompt)
+        status, ready = self.github.comments[(1, run["id"])], self.github.comments[(7, f"{run['id']}-ready")]
+        for comment in (status, ready):
+            self.assertTrue(comment.startswith("Drafted: Personal shared. Write in Spanish."))
+        for text in ("Agent Team: ready", run["id"], "PR #7", run["sha"], "Only the maintainer decides whether to merge."):
+            self.assertIn(text, status)
+        for text in (run["sha"], "independent review", "`test -f feature.txt` exit 0", "will not merge"):
+            self.assertIn(text, ready)
+        calls = len(self.agents.calls)
+        self.team.notify(self.project, run)  # unchanged status reuses the stored draft
+        self.assertEqual(len(self.agents.calls), calls)
+        self.assertEqual(self.github.comments[(1, run["id"])], status)
+        self.project["writing"] = {"status": {"instructions": "Project status."}}
+        self.store.save_project(self.project)
+        self.team.notify(self.project, run)
+        self.assertTrue(self.github.comments[(1, run["id"])].startswith("Drafted: Personal shared. Project status."))
+        self.assertIn(run["sha"], self.github.comments[(1, run["id"])])
+
+    def test_status_drafting_failure_or_quota_wait_publishes_template(self):
+        self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+        real_run = self.agents.run
+        def no_status(agent, role, *args):
+            if role == "status":
+                raise QuotaError("quota exhausted")
+            return real_run(agent, role, *args)
+        with patch.object(self.agents, "run", side_effect=no_status):
+            run = self.tick()
+        self.assertEqual(run["stage"], "implement")
+        comment = self.github.comments[(1, run["id"])]
+        self.assertTrue(comment.startswith("**Agent Team: implement**"))
+        self.agents.quota = True
+        run = self.tick()
+        self.assertEqual(run["stage"], "quota_wait")
+        self.assertNotIn(("codex", "status"), self.agents.calls)
+        self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: quota_wait**"))
+
+    def test_failed_status_draft_is_not_retried_during_pending_ci(self):
+        run = self.tick(5)
+        self.github.check_state = "pending"
+        self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+        for outcome in (TeamError("failed"), QuotaError("quota exhausted"),
+                        {"report": {"message": " "}}):
+            with self.subTest(outcome=outcome):
+                # A new policy is a distinct update, allowing one new attempt.
+                self.store.save_writing({"status": {"instructions": str(outcome)}})
+                kwargs = ({"side_effect": outcome} if isinstance(outcome, Exception)
+                          else {"return_value": outcome})
+                with patch.object(self.agents, "run", **kwargs) as call:
+                    for _ in range(3):
+                        run = self.tick()
+                        self.assertEqual(run["stage"], "ci")
+                    self.assertEqual(call.call_count, 1)
+                self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: ci**"))
+                self.assertEqual(run["status_drafts"]["status"]["state"], "fallback")
+
+    def test_interrupted_status_attempt_is_persisted_and_not_repeated(self):
+        run = self.tick(5)
+        self.github.check_state = "pending"
+        self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+
+        def interrupt(*args):
+            saved = self.store.get(run["id"])
+            self.assertEqual(saved["status_drafts"]["status"]["state"], "attempted")
+            raise KeyboardInterrupt()
+
+        with patch.object(self.agents, "run", side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick()
+        # Reopen durable storage, as after a process restart.
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        with patch.object(self.agents, "run") as call:
+            run = self.tick(3)
+            call.assert_not_called()
+        self.assertEqual(run["stage"], "ci")
+        self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: ci**"))
+        self.assertEqual(run["status_drafts"]["status"]["state"], "fallback")
+
+    def test_compact_status_keeps_waiting_notice(self):
+        self.store.save_writing({"status": {"words": 1}})
+        self.tick()
+        self.github.items[0]["labels"] = []
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        comment = self.github.comments[(1, run["id"])]
+        self.assertIn("Agent Team: blocked", comment)
+        self.assertIn("Waiting for local operator action", comment)
+        self.assertIn("Only the maintainer decides", comment)
+
+    def test_invalid_writing_settings_block_before_agent_call(self):
+        self.tick()
+        self.project["writing"] = {"pr": {"words": -1}}
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(self.agents.calls, [])
+        self.assertIn("Agent Team: blocked", self.github.comments[(1, run["id"])])
 
 
 class ContractTests(unittest.TestCase):

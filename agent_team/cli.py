@@ -13,6 +13,8 @@ from .coordinator import Coordinator
 from .github import GitHub
 from .process import TeamError, execute
 from .state import Store, default_home
+from . import writing
+from .writing import KINDS
 
 
 def parser():
@@ -45,6 +47,23 @@ def parser():
     configure.add_argument("--max-quota-retries", type=int)
     configure.add_argument("--codex-model")
     configure.add_argument("--claude-model")
+    writing = commands.add_parser("writing", help="Writing standards for generated GitHub text").add_subparsers(
+        dest="writing_command", required=True)
+    show = writing.add_parser("show", help="Show the effective standard and the source of each value")
+    show.add_argument("--project", help="Include this project's overrides")
+    show.add_argument("--kind", choices=list(KINDS), help="Also print the prompt text for this kind")
+    change = writing.add_parser("set", help="Set personal defaults, or project overrides with --project")
+    change.add_argument("--project")
+    change.add_argument("--shared", help="Instructions for every kind")
+    change.add_argument("--kind", choices=list(KINDS))
+    change.add_argument("--instructions", help="Instructions for --kind")
+    change.add_argument("--words", type=int, help="Approximate word target for --kind; 0 means no target")
+    unset = writing.add_parser("unset", help="Remove settings so lower-precedence values apply")
+    unset.add_argument("--project")
+    unset.add_argument("--shared", action="store_true")
+    unset.add_argument("--kind", choices=list(KINDS))
+    unset.add_argument("--field", choices=["instructions", "words"], help="Only this field of --kind")
+    unset.add_argument("--all", action="store_true", help="Every setting at this level")
     run = commands.add_parser("run", help="Advance one stage, or poll with --watch")
     run.add_argument("project")
     run.add_argument("--watch", action="store_true")
@@ -128,6 +147,26 @@ def dispatch(args, store):
                         project[key] = value
                 store.save_project(project)
             emit(project)
+    elif args.command == "writing":
+        project = store.project(args.project) if args.project else None
+        if args.writing_command == "set":
+            changed = writing.update(project.get("writing") if project else store.writing(),
+                                     args.shared, args.kind, args.instructions, args.words)
+        elif args.writing_command == "unset":
+            changed = writing.remove(project.get("writing") if project else store.writing(),
+                                     args.shared, args.kind, args.field, args.all)
+        if args.writing_command != "show":
+            if project:
+                project["writing"] = changed
+                store.save_project(project)
+            else:
+                store.save_writing(changed)
+        policy, sources = writing.effective(store.writing(), project.get("writing") if project else None)
+        result = {"project": args.project, "precedence": writing.PRECEDENCE,
+                  "effective": policy, "sources": sources}
+        if args.writing_command == "show" and args.kind:
+            result["prompt"] = writing.guidance(policy, args.kind)
+        emit(result)
     elif args.command == "approve":
         emit(github.approve(store.project(args.project), args.issue))
     elif args.command == "run":
@@ -177,7 +216,8 @@ def main(argv=None):
     store = Store(args.home)
     try:
         if (args.command in {"run", "status", "inspect", "doctor", "smoke", "init"} or
-                (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"})):
+                (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"}) or
+                (args.command == "writing" and args.writing_command == "show")):
             code = dispatch(args, store)
         else:
             with store.lock():

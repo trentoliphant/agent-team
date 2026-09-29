@@ -95,6 +95,15 @@ class Store:
         self.save_project(project)
         return project
 
+    def writing(self):
+        """Personal writing defaults for every project in this state directory."""
+        row = self.db.execute("SELECT value FROM meta WHERE key='writing'").fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def save_writing(self, layer):
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('writing', ?)", (json.dumps(layer),))
+        self.db.commit()
+
     def runs(self, project=None):
         rows = self.db.execute("SELECT data FROM runs" + (" WHERE project=?" if project else ""),
                                (project,) if project else ())
