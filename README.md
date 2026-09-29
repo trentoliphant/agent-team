@@ -204,7 +204,38 @@ agent-team project configure example --max-quota-retries 3
 An unresolved blocked/quota run stops new assignments for that project. Ready
 and stale PRs do not stop new assignments. A changed PR head/base becomes stale
 and requires `refresh`; `resume` cannot reuse its old evidence.
-Selection is oldest eligible issue first.
+Explicit selection overrides the saved order for one invocation:
+
+```sh
+agent-team run example --issue 9
+agent-team run example --issue 9 --watch
+agent-team queue set example '7, 9, 10, 8, 2'
+agent-team queue show example
+agent-team queue reorder example '9, 7, 10, 8, 2'
+agent-team queue clear example
+```
+
+`set` replaces the saved per-project order; `reorder` requires the same entries.
+Both reject duplicates and nonpositive numbers. Order persists in the state
+registry across restarts. These commands do not change labels or approvals.
+`show` reports the effective intake queue, each entry's eligibility reason,
+active runs, recovery runs, and pause state. Missing or closed issues are
+reported together because neither appears in the open-issue listing. They remain
+saved and are skipped, as are unapproved issues, issues without the ready label,
+and issues with existing runs (including completed runs).
+
+Without explicit selection, eligible listed issues come first, then unlisted
+approved ready issues oldest-first. Clearing the order restores oldest-first.
+Explicit selection requires an open issue with current approval and the ready
+label. Invalid selections fail without choosing another issue or changing the
+saved order. An eligible existing run continues without duplication; completed
+runs cannot restart. Another issue's active work or blocked/quota recovery
+prevents targeted execution. Saved ordering applies to new assignments and never
+preempts an active run or bypasses recovery.
+
+Targeted watch advances only the selected issue and stops at readiness, pause,
+completion, or operator attention. Automatic bounded quota waits keep polling.
+Untargeted watch can advance other issues in saved order.
 The author rotation is global to this state directory and persists across restarts.
 Two processes sharing the same directory cannot execute stages concurrently.
 Use **one coordinator state directory per set of repositories**; separate hosts
