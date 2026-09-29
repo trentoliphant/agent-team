@@ -14,10 +14,14 @@ class AdapterTests(unittest.TestCase):
     def call(self, agent, payload, *, exit_code=0, stderr="", role="review"):
         self.commands = []
         self.environments = []
-        report = {"verdict": "pass", "summary": "ok", "findings": []}
+        self.workspaces = []
+        report = ({"message": "Status"} if role == "status" else
+                  {"verdict": "pass", "summary": "ok", "findings": []})
 
         def fake_execute(args, **kwargs):
             self.commands.append(args)
+            self.workspaces.append((kwargs["cwd"], Path(kwargs["cwd"]).exists(),
+                                    (Path(kwargs["cwd"]) / ".git").exists()))
             self.environments.append(kwargs.get("env", {}))
             if args[0] == "codex":
                 Path(args[args.index("-o") + 1]).write_text(json.dumps(report))
@@ -35,6 +39,16 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertEqual(result["family"], "openai")
+
+    def test_codex_status_runs_read_only_outside_git(self):
+        result = self.call("codex", {"type": "turn.completed"}, role="status")
+        command = self.commands[-1]
+        self.assertIn("--skip-git-repo-check", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertEqual(self.workspaces[-1][1:], (True, False))
+        self.assertEqual(result["report"], {"message": "Status"})
+        self.call("codex", {"type": "turn.completed"})
+        self.assertNotIn("--skip-git-repo-check", self.commands[-1])
 
     def test_codex_failed_event_even_with_zero_exit_is_rejected(self):
         with self.assertRaises(TeamError):

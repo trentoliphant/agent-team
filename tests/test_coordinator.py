@@ -518,6 +518,49 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn(("codex", "status"), self.agents.calls)
         self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: quota_wait**"))
 
+    def test_failed_status_draft_is_not_retried_during_pending_ci(self):
+        run = self.tick(5)
+        self.github.check_state = "pending"
+        self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+        for outcome in (TeamError("failed"), QuotaError("quota exhausted"),
+                        {"report": {"message": " "}}):
+            with self.subTest(outcome=outcome):
+                # A new policy is a distinct update, allowing one new attempt.
+                self.store.save_writing({"status": {"instructions": str(outcome)}})
+                kwargs = ({"side_effect": outcome} if isinstance(outcome, Exception)
+                          else {"return_value": outcome})
+                with patch.object(self.agents, "run", **kwargs) as call:
+                    for _ in range(3):
+                        run = self.tick()
+                        self.assertEqual(run["stage"], "ci")
+                    self.assertEqual(call.call_count, 1)
+                self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: ci**"))
+                self.assertEqual(run["status_drafts"]["status"]["state"], "fallback")
+
+    def test_interrupted_status_attempt_is_persisted_and_not_repeated(self):
+        run = self.tick(5)
+        self.github.check_state = "pending"
+        self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+
+        def interrupt(*args):
+            saved = self.store.get(run["id"])
+            self.assertEqual(saved["status_drafts"]["status"]["state"], "attempted")
+            raise KeyboardInterrupt()
+
+        with patch.object(self.agents, "run", side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick()
+        # Reopen durable storage, as after a process restart.
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        with patch.object(self.agents, "run") as call:
+            run = self.tick(3)
+            call.assert_not_called()
+        self.assertEqual(run["stage"], "ci")
+        self.assertTrue(self.github.comments[(1, run["id"])].startswith("**Agent Team: ci**"))
+        self.assertEqual(run["status_drafts"]["status"]["state"], "fallback")
+
     def test_compact_status_keeps_waiting_notice(self):
         self.store.save_writing({"status": {"words": 1}})
         self.tick()

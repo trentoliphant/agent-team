@@ -133,23 +133,32 @@ class Coordinator:
         key = hashlib.sha256(json.dumps([kind, detailed, style]).encode()).hexdigest()
         cached = run.get("status_drafts", {}).get(kind)
         if cached and cached["key"] == key:
-            return drafted(cached["message"], compact)
+            if cached.get("message"):
+                return drafted(cached["message"], compact)
+            # An interrupted attempt is consumed, just like a failed attempt.
+            if cached.get("state") == "attempted":
+                self.store.save(run, status_drafts={**run["status_drafts"],
+                                                   kind: {"key": key, "state": "fallback"}})
+            return template
         prompt = (GUIDANCE + style +
                   "\nRewrite the status update below for GitHub readers. Return only the message. "
                   "Do not add facts, claims, or promises. The coordinator publishes the fixed facts "
                   "and safeguards verbatim after your message.\n\nStatus update:\n" + detailed)
         artifacts = self.store.artifacts(run) / f"status-{time.time_ns()}"
+        # Commit before launching: a crash or interruption must not silently repeat
+        # a subscription call. Status wording has one attempt per update, no retries.
+        self.store.save(run, status_drafts={**run.get("status_drafts", {}),
+                                           kind: {"key": key, "state": "attempted"}})
         try:
             record = self.agents.run(run["author"], "status", prompt, artifacts, artifacts, project)
             message = record["report"]["message"].strip()
         except (TeamError, OSError, ValueError, KeyError, TypeError, AttributeError):
-            # Status is best-effort wording; failures fall back to the template, never block.
-            return template
-        if not message:
-            return template
-        self.store.save(run, status_drafts={**run.get("status_drafts", {}),
-                                            kind: {"key": key, "message": message}})
-        return drafted(message, compact)
+            # Includes quota exhaustion: do not retry optional wording on each tick.
+            message = ""
+        outcome = {"key": key, "state": "complete", "message": message} if message else {
+            "key": key, "state": "fallback"}
+        self.store.save(run, status_drafts={**run.get("status_drafts", {}), kind: outcome})
+        return drafted(message, compact) if message else template
 
     def notify(self, project, run):
         body = self.status_text(project, run, "status", status_forms(project, run))

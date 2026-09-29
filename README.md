@@ -268,8 +268,10 @@ ready comments. The coordinator publishes the agent's wording first, then the
 compact template's facts and safeguards unchanged. Each rewrite is an extra
 subscription call, made once per distinct update and reused on later ticks. The
 agent sees only the template text, never issue text or raw errors. If the call
-fails, or the run is waiting for subscription capacity, the coordinator
-publishes the template. Built-in instructions need no model call. Chat-driven
+fails, returns empty text, or is interrupted, the coordinator persists and reuses
+its template fallback for that update instead of retrying. Attempts are recorded
+before calling the agent. No draft is attempted while waiting for subscription
+capacity. Built-in instructions need no model call. Chat-driven
 workflows can run `writing show --kind` before drafting GitHub text by hand; see
 the [skill](skills/agent-team/SKILL.md).
 

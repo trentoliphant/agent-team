@@ -98,6 +98,8 @@ class Agents:
                     "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"',
                     "--sandbox", "workspace-write" if role == "implement" else "read-only",
                     "--output-schema", str(schema_file), "-o", str(output_file)]
+            if role == "status":
+                args += ["--skip-git-repo-check"]
             if model:
                 args += ["--model", model]
             args += ["-"]
