@@ -28,7 +28,7 @@ class CompanionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         lib = self.source("lib")
-        self.lib_v1 = commit(lib, {"lib.txt": "v1\n"})
+        self.lib_v1 = commit(lib, {"lib.txt": "v1\n", ".gitignore": "build/\n"})
         self.lib_v2 = commit(lib, {"lib.txt": "v2\n"})
         self.published = {"example/lib": self.bare(lib, "lib")}
         self.store = Store(self.root / "state")
@@ -201,6 +201,13 @@ class CompanionTests(unittest.TestCase):
     def test_validation_cannot_change_companions(self):
         for name, command in (("contents", "echo changed > ../lib/lib.txt"),
                               ("added file", "echo extra > ../lib/extra.txt"),
+                              ("assume-unchanged edit", "git -C ../lib update-index --assume-unchanged lib.txt"
+                                                        " && echo changed > ../lib/lib.txt"),
+                              ("skip-worktree edit", "git -C ../lib update-index --skip-worktree lib.txt"
+                                                     " && echo changed > ../lib/lib.txt"),
+                              ("ignored artifact", "mkdir ../lib/build && echo dep > ../lib/build/dep.txt"),
+                              ("self-ignored directory", "mkdir ../lib/vendor && printf '*\\n' > ../lib/vendor/.gitignore"
+                                                         " && echo dep > ../lib/vendor/dep.txt"),
                               ("HEAD", "git -C ../lib checkout -q --detach HEAD~1"),
                               ("configuration", "git -C ../lib config user.name Mallory"),
                               ("failing command", "echo changed > ../lib/lib.txt; false")):
@@ -215,22 +222,53 @@ class CompanionTests(unittest.TestCase):
                 self.assertEqual(run.get("revision_history", []), [])
                 self.assertEqual(self.github.creates, 0)
 
+    @staticmethod
+    def hide_edit(lib):
+        git(lib, "update-index", "--assume-unchanged", "lib.txt")
+        (lib / "lib.txt").write_text("changed\n")
+
+    @staticmethod
+    def add_ignored(lib):
+        (lib / "build").mkdir()
+        (lib / "build" / "dep.txt").write_text("dep\n")
+
     def test_review_cannot_change_companions(self):
-        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
-        self.assertEqual(self.tick(4)["stage"], "review")
-        original = self.agents.run
+        for name, mutate in (("contents", lambda lib: (lib / "lib.txt").write_text("changed\n")),
+                             ("assume-unchanged edit", self.hide_edit),
+                             ("ignored artifact", self.add_ignored)):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+                self.assertEqual(self.tick(4)["stage"], "review")
+                original = self.agents.run
 
-        def mutating(agent, role, prompt, cwd, artifacts, project):
-            if role == "review":
-                (Path(cwd).parent / "lib" / "lib.txt").write_text("changed\n")
-            return original(agent, role, prompt, cwd, artifacts, project)
+                def mutating(agent, role, prompt, cwd, artifacts, project):
+                    if role == "review":
+                        mutate(Path(cwd).parent / "lib")
+                    return original(agent, role, prompt, cwd, artifacts, project)
 
-        with patch.object(self.agents, "run", side_effect=mutating):
-            run = self.tick()
-        self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "review"))
-        self.assertIn("Companion example/lib changed", run["error"])
-        self.assertIsNone(run.get("review_record"))
-        self.assertFalse([m for _, m in self.github.comments if "-review-" in m])
+                with patch.object(self.agents, "run", side_effect=mutating):
+                    run = self.tick()
+                self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "review"))
+                self.assertIn("Companion example/lib changed", run["error"])
+                self.assertIsNone(run.get("review_record"))
+                self.assertFalse([m for _, m in self.github.comments if "-review-" in m])
+
+    def test_verify_does_not_trust_git_status(self):
+        pins = [{"repo": "example/lib", "rev": self.lib_v1}]
+        for name, mutate in (("assume-unchanged edit", self.hide_edit), ("ignored artifact", self.add_ignored)):
+            with self.subTest(name):
+                root = self.root / name.replace(" ", "-")
+                root.mkdir()
+                baselines = companions.populate(root, pins, 60)
+                companions.verify(root, pins, baselines)
+                mutate(root / "lib")
+                # Git reports a clean pinned checkout, yet the files differ from the pin.
+                self.assertEqual(git(root / "lib", "status", "--porcelain"), "")
+                self.assertEqual(git(root / "lib", "rev-parse", "HEAD"), self.lib_v1)
+                with self.assertRaisesRegex(TeamError, "Companion example/lib changed"):
+                    companions.verify(root, pins, baselines)
 
     def interrupt_review(self, reject, max_revisions=None):
         """A verdict with the v1 pin is saved, then the process stops before it is recorded."""

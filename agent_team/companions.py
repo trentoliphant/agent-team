@@ -6,8 +6,10 @@ only. Checkouts keep each repository's basename as siblings, so relative paths s
 `../companion` resolve the same way in author, validation, and review workspaces."""
 import hashlib
 import json
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
 import re
+import stat
 
 from .process import TeamError, assert_metadata, execute, git, metadata, worker_env
 
@@ -112,9 +114,40 @@ def clone(repo, destination, timeout):
             timeout=timeout, env=worker_env())
 
 
+def snapshot(checkout):
+    """Every path in the working tree outside `.git`, read from the filesystem rather than
+    through Git, so index flags such as assume-unchanged or skip-worktree and ignore rules
+    cannot hide an edited or added file."""
+    entries = {}
+    for directory, dirs, files in os.walk(checkout):
+        base = Path(directory)
+        if base == checkout:
+            dirs[:] = [d for d in dirs if d != ".git"]
+            files = [f for f in files if f != ".git"]
+        for name in dirs + files:
+            path = base / name
+            rel = path.relative_to(checkout).as_posix()
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                entries[rel] = ["link", os.readlink(path)]
+            elif stat.S_ISDIR(info.st_mode):
+                entries[rel] = ["dir"]
+            elif stat.S_ISREG(info.st_mode):
+                content = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for block in iter(lambda: handle.read(1 << 20), b""):
+                        content.update(block)
+                entries[rel] = ["file", bool(info.st_mode & 0o111), content.hexdigest()]
+            else:
+                entries[rel] = ["other", stat.S_IFMT(info.st_mode)]
+    # os.walk does not follow symlinked directories; they are recorded as links above.
+    return entries
+
+
 def populate(root, pins, timeout):
     """Fresh sibling checkouts of each companion at its pin, under `root`. Returns each
-    checkout's Git metadata so `verify` can check it before running Git there again."""
+    checkout's Git metadata and working-tree contents so `verify` can check them before
+    running Git there again."""
     baselines = {}
     for pin in pins:
         destination = root / basename(pin["repo"])
@@ -125,25 +158,30 @@ def populate(root, pins, timeout):
             git(destination, "-c", "advice.detachedHead=false", "checkout", "--detach", pin["rev"])
         except TeamError:
             raise TeamError(f"Companion {pin['repo']} revision {pin['rev']} is not published") from None
-        if git(destination, "rev-parse", "HEAD") != pin["rev"]:
+        # A fresh checkout with an untouched index, so a clean status means the files are the pin's.
+        if git(destination, "rev-parse", "HEAD") != pin["rev"] or git(destination, "status", "--porcelain"):
             raise TeamError(f"Companion {pin['repo']} checkout does not match pin {pin['rev']}")
-        baselines[pin["repo"]] = metadata(destination)
+        baselines[pin["repo"]] = {"git": metadata(destination), "files": snapshot(destination)}
     return baselines
 
 
 def verify(root, pins, baselines):
     """Refuse evidence from companion checkouts that no longer match their pins: replaced
-    directories, changed Git configuration, a moved HEAD, or changed or added files.
-    Configuration is checked before Git runs in a checkout that commands could edit."""
+    directories, changed Git configuration, a moved HEAD, or changed, hidden, ignored, or
+    added files. Contents are compared with the snapshot taken at checkout, not with Git's
+    view, which index flags and ignore rules can change. Configuration is checked before
+    Git runs in a checkout that commands could edit."""
     for pin in pins:
         destination = root / basename(pin["repo"])
         changed = TeamError(f"Companion {pin['repo']} changed from pin {pin['rev']} during the stage; "
                             "dependency evidence rejected, inspect before retry")
         if destination.is_symlink() or not destination.is_dir():
             raise changed
+        baseline = baselines[pin["repo"]]
         try:
-            assert_metadata(destination, baselines[pin["repo"]])
-        except TeamError:
+            assert_metadata(destination, baseline["git"])
+            files = snapshot(destination)
+        except (TeamError, OSError):
             raise changed from None
-        if git(destination, "rev-parse", "HEAD") != pin["rev"] or git(destination, "status", "--porcelain"):
+        if files != baseline["files"] or git(destination, "rev-parse", "HEAD") != pin["rev"]:
             raise changed

@@ -51,9 +51,13 @@ commit to validation. Review comment markers include a pin digest, so an
 earlier review of that commit stays published.
 
 After each validation command, and after review, each companion checkout must
-still be a real directory with its original Git configuration, HEAD at the pin,
-and a clean `git status` (ignored files excepted). Otherwise the stage blocks
-and its results are not accepted. Configuration is checked before Git runs there.
+still be a real directory with its original Git configuration and HEAD at the pin.
+Its working tree, outside `.git`, must match the snapshot taken right after the
+fresh checkout: every path, file type, executable bit, content hash, and symlink
+target. The snapshot is read from the filesystem, not through Git, so index flags
+(`assume-unchanged`, `skip-worktree`) and ignore rules cannot hide edited or added
+files. Otherwise the stage blocks and its results are not accepted. Configuration
+is checked before Git runs there.
 
 Pins are compared before a saved verdict or failed validation is reused after an
 interruption, including in `refresh` and `adopt`. Evidence gathered with other

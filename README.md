@@ -168,7 +168,8 @@ agent-team project add suite your-account/builder \
   unpublished revision blocks the run.
 - Validation commands and reviewers must not change companions. A moved HEAD,
   changed Git configuration, or changed or added files block the run, and the
-  results are not accepted.
+  results are not accepted. This includes files hidden from Git by index flags
+  or ignore rules.
 
 `project configure NAME --companion ...` replaces the declared list;
 `--companion-manifest PATH` sets the manifest; `--no-companions` removes both.
