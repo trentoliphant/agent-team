@@ -43,6 +43,8 @@ class FakeGitHub:
             self.creates += 1
             self.pull = {"number": 7, "state": "open", "draft": True, "merged": False,
                          "branch": run["branch"], "body": body}
+        else:
+            self.pull["body"] = body  # Mirrors GitHub.create_pr refreshing an existing description.
         return self.pr(project["repo"], 7)
 
     def pr(self, repo, number):

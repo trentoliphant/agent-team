@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from agent_team import companions
 from agent_team.cli import public_companions
-from agent_team.coordinator import Coordinator
+from agent_team.coordinator import Coordinator, pr_body
 from agent_team.process import execute, git, TeamError
 from agent_team.state import Store
 from test_coordinator import FakeAgents, FakeGitHub
@@ -182,6 +182,7 @@ class CompanionTests(unittest.TestCase):
         self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
         run = self.until("ready")
         sha = run["sha"]
+        self.assertIn(self.lib_v1, self.github.pull["body"])
         self.project["companions"][0]["rev"] = self.lib_v2
         self.store.save_project(self.project)
         run = self.tick()
@@ -190,6 +191,12 @@ class CompanionTests(unittest.TestCase):
         run = self.until("ready")
         self.assertEqual(run["sha"], sha)
         self.assertEqual(run["validated_companions"][0]["rev"], self.lib_v2)
+        # The existing PR's description is republished with the renewed pins, not left stale.
+        self.assertEqual(self.github.creates, 1)
+        self.assertEqual(self.github.pull["body"], pr_body(run))
+        self.assertIn(self.lib_v2, self.github.pull["body"])
+        self.assertNotIn(self.lib_v1, self.github.pull["body"])
+        self.assertEqual(run["review_record"]["companions"], run["validated_companions"])
         self.assertEqual([role for _, role in self.agents.calls], ["implement", "review", "review"])
         # Both reviews of the same commit remain published as separate evidence.
         reviews = [body for (_, marker), body in self.github.comments.items() if "-review-" in marker]

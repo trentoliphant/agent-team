@@ -202,9 +202,19 @@ class GitHubTests(unittest.TestCase):
 
     def test_publication_reuses_existing_pr(self):
         github = GitHub()
-        with patch.object(github, "find_pr", return_value={"number": 9}), patch.object(github, "api") as api:
-            self.assertEqual(github.create_pr({"repo": "example/repo"}, {"branch": "topic"}, "body"), {"number": 9})
+        with patch.object(github, "find_pr", return_value={"number": 9, "body": "body"}), \
+                patch.object(github, "api") as api:
+            self.assertEqual(github.create_pr({"repo": "example/repo"}, {"branch": "topic"}, "body"),
+                             {"number": 9, "body": "body"})
             api.assert_not_called()
+
+    def test_republication_updates_stale_pr_body(self):
+        github = GitHub()
+        with patch.object(github, "find_pr", return_value={"number": 9, "body": "old pins"}), \
+                patch.object(github, "api", return_value={"number": 9, "body": "new pins"}) as api:
+            self.assertEqual(github.create_pr({"repo": "example/repo"}, {"branch": "topic"}, "new pins"),
+                             {"number": 9, "body": "new pins"})
+            api.assert_called_once_with("repos/example/repo/pulls/9", "PATCH", {"body": "new pins"})
 
 
 if __name__ == "__main__":
