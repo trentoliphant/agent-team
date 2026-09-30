@@ -13,6 +13,7 @@ from .writing import DEFAULTS, effective, guidance
 # Operator decisions at a handoff. Extensions are finite and must be authorized again when used up.
 ACTIONS = ("extend", "repair", "rescope", "stop")
 MAX_EXTENSION = 3
+STOP_POINTS = ("implement", "validate", "publish", "review", "ci")
 CONTRIBUTORS = ("openai", "anthropic", "human")
 MATCHES = {
     "first": "first rejection; no earlier findings to compare",
@@ -375,11 +376,13 @@ class Coordinator:
         with self.store.subscription(agent, project["quota_cooldown"]):
             return self.agents.run(agent, role, prompt, cwd, artifacts, project)
 
-    def tick(self, name, issue_number=None):
+    def tick(self, name, issue_number=None, stop_after=None):
         with self.store.worker(name):
-            return self._tick(name, issue_number)
+            return self._tick(name, issue_number, stop_after)
 
-    def _tick(self, name, issue_number=None):
+    def _tick(self, name, issue_number=None, stop_after=None):
+        if stop_after is not None and (stop_after not in STOP_POINTS or issue_number is None):
+            raise TeamError("A supported stop point requires an explicitly selected issue")
         project = self.store.project(name)
         if project["paused"]:
             return {"project": name, "stage": "paused"}
@@ -398,6 +401,8 @@ class Coordinator:
             if reason:
                 raise TeamError(f"Cannot select issue #{issue_number}: {reason}")
             target = next((r for r in runs if r["issue"] == issue_number), None)
+            if target and stop_after is not None and target.get("stop_after") != stop_after:
+                raise TeamError("The saved stop boundary cannot be changed by run; inspect the run")
             if target and target["stage"] in {"closed", "merged"}:
                 raise TeamError(f"Issue #{issue_number} already has a completed run")
             if any(r["issue"] != issue_number and (r["stage"] in ACTIVE or
@@ -448,7 +453,12 @@ class Coordinator:
                 reason = self.ineligible(project, issue)
                 if reason:
                     raise TeamError(f"Queue candidate became ineligible: {reason}")
-            active = self.store.create(project, issue)
+            plan = None
+            if stop_after is not None:
+                plan = dict(stop_after=stop_after,
+                            requested_operations=["prepare"] + list(STOP_POINTS[:STOP_POINTS.index(stop_after) + 1]),
+                            omitted_operations=list(STOP_POINTS[STOP_POINTS.index(stop_after) + 1:]))
+            active = self.store.create(project, issue, plan)
         run = active
         stage = run["stage"]
         self.store.save(run, in_flight=True, notification_pending=True)
@@ -466,6 +476,9 @@ class Coordinator:
                 if stage != "prepare":
                     assert_metadata(self.store.workspace(run), run["git_metadata"])
                 getattr(self, stage)(project, run)
+            if run.get("stop_after") == stage and run["stage"] in ACTIVE | {"ready"}:
+                self.store.save(run, next_stage=run["stage"], stage="stopped",
+                                partial_result="Selected endpoint reached; whole workflow not certified")
             self.store.save(run, in_flight=False, quota_attempts=0)
         except CapacityWait as exc:
             self.store.save(run, stage="quota_wait", resume_stage=stage, in_flight=False,
@@ -613,7 +626,8 @@ class Coordinator:
                        rejected_shas=list(dict.fromkeys(run.get("rejected_shas", []) + [run["sha"]])))
         limit = revision_limit(project, run)
         if run["round"] < limit:
-            self.store.save(run, **changes, round=run["round"] + 1, stage="implement",
+            self.store.save(run, **changes, round=run["round"] + 1, stage="stopped" if run.get("stop_after") else "implement",
+                            next_stage="implement", partial_result="Rejected candidate; explicit continuation required" if run.get("stop_after") else None,
                             review_record=None, needs_revision=True, **self.queue_writes(run, *writes))
             return
         # The limit is a deliberate evaluation point. One save records the rejection, the handoff,

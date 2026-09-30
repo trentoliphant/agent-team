@@ -189,3 +189,17 @@ explicit refresh. Closed runs are not automatically recreated; a new attempt
 needs a new linked issue and approval. Do not reset state, remove locks, change
 retry limits, force-push, or weaken validation/review policy as a recovery
 shortcut. If the cause remains unresolved, report it and stop.
+
+## Selected portions of work
+
+For an approved issue, honor a request to stop after implementation or validation:
+`agent-team run example --issue 123 --stop-after implement --watch` or
+`agent-team run example --issue 123 --stop-after validate --watch`.
+Other endpoints are `publish`, `review`, and `ci`. Explain that each command starts
+at preparation, consumes subscriptions, and writes issue status comments; publish
+also pushes and creates a draft PR. The saved endpoint cannot be expanded by
+later ticks. Report `stopped` as partial completion, including unperformed checks.
+Do not use `resume` to continue it. Independent entry with existing work and
+explicit continuation are not yet supported; report that limitation rather than
+creating an issue or authorizing extra stages. Do not replace a partial request
+with the full queue workflow. Honor authorization already given for these effects.

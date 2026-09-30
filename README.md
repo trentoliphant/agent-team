@@ -489,3 +489,28 @@ checks on Linux and macOS with Python 3.11 and 3.14.
 
 See [architecture and limitations](docs/architecture.md),
 [security](docs/security.md), and [contributing](CONTRIBUTING.md).
+
+## Selected stop boundaries (initial support)
+
+`agent-team run example --issue 123 --stop-after validate --watch` implements
+an approved issue and validates it without pushing or creating a PR. The boundary
+is saved atomically with assignment. Later ticks, watch restarts, and `resume`
+cannot expand it. A stopped run requires operator attention and blocks intake.
+The result certifies only the performed stages. Validation or review rejection
+records the existing revision history and budget, then stops before applying fixes.
+
+| Command selection | Input | Effects | Prerequisites |
+| --- | --- | --- | --- |
+| `--stop-after implement` | Approved ready issue | Isolated local edits, issue status comments | Current approval fingerprint |
+| `--stop-after validate` | Approved ready issue | Above, local candidate commit and configured tests | Current approval fingerprint |
+| `--stop-after publish` | Approved ready issue | Above, branch push and draft PR | Successful validation |
+| `--stop-after review` | Approved ready issue | Above, independent review comments and statuses | Exact candidate, other author family |
+| `--stop-after ci` | Approved ready issue | Full pipeline through PR readiness | Validation, independent review, successful CI |
+
+These selections all start with preparation and implementation. They retain the
+existing issue-status writes. They do not separate individual effect permissions.
+Validation only, publication of existing work, review only, revision followed by
+review, CI only, scoped tasks without issues, and explicit continuation from a
+stopped run are not implemented yet. Existing-PR entry belongs to companion #10.
+Do not create synthetic issues or rerun implementation to substitute for these
+unsupported operations. Discovery retains its existing separate command.

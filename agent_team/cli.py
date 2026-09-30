@@ -9,7 +9,7 @@ import time
 
 from . import __version__
 from .agents import Agents, subscription_status
-from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, Coordinator
+from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, STOP_POINTS, Coordinator
 from .github import GitHub
 from .process import TeamError, execute
 from .state import CoordinatorBusy, Store, default_home
@@ -69,6 +69,7 @@ def parser():
     run = commands.add_parser("run", help="Advance one stage, or poll with --watch")
     run.add_argument("project")
     run.add_argument("--issue", type=int, help="Select only this approved ready issue")
+    run.add_argument("--stop-after", choices=STOP_POINTS, help="Persist an endpoint for --issue; later ticks cannot advance beyond it")
     run.add_argument("--watch", action="store_true")
     run.add_argument("--interval", type=int, default=30)
     queue = commands.add_parser("queue", help="Inspect or save a project's implementation order").add_subparsers(
@@ -218,12 +219,12 @@ def dispatch(args, store):
         # Lock per tick, not across sleep, so pause/status remain usable.
         while True:
             try:
-                value = team.tick(args.project, args.issue)
+                value = team.tick(args.project, args.issue, args.stop_after)
             except CoordinatorBusy as exc:
                 value = {"project": args.project, "stage": "busy", "error": str(exc)}
             emit({k: value[k] for k in ("id", "project", "stage", "error", "pr") if k in value})
             if not args.watch or (args.issue is not None and value["stage"] in {
-                    "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
+                    "stopped", "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
                     "idle"}):
                 break
             time.sleep(args.interval)

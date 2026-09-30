@@ -149,6 +149,45 @@ class WorkflowTests(unittest.TestCase):
             result = self.team.tick("demo")
         return result
 
+    def test_partial_stop_survives_restart_and_untargeted_ticks(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "publish")
+        self.assertEqual(run["omitted_operations"], ["publish", "review", "ci"])
+        self.assertEqual(self.github.creates, 0)
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        self.assertEqual(self.team.tick("demo", 1)["stage"], "stopped")
+        self.assertEqual(self.tick()["stage"], "waiting")
+        self.assertEqual(self.github.creates, 0)
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def test_partial_boundary_cannot_expand(self):
+        self.team.tick("demo", 1, "implement")
+        with self.assertRaises(TeamError):
+            self.team.tick("demo", 1, "ci")
+        with self.assertRaises(TeamError):
+            self.team.tick("demo", stop_after="validate")
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertNotIn("tests", run)
+        self.assertEqual(self.github.creates, 0)
+
+    def test_partial_validation_failure_does_not_apply_fixes(self):
+        self.store.update_project("demo", tests=["exit 1"])
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["round"], 1)
+        self.assertIn(run["sha"], run["rejected_shas"])
+        self.team.tick("demo", 1)
+        self.assertEqual(len(self.agents.calls), 1)
+        self.assertEqual(self.github.creates, 0)
+
     def test_full_issue_to_ready_with_real_git_and_validation(self):
         run = self.tick(6)
         self.assertEqual(run["stage"], "ready")

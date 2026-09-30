@@ -15,7 +15,7 @@ from .process import TeamError, QuotaError
 ACTIVE = {"prepare", "implement", "validate", "publish", "review", "ci"}
 TERMINAL = {"merged", "closed"}
 # Runs waiting for an operator: they stop new assignments and never advance on their own.
-RECOVERY = {"blocked", "quota_wait", "handoff", "repair"}
+RECOVERY = {"blocked", "quota_wait", "handoff", "repair", "stopped"}
 
 
 def issue_fingerprint(issue):
@@ -223,7 +223,7 @@ class Store:
             self.db.execute("INSERT INTO events(run,at,data) VALUES (?,?,?)",
                             (run["id"], time.time(), json.dumps(changes)))
 
-    def create(self, project, issue):
+    def create(self, project, issue, plan=None):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             if any(r["issue"] == issue["number"] for r in self.repository_runs(project["name"])):
@@ -238,6 +238,8 @@ class Store:
                        stage="prepare", round=0, pr=None, sha=None, base_sha=None,
                        in_flight=False, feedback="", created=time.time())
             run.update(issue_digest=issue_fingerprint(issue), quota_attempts=0, needs_revision=False)
+            if plan:
+                run.update(plan)
             run["branch"] = f"agent-team/{run['issue']}-{run['id']}"
             self.db.execute("INSERT INTO runs VALUES (?,?,?,?)",
                             (run["id"], run["project"], run["issue"], json.dumps(run)))
