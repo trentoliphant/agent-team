@@ -146,8 +146,9 @@ def handoff_comment(project, run, limit):
     repo, latest = project["repo"], run["revision_history"][-1]
     where = f"PR #{run['pr']}" if run.get("pr") else "no PR yet"
     local = "" if latest["published"] else " (local only; never pushed)"
+    scope = f"issue #{run['issue']}" if run["issue"] is not None else "explicit task scope"
     lines = [f"**Agent Team handoff: revision limit reached (revision {run['round']}/{limit})**", "",
-             f"Run `{run['id']}` · issue #{run['issue']} · {where}", "",
+             f"Run `{run['id']}` · {scope} · {where}", "",
              f"Candidate commit `{latest['sha']}`{local}", "",
              f"Validation: {validation_text(latest['tests'])}", "",
              f"**Remaining findings from {latest['kind']} ({len(latest['findings'])})**"]
@@ -381,7 +382,8 @@ class Coordinator:
     def queue(self, name):
         """Read-only scheduling view; ordering never changes authorization or runs."""
         project = self.store.project(name)
-        runs = {r["issue"]: r for r in self.store.repository_runs(name)}
+        runs = self.store.repository_runs(name)
+        issue_runs = {r["issue"]: r for r in runs if r["issue"] is not None}
         issues = self.github.issues(project, ready=False)
         issues = sorted(issues, key=lambda i: (i.get("created_at", ""), i["number"]))
         by_number = {i["number"]: i for i in issues}
@@ -389,7 +391,7 @@ class Coordinator:
         entries = []
         for number in order + [i["number"] for i in issues if i["number"] not in order]:
             issue = by_number.get(number)
-            run = runs.get(number)
+            run = issue_runs.get(number)
             if issue is None:
                 # Listed closed/missing issues are absent from the open-issue listing.
                 reason = "missing or closed issue"
@@ -401,8 +403,8 @@ class Coordinator:
                             "eligible": reason is None, "reason": reason})
         return {"project": name, "saved_order": order, "entries": entries,
                 "effective_queue": [e["issue"] for e in entries if e["eligible"]],
-                "active_runs": [r["id"] for r in runs.values() if r["stage"] in ACTIVE],
-                "recovery_runs": [r["id"] for r in runs.values()
+                "active_runs": [r["id"] for r in runs if r["stage"] in ACTIVE],
+                "recovery_runs": [r["id"] for r in runs
                                   if r["stage"] in RECOVERY or r.get("in_flight")],
                 "paused": project["paused"]}
 

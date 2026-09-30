@@ -412,6 +412,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["reviewed_sha"], run["sha"])
         self.assertEqual(self.github.creates, 0)
 
+    def test_published_task_handoff_identifies_explicit_scope(self):
+        self.store.update_project("demo", max_revisions=0)
+        self.agents.reject = True
+        run = self.team.select("demo", ["implement", "validate", "publish", "review"],
+                               ["edit", "push", "github"], task="Add feature.txt")
+        run = self.selected_ticks(run, 5)
+        self.assertEqual(run["stage"], "handoff")
+        self.assertIsNone(run["issue"])
+        self.assertEqual(run["pr"], 7)
+        body = self.github.comments[(7, f"{run['id']}-handoff-0")]
+        self.assertIn(f"Run `{run['id']}` · explicit task scope · PR #7", body)
+        self.assertIn(f"Explicit task scope: `{run['issue_digest']}`", body)
+        self.assertNotIn("issue #None", body)
+        self.assertIn(run["sha"], body)
+
     def test_selected_watch_detects_configuration_drift_before_publication(self):
         run = self.team.select("demo", ["implement", "validate", "publish"], ["edit", "push", "github"],
                                task="Add feature.txt with publication")

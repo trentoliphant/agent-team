@@ -266,7 +266,8 @@ def dispatch(args, store):
             emit(runs)
         else:
             for run in runs:
-                print(f"{run['id']}  {run['project']}  #{run['issue']}  {run['stage']}  "
+                scope = f"#{run['issue']}" if run["issue"] is not None else "task"
+                print(f"{run['id']}  {run['project']}  {scope}  {run['stage']}  "
                       f"{run['author']} → {run['reviewer']}  PR {run.get('pr') or '-'}")
             if not runs:
                 print("No runs. Approve a registered project's issue with: agent-team approve PROJECT NUMBER")

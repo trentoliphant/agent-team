@@ -1,5 +1,7 @@
 """Model-free queue, authorization, and targeted watch regressions."""
 import tempfile
+import io
+from contextlib import redirect_stdout
 import unittest
 from unittest.mock import patch
 
@@ -76,6 +78,33 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.team.tick('demo')['issue'], 3)
         self.store.set_queue('demo', [])
         self.assertEqual(self.team.queue('demo')['effective_queue'], [1])
+
+    def test_queue_retains_all_task_runs_in_both_row_orders(self):
+        project = self.store.project('demo')
+        stopped = self.store.create(project, dict(number=None, title='Stopped task', body='Scope one'))
+        self.store.save(stopped, stage='stopped')
+        active = self.store.create(project, dict(number=None, title='Active task', body='Scope two'))
+        issue = self.store.create(project, self.github.items[2])
+        for runs in ([stopped, active, issue], [issue, active, stopped]):
+            with self.subTest(order=[r['id'] for r in runs]), \
+                    patch.object(self.store, 'repository_runs', return_value=runs):
+                view = self.team.queue('demo')
+            self.assertCountEqual(view['active_runs'], [active['id'], issue['id']])
+            self.assertEqual(view['recovery_runs'], [stopped['id']])
+            self.assertEqual(view['effective_queue'], [1, 3])
+            entry = next(e for e in view['entries'] if e['issue'] == 2)
+            self.assertEqual(entry['reason'], 'existing run: prepare')
+
+    def test_status_text_identifies_task_and_issue_runs(self):
+        project = self.store.project('demo')
+        task = self.store.create(project, dict(number=None, title='Task', body='Explicit scope'))
+        issue = self.store.create(project, self.github.items[2])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            dispatch(parser().parse_args(['status', '--project', 'demo']), self.store)
+        self.assertIn(f"{task['id']}  demo  task  prepare", output.getvalue())
+        self.assertIn(f"{issue['id']}  demo  #2  prepare", output.getvalue())
+        self.assertNotIn('#None', output.getvalue())
 
     def test_invalid_order_is_atomic(self):
         self.store.set_queue('demo', [2])
