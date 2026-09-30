@@ -195,6 +195,127 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.github.creates, 0)
         self.assertIn("implement", run["omitted_operations"])
 
+    def advance_input_base(self):
+        source = self.root / "source"
+        git(source, "checkout", "main")
+        git(source, "reset", "--hard", git(self.remote, "rev-parse", "main"))
+        (source / "base.txt").write_text("Updated base\n")
+        git(source, "add", ".")
+        git(source, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Update base")
+        git(source, "push", str(self.remote), "HEAD:main")
+        return git(source, "rev-parse", "HEAD")
+
+    def test_stale_base_input_refused_before_scope_claim(self):
+        sha = self.existing_feature()
+        base = self.advance_input_base()
+        with self.assertRaisesRegex(TeamError, "contain the current registered base"):
+            self.team.select("demo", ["validate", "publish", "review", "ci"],
+                             ["push", "github", "readiness"], task="Check stale input", ref=sha,
+                             contributors=["human"])
+        self.assertEqual(self.store.repository_runs("demo"), [])
+        self.assertEqual(self.agents.calls, [])
+        self.assertEqual(self.github.creates, 0)
+        self.assertEqual(self.github.statuses, [])
+        self.assertEqual(git(self.remote, "rev-parse", "main"), base)
+
+    def test_base_drift_during_prepare_leaves_retryable_run(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate"], [], task="Check drifting input", ref="external",
+                               contributors=["human"])
+        base = self.advance_input_base()
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "blocked")
+        self.assertFalse(self.store.workspace(run).exists())
+        self.assertNotIn("validated_sha", run)
+        self.assertEqual(self.agents.calls, [])
+        source = self.root / "source"
+        git(source, "checkout", "--detach", sha)
+        git(source, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "merge", "--no-edit", base)
+        candidate = git(source, "rev-parse", "HEAD")
+        git(source, "push", str(self.remote), "HEAD:external")
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        self.team.resume(run["id"])
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["validated_sha"], candidate)
+        self.assertEqual(run["base_sha"], base)
+        self.assertEqual(run["provenance"]["selected_revision"], sha)
+        self.assertEqual(run["provenance"]["input_revision"], candidate)
+        self.assertEqual(self.github.creates, 0)
+
+    def test_trailer_only_family_selects_independent_reviewer(self):
+        self.existing_feature()
+        source = self.root / "source"
+        git(source, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--amend", "-m",
+            "External work\n\nAgent-Family: anthropic")
+        git(source, "push", "--force", str(self.remote), "HEAD:external")
+        run = self.team.select("demo", ["validate", "review"], [], task="Review attributed input",
+                               ref="external", contributors=["human"])
+        self.assertEqual(run["contributors"], ["anthropic", "human"])
+        self.assertEqual(run["provenance"]["declared"], ["human"])
+        self.assertEqual(run["provenance"]["trailer_families"], ["anthropic"])
+        self.assertEqual(run["reviewer"], "codex")
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(self.agents.calls, [("codex", "review")])
+        self.assertEqual(run["contributors"], ["anthropic", "human"])
+
+    def test_both_trailer_families_refused_without_claim(self):
+        self.existing_feature()
+        source = self.root / "source"
+        git(source, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--amend", "-m",
+            "External work\n\nAgent-Family: openai\nAgent-Family: anthropic")
+        sha = git(source, "rev-parse", "HEAD")
+        git(source, "push", str(self.remote), "HEAD:both-families")
+        with self.assertRaisesRegex(TeamError, "Both model families"):
+            self.team.select("demo", ["validate"], [], task="Check both families", ref=sha,
+                             contributors=["human"])
+        self.assertEqual(self.store.repository_runs("demo"), [])
+        run = self.team.select("demo", ["implement"], ["edit"], task="Check both families")
+        self.assertEqual(run["stage"], "prepare")
+
+    def test_rejected_commit_detected_again_before_prepare(self):
+        sha = self.existing_feature()
+        previous = self.store.create(self.project, self.github.items[0])
+        self.store.save(previous, stage="closed")
+        run = self.team.select("demo", ["validate"], [], task="Check new rejection", ref="external",
+                               contributors=["human"])
+        self.store.save(previous, rejected_shas=[sha], round=2, revision_limit=2)
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "blocked")
+        self.assertFalse(self.store.workspace(run).exists())
+        self.assertNotIn("validated_sha", run)
+        source = self.root / "source"
+        # Restore a non-rejected input; the previous run keeps its rejection budget.
+        base = git(self.remote, "rev-parse", "main")
+        git(source, "push", str(self.remote), f"{base}:external", "--force")
+        self.team.resume(run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "validate")
+        self.assertFalse(run.get("validated_sha"))
+        self.assertEqual(self.store.get(previous["id"])["round"], 2)
+        self.assertEqual(self.agents.calls, [])
+
+    def test_rejected_input_does_not_claim_new_scope(self):
+        sha = self.existing_feature()
+        previous = self.store.create(self.project, self.github.items[0])
+        self.store.save(previous, stage="closed", rejected_shas=[sha], round=2, revision_limit=2)
+        with self.assertRaisesRegex(TeamError, "Input commit was rejected"):
+            self.team.select("demo", ["validate"], [], task="Check rejected input", ref="external",
+                             contributors=["human"])
+        self.assertEqual(len(self.store.repository_runs("demo")), 1)
+        self.assertFalse(self.store.workspace(previous).exists())
+        self.assertEqual(self.store.get(previous["id"])["round"], 2)
+        run = self.team.select("demo", ["implement"], ["edit"], task="Check rejected input")
+        self.assertEqual(run["stage"], "prepare")
+        self.assertEqual(self.agents.calls, [])
+
     def test_existing_branch_publication_then_review_then_readiness(self):
         sha = self.existing_feature()
         run = self.team.select("demo", ["validate"], [], task="Publish existing feature", ref="external",

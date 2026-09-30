@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import time
+import tempfile
 
 from .agents import Agents, FAMILIES
 from .github import GitHub
@@ -446,6 +447,24 @@ class Coordinator:
                     (["issue status comments for issue-backed runs"] if "github" in grants else []),
                 "stop_after": operations[-1], "whole_workflow_certified": False}
 
+    def inspect_input(self, project, cwd, ref, contributors):
+        """Check external input before claiming scope or installing an author checkout."""
+        base = git(cwd, "rev-parse", "HEAD")
+        git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", ref)
+        candidate = git(cwd, "rev-parse", "FETCH_HEAD^{commit}")
+        if any(candidate in r.get("rejected_shas", []) for r in self.store.repository_runs(project["name"])):
+            raise TeamError("Input commit was rejected; continue the existing run and its budget")
+        try:
+            git(cwd, "merge-base", "--is-ancestor", base, candidate)
+        except TeamError:
+            raise TeamError("Input commit must contain the current registered base; integrate the base before entry") from None
+        trailers = git(cwd, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{base}..{candidate}")
+        detected = {line.strip().casefold() for line in trailers.splitlines() if line.strip()}
+        families = set(contributors) | detected
+        if {"openai", "anthropic"} <= families:
+            raise TeamError("Both model families contributed; independent agent review is impossible")
+        return base, candidate, families, detected
+
     def select(self, name, operations, grants, issue_number=None, task=None, ref=None,
                contributors=(), run_id=None):
         """Persist explicit scope and effects before any model call or publication."""
@@ -497,13 +516,22 @@ class Coordinator:
             raise TeamError("Unknown contributor")
         if {"openai", "anthropic"} <= set(contributors):
             raise TeamError("Both model families contributed; independent agent review is impossible")
+        input_provenance = {}
+        declared = list(contributors)
+        if ref:
+            with tempfile.TemporaryDirectory(prefix="agent-team-input-") as temporary:
+                fresh = Path(temporary) / "input"
+                clone_repository(project["repo"], fresh, project["base"], project["timeout"])
+                base, candidate, contributors, detected = self.inspect_input(project, fresh, ref, contributors)
+                input_provenance = {"selected_revision": candidate, "selected_base": base,
+                                    "trailer_families": sorted(detected)}
         run = self.store.create(project, issue, dict(selection=True, operations=list(operations),
             stop_after=operations[-1], grants=plan["grants"], effect_plan=plan["selected_effects"], requested_operations=["prepare"] + list(operations),
             omitted_operations=[op for op in ENTRY_POINTS if op not in operations],
             performed_operations=[], unperformed_operations=list(ENTRY_POINTS), input_ref=ref, contributors=sorted(set(contributors)),
             revision_limit=project["max_revisions"],
             provenance={"kind": "issue" if issue_number else "scoped_task", "ref": ref,
-                        "scope": issue_fingerprint(issue), "declared": list(contributors)},
+                        "scope": issue_fingerprint(issue), "declared": declared, **input_provenance},
             author_record={"report": {"summary": issue["title"],
                                       "limitations": "Existing work; implementation was not performed by Agent Team"}}))
         if "anthropic" in contributors:
@@ -905,19 +933,31 @@ class Coordinator:
         if cwd.exists():
             raise TeamError("Author checkout already exists after interrupted prepare; inspect and remove it before resume")
         cwd.parent.mkdir(parents=True, exist_ok=True)
-        clone_repository(project["repo"], cwd, project["base"], project["timeout"])
-        base = git(cwd, "rev-parse", "HEAD")
+        provenance = dict(run.get("provenance", {}))
+        contributors = set(run.get("contributors", []))
         if run.get("input_ref"):
-            git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", run["input_ref"])
-            candidate = git(cwd, "rev-parse", "FETCH_HEAD^{commit}")
-            if any(candidate in r.get("rejected_shas", []) for r in self.store.repository_runs(project["name"])):
-                raise TeamError("Input commit was rejected; continue the existing run and its budget")
-            git(cwd, "checkout", "--detach", candidate)
-        git(cwd, "switch", "-c", run["branch"])
+            # Failed input checks leave no author checkout, so explicit resume can retry.
+            with tempfile.TemporaryDirectory(prefix="prepare-", dir=cwd.parent) as temporary:
+                fresh = Path(temporary) / "author"
+                clone_repository(project["repo"], fresh, project["base"], project["timeout"])
+                base, candidate, contributors, detected = self.inspect_input(
+                    project, fresh, run["input_ref"], contributors)
+                author = "claude" if "anthropic" in contributors else "codex" if "openai" in contributors else run["author"]
+                reviewer = "codex" if author == "claude" else "claude"
+                self.contributor_check(dict(run, author=author, reviewer=reviewer), contributors, adopting=True)(
+                    fresh, candidate, base)
+                git(fresh, "checkout", "--detach", candidate)
+                git(fresh, "switch", "-c", run["branch"])
+                provenance.update(input_revision=candidate, base_sha=base,
+                                  trailer_families=sorted(set(provenance.get("trailer_families", [])) | detected))
+                self.store.save(run, contributors=sorted(contributors), provenance=provenance,
+                                author=author, reviewer=reviewer)
+                fresh.rename(cwd)
+        else:
+            clone_repository(project["repo"], cwd, project["base"], project["timeout"])
+            base = git(cwd, "rev-parse", "HEAD")
+            git(cwd, "switch", "-c", run["branch"])
         stage = run.get("operations", ["implement"])[0]
-        if run.get("input_ref"):
-            self.contributor_check(run, run.get("contributors", []), adopting=True)(
-                cwd, git(cwd, "rev-parse", "HEAD"), base)
         self.store.save(run, base_sha=base, sha=git(cwd, "rev-parse", "HEAD"), git_metadata=metadata(cwd), stage=stage,
                         input_revision=git(cwd, "rev-parse", "HEAD"))
         if run.get("selection"):

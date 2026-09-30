@@ -633,3 +633,12 @@ contiguous continuation, accepts contributor declarations, and preserves the
 revision budget. Use `select --run` for individually selected operations and
 separate effect grants. `resume` recovers interrupted work within its saved
 selection; it does not extend an endpoint.
+
+Existing input refs must contain the current registered base. Selection checks
+this before claiming task scope and checks again during preparation. Integrate
+the base into the input branch before entry. Trailer-detected model families
+join declared contributors and determine the independent reviewer. Rejected
+commits and input from both model families are refused before scope is claimed.
+If the input becomes invalid after selection, preparation leaves no author
+checkout. Correct the input branch, inspect the blocked run, then explicitly
+resume it. Selection and preparation revisions remain recorded in provenance.

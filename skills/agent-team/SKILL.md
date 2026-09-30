@@ -261,3 +261,12 @@ The legacy `run --issue 123 --stop-after validate --watch` still starts from
 implementation and retains issue progress writes. Its saved boundary cannot be
 expanded by watch or resume. `continue` retains contiguous legacy continuation;
 use `select --run` for separate grants and individually selected stages.
+
+Existing input refs must contain the current registered base. Selection checks
+this before claiming task scope and checks again during preparation. Integrate
+the base into the input branch before entry. Trailer-detected model families
+join declared contributors and determine the independent reviewer. Rejected
+commits and input from both model families are refused before scope is claimed.
+If the input becomes invalid after selection, preparation leaves no author
+checkout. Correct the input branch, inspect the blocked run, then explicitly
+resume it. Selection and preparation revisions remain recorded in provenance.
