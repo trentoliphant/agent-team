@@ -76,10 +76,12 @@ class FakeAgents:
         self.findings = []  # per-rejection findings; the default finding is used when exhausted
         self.quota = False
         self.summary = "Added feature"
+        self.readable = {}
 
-    def run(self, agent, role, prompt, cwd, artifacts, project):
+    def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
         self.calls.append((agent, role))
         self.prompts[role] = prompt
+        self.readable[role] = [Path(p) for p in readable]
         if self.quota:
             self.quota = False
             raise QuotaError("quota exhausted")
@@ -1284,10 +1286,10 @@ class WorkflowTests(unittest.TestCase):
     def test_status_drafting_failure_or_quota_wait_publishes_template(self):
         self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
         real_run = self.agents.run
-        def no_status(agent, role, *args):
+        def no_status(agent, role, *args, **kwargs):
             if role == "status":
                 raise QuotaError("quota exhausted")
-            return real_run(agent, role, *args)
+            return real_run(agent, role, *args, **kwargs)
         with patch.object(self.agents, "run", side_effect=no_status):
             run = self.tick()
         self.assertEqual(run["stage"], "implement")

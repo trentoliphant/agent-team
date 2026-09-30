@@ -10,8 +10,9 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tempfile
 
-from .process import TeamError, assert_metadata, execute, git, metadata, worker_env
+from .process import TeamError, assert_metadata, execute, git, metadata
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -106,12 +107,30 @@ def text(pins):
     return "; ".join(f"`{p['repo']}` at `{p['rev']}`" for p in pins)
 
 
+def paths(root, pins):
+    return [root / basename(p["repo"]) for p in pins]
+
+
+def anonymous_env(home):
+    """Environment for a clone with no local credential source: an empty home, so Git's HTTP
+    transport finds no `.netrc` and no user configuration, and no forwarded tokens."""
+    allowed = {"PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+    env = {k: v for k, v in os.environ.items() if k in allowed}
+    env.update({"HOME": str(home), "XDG_CONFIG_HOME": str(home), "NO_COLOR": "1",
+                "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    return env
+
+
+def fetch(url, destination, timeout):
+    """Clone `url` without credentials: no credential helper and a fresh, empty home."""
+    with tempfile.TemporaryDirectory(prefix="agent-team-anonymous-") as home:
+        execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "init.templateDir=",
+                 "clone", "--no-checkout", url, str(destination)], timeout=timeout, env=anonymous_env(home))
+
+
 def clone(repo, destination, timeout):
-    """Anonymous HTTPS clone: no credential helper and no forwarded tokens, so only public
-    repositories are obtainable."""
-    execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "init.templateDir=",
-             "clone", "--no-checkout", f"https://github.com/{repo}.git", str(destination)],
-            timeout=timeout, env=worker_env())
+    """Anonymous HTTPS clone, so only public repositories are obtainable."""
+    fetch(f"https://github.com/{repo}.git", destination, timeout)
 
 
 def snapshot(checkout):

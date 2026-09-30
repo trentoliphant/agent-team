@@ -575,7 +575,7 @@ class Coordinator:
     def implement(self, project, run):
         cwd = self.store.workspace(run)
         before = git(cwd, "rev-parse", "HEAD")
-        suite = ""
+        suite, readable = "", []
         if self.suite(project, run):
             _, pins = self.manifest(project, run, cwd, "HEAD")
             # Coordinator Git never runs in checkouts the author could edit: earlier companion
@@ -584,6 +584,7 @@ class Coordinator:
                 if existing.name != run["checkout"]:
                     existing.rename(self.store.run_root(run) / f"companion-preserved-{time.time_ns()}-{existing.name}")
             companions.populate(cwd.parent, pins, project["timeout"])
+            readable = companions.paths(cwd.parent, pins)
             manifest = project.get("companion_manifest")
             suite = ("Companion repositories are cloned beside this checkout at pinned commits. They are "
                      "read-only dependencies; edits there are discarded: " +
@@ -597,7 +598,7 @@ class Coordinator:
                   "Edit files directly. Tests are run by the coordinator after you finish. "
                   "Report limitations honestly; do not claim tests you did not run.")
         record = self.agents.run(run["author"], "implement", prompt, cwd,
-                                 self.store.artifacts(run) / f"author-{run['round']}", project)
+                                 self.store.artifacts(run) / f"author-{run['round']}", project, readable=readable)
         assert_metadata(cwd, run["git_metadata"])
         if git(cwd, "rev-parse", "HEAD") != before:
             raise TeamError("Worker changed commit history; manual inspection required")
@@ -760,7 +761,8 @@ class Coordinator:
                   "Return changes_requested for actionable findings, otherwise pass with an empty findings list.\n"
                   f"Diff:\n{diff}")
         record = self.agents.run(run["reviewer"], "review", prompt, cwd,
-                                 self.store.artifacts(run) / f"review-{run['round']}", project)
+                                 self.store.artifacts(run) / f"review-{run['round']}", project,
+                                 readable=companions.paths(root, pins))
         assert_metadata(cwd, baseline)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Reviewer modified candidate; evidence rejected")

@@ -35,9 +35,12 @@ runs keep the `runs/<id>/author` layout.
 Pins come from the registration, replaced by entries in the manifest committed at
 the commit being used. `git show` reads the manifest, so ignored and uncommitted
 files never count. Manifest entries must name declared companions. Each pin is a
-full commit SHA. Clones use HTTPS with no credential helper and the worker
-environment allowlist, so private repositories fail. Each clone is checked out
-detached at its pin and verified.
+full commit SHA. Clones use HTTPS with no credential helper, no forwarded tokens,
+and a fresh empty `HOME`, so no `.netrc` or user Git configuration can supply
+credentials and private repositories fail. Each clone is checked out detached at
+its pin and verified. Author and review agents receive the companion checkouts as
+readable directories (Claude `--add-dir`; Codex sandboxes already read outside the
+workspace). Their tool sets and permission modes are unchanged.
 
 Before each implementation round, earlier author companion checkouts, and any
 other directories beside the author checkout, move aside as

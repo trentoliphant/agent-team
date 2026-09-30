@@ -1,6 +1,9 @@
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -117,6 +120,10 @@ class CompanionTests(unittest.TestCase):
             [root] = run_root.glob(f"{kind}-*")
             self.assertEqual(sorted(p.name for p in root.iterdir()), ["demo", "lib"])
             self.assertEqual(git(root / "lib", "rev-parse", "HEAD"), self.lib_v1)
+        # Agents are granted exactly the declared companion checkouts beside their workspace.
+        self.assertEqual(self.agents.readable["implement"], [author.parent / "lib"])
+        [review_root] = run_root.glob("review-*")
+        self.assertEqual(self.agents.readable["review"], [review_root / "lib"])
         self.assertIn(f"../lib = example/lib at {self.lib_v1}", self.agents.prompts["implement"])
         self.assertIn(f"../lib = example/lib at {self.lib_v1}", self.agents.prompts["review"])
         self.assertIn(self.lib_v1, self.github.pull["body"])
@@ -250,10 +257,10 @@ class CompanionTests(unittest.TestCase):
                 self.assertEqual(self.tick(4)["stage"], "review")
                 original = self.agents.run
 
-                def mutating(agent, role, prompt, cwd, artifacts, project):
+                def mutating(agent, role, prompt, cwd, artifacts, project, readable=()):
                     if role == "review":
                         mutate(Path(cwd).parent / "lib")
-                    return original(agent, role, prompt, cwd, artifacts, project)
+                    return original(agent, role, prompt, cwd, artifacts, project, readable)
 
                 with patch.object(self.agents, "run", side_effect=mutating):
                     run = self.tick()
@@ -421,8 +428,49 @@ class CompanionTests(unittest.TestCase):
             self.assertNotIn("!gh auth git-credential", " ".join(args))
             self.assertIn("https://github.com/example/lib.git", args)
             self.assertNotIn("GITHUB_TOKEN", run.call_args.kwargs["env"])
+            self.assertNotEqual(run.call_args.kwargs["env"]["HOME"], os.environ.get("HOME"))
         finally:
             self.patches[2].start()
+
+    def test_local_http_credentials_cannot_authenticate_companion_clones(self):
+        # Offline stand-in for a companion that became private: every request needs credentials.
+        headers = []
+
+        class Private(BaseHTTPRequestHandler):
+            def do_GET(self):
+                headers.append(self.headers.get("Authorization"))
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="private"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Private)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            home = self.root / "operator-home"
+            home.mkdir()
+            netrc = home / ".netrc"
+            netrc.write_text("machine 127.0.0.1 login operator password secret\n")
+            netrc.chmod(0o600)
+            url = f"http://127.0.0.1:{server.server_port}/example/private.git"
+            with patch.dict(os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": str(home)}):
+                # Control: Git's HTTP transport uses the operator's .netrc when it can see their home.
+                execute(["git", "-c", "credential.helper=", "clone", "--no-checkout", url, str(self.root / "control")],
+                        env=companions.anonymous_env(home), timeout=60, check=False)
+                if not any(headers):
+                    self.skipTest("this Git build does not read .netrc")
+                headers.clear()
+                with self.assertRaises(TeamError):
+                    companions.fetch(url, self.root / "private", 60)
+            self.assertTrue(headers)
+            self.assertFalse(any(headers))
+            self.assertFalse((self.root / "private").exists())
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

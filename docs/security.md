@@ -50,7 +50,8 @@ These measures do not make credentials on the same OS account inaccessible to
 arbitrary code. Use a dedicated OS account or VM for stronger isolation.
 
 Companion repositories are declared by the operator, confirmed public at
-declaration, and cloned anonymously at full commit SHAs. A committed manifest can
+declaration, and cloned anonymously at full commit SHAs. Clones run with an
+empty temporary home, so local credentials such as `.netrc` are not used. A committed manifest can
 re-pin declared companions but cannot add new ones. Companion code runs during
 validation like project code, so declare only repositories you trust.
 

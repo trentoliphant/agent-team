@@ -77,7 +77,9 @@ def subscription_status(agent):
 
 
 class Agents:
-    def run(self, agent, role, prompt, cwd, artifacts, project):
+    def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
+        """`readable` lists coordinator-populated directories outside `cwd`, such as companion
+        checkouts, that the agent must be able to inspect."""
         version = subscription_status(agent)
         schema = {"implement": AUTHOR_SCHEMA, "review": REVIEW_SCHEMA,
                   "discover": DISCOVERY_SCHEMA, "status": STATUS_SCHEMA}[role]
@@ -112,6 +114,10 @@ class Agents:
                     "--tools", toolset, "--allowedTools", toolset,
                     "--max-turns", "40", "-p", "--output-format", "json",
                     "--json-schema", json.dumps(schema)]
+            # Claude only reads inside its working directories. Codex sandboxes already allow
+            # reads anywhere and restrict writes to the workspace, so they need no extra grant.
+            for directory in readable:
+                args += ["--add-dir", str(directory)]
             if model:
                 args += ["--model", model]
         (artifacts / "prompt.txt").write_text(prompt)
