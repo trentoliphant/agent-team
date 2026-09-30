@@ -104,10 +104,15 @@ Handoff and repair runs are recovery states. They stop new intake and refuse
 `resume` and `refresh`. `decide` records one of four operator decisions, with an
 optional note, and queues its comment the same way:
 
-- `extend`: 1-3 more revisions, stored as a cumulative `extension`.
+- `extend`: 1-3 more revisions counted from the handoff round, stored as a
+  cumulative `extension`; each decision records the resulting limit.
 - `repair`: move to `repair`.
 - `rescope`: close locally.
 - `stop`: close locally.
+
+`rescope` and `stop` are also accepted in `repair`, and in `stale` once the run
+has a recorded decision or adoption, so an unadoptable head can still be closed
+with a recorded decision and comment.
 
 `adopt` accepts a repaired PR head in `repair`, or in `stale` once the run has
 a recorded decision or adoption (for example, after an extension). In those runs,

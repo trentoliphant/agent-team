@@ -88,7 +88,7 @@ def parser():
     handoff = commands.add_parser("handoff", help="Show the latest revision-limit handoff and decisions")
     handoff.add_argument("run_id")
     handoff.add_argument("--json", action="store_true")
-    decide = commands.add_parser("decide", help="Record an operator decision for a handoff run")
+    decide = commands.add_parser("decide", help="Record an operator decision for a handoff or recovery run")
     decide.add_argument("run_id")
     decide.add_argument("action", choices=list(ACTIONS))
     decide.add_argument("--revisions", type=int, help=f"Finite extension for extend (1-{MAX_EXTENSION})")

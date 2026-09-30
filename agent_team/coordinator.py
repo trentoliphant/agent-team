@@ -743,9 +743,12 @@ class Coordinator:
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
         allowed = {"handoff": ACTIONS, "repair": ("rescope", "stop")}.get(run["stage"], ())
+        if run["stage"] == "stale" and recovering(run):
+            # A recovered run whose head changed may be unadoptable (e.g. the reviewer's family contributed).
+            allowed = ("rescope", "stop")
         if action not in allowed:
-            raise TeamError(f"Cannot {action} a run in stage {run['stage']}; "
-                            "decisions apply after the revision limit (handoff) or during repair")
+            raise TeamError(f"Cannot {action} a run in stage {run['stage']}; decisions apply after the "
+                            "revision limit (handoff), during repair, or to a stale recovered run (rescope or stop)")
         if action == "extend":
             if type(revisions) is not int or not 1 <= revisions <= MAX_EXTENSION:
                 raise TeamError(f"extend requires --revisions between 1 and {MAX_EXTENSION}")
@@ -753,13 +756,16 @@ class Coordinator:
             raise TeamError("--revisions applies only to extend")
         if action == "repair" and not run.get("published_sha"):
             raise TeamError("Direct repair needs a published PR branch; extend, rescope, or stop instead")
+        limit = project["max_revisions"] + run.get("extension", 0)
+        if action == "extend":
+            # Count from the handoff round: an adoption can pass the limit, and N must mean N more revisions.
+            limit = max(limit, run["round"]) + revisions
         decision = {"action": action, "revisions": revisions, "note": note or "", "round": run["round"],
-                    "candidate": run["sha"], "at": time.time()}
-        limit = project["max_revisions"] + run.get("extension", 0) + (revisions or 0)
+                    "candidate": run["sha"], "limit": limit, "at": time.time()}
         changes = dict(decisions=run.get("decisions", []) + [decision], error=None, in_flight=False)
         if action == "extend":
             # Continue exactly as a revision within the limit would; the feedback is the persisted rejection.
-            changes.update(extension=run.get("extension", 0) + revisions, round=run["round"] + 1,
+            changes.update(extension=limit - project["max_revisions"], round=run["round"] + 1,
                            feedback=run["revision_history"][-1]["feedback"], stage="implement",
                            review_record=None, needs_revision=True)
         elif action == "repair":

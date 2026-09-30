@@ -385,6 +385,65 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", head))
         self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
 
+    def test_extension_after_rejected_adoption_counts_from_handoff_round(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run)
+        self.team.adopt(run["id"], ["human"])
+        self.agents.reject = True
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["round"]), ("handoff", 2))  # adoption passed the limit of 1
+        self.team.decide(run["id"], "extend", 2)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["round"], run["extension"]), ("implement", 3, 3))
+        self.assertEqual([(d["action"], d["revisions"], d["limit"]) for d in run["decisions"]],
+                         [("repair", None, 1), ("extend", 2, 4)])
+        self.assertIn("2 more revision(s); the limit is now 4", self.github.comments[(7, f"{run['id']}-decision-2")])
+        # Both authorized revisions are usable: a rejection at round 3 revises instead of handing off.
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["round"]), ("implement", 4))
+        self.assertEqual(len(run["revision_history"]), 4)
+        self.assertEqual(self.tick(5)["stage"], "ready")
+
+    def test_stale_recovered_run_unadoptable_by_reviewer_family_can_stop_or_rescope(self):
+        for action in ("stop", "rescope"):
+            with self.subTest(action=action):
+                self.tearDown()
+                self.setUp()
+                run = self.exhaust()
+                self.team.decide(run["id"], "extend", 1)
+                self.push_repair(run, "Repair by the reviewer's family")
+                self.assertEqual(self.tick()["stage"], "stale")
+                calls = len(self.agents.calls)
+                with self.assertRaises(TeamError):
+                    self.team.adopt(run["id"], ["anthropic"])
+                for refused in (("extend", 1), ("repair",)):
+                    with self.assertRaises(TeamError):
+                        self.team.decide(run["id"], *refused)
+                real = self.github.comment
+                def fail_decision(repo, number, marker, *args, **kwargs):
+                    if "-decision-" in marker:
+                        raise TeamError("GitHub unavailable")
+                    return real(repo, number, marker, *args, **kwargs)
+                with patch.object(self.github, "comment", side_effect=fail_decision):
+                    with self.assertRaises(TeamError):
+                        self.command("decide", run["id"], action, "--note", "Reviewer family repaired it")
+                # The decision is durable and its comment stays queued even though publication failed.
+                run = self.store.get(run["id"])
+                self.assertEqual(run["stage"], "closed")
+                self.assertEqual([d["action"] for d in run["decisions"]], ["extend", action])
+                self.assertEqual(len(run["revision_history"]), 2)
+                self.assertEqual([w["marker"] for w in run["outbox"]], [f"{run['id']}-decision-2"])
+                self.tick()
+                run = self.store.get(run["id"])
+                self.assertEqual(run["outbox"], [])
+                body = self.github.comments[(7, f"{run['id']}-decision-2")]
+                self.assertIn(f"Agent Team decision: {action}", body)
+                self.assertIn("Operator note: Reviewer family repaired it", body)
+                self.assertEqual(self.github.pull["state"], "open")
+                self.assertEqual(self.agents.calls[calls:], [])
+
     def test_interruption_right_after_handoff_save_keeps_decisions(self):
         real = self.team.revise
         def crash(project, run, *args, **kwargs):

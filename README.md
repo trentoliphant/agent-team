@@ -277,8 +277,9 @@ agent-team decide RUN_ID stop                   # stop; issue, PR, and work are 
 `--note TEXT` adds an operator note to the published decision. Each decision is
 saved in the run and posted as a PR (or issue) comment. History is never reset.
 A rejected commit can never be validated or reviewed again, so every extension
-or repair must add a new commit. When an extension is used up, the run returns to
-`handoff` for a new decision.
+or repair must add a new commit. `extend --revisions N` always allows exactly N
+more revisions after the handoff round, even after an adoption. When an extension
+is used up, the run returns to `handoff` for a new decision.
 
 For direct repair, push commits to the run's branch, then run `adopt`. List every
 contributor with `--contributor openai|anthropic|human`. `Agent-Family` trailers
@@ -291,7 +292,8 @@ in the same run, PR, and history. A rejection after adoption returns to `handoff
 If the PR head changes outside the coordinator after an extension or an adoption,
 the run goes `stale`. `refresh` then refuses the new head, even without
 `Agent-Family` trailers; run `adopt` and declare its contributors. Decisions and
-the extension are kept.
+the extension are kept. If that head cannot be adopted, `decide RUN_ID rescope`
+or `decide RUN_ID stop` records the decision and closes the run locally.
 `rescope` does not edit the issue. It stops this run; open a linked issue with the
 new scope and `approve` it.
 
