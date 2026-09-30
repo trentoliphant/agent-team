@@ -431,7 +431,8 @@ class Coordinator:
                     self.notify(project, run)
         active = next((r for r in runs if r["stage"] in ACTIVE), None)
         if not active:
-            if issue_number is not None and runs and runs[0]["stage"] == "quota_wait":
+            if issue_number is not None and runs and runs[0]["stage"] in {"quota_wait", "handoff", "repair"}:
+                # Report the selected recovery state without scheduling agent work.
                 return runs[0]
             if any(r["stage"] in RECOVERY for r in runs):
                 return {"project": name, "stage": "waiting", "reason": "Resolve or resume existing run first"}

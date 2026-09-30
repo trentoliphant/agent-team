@@ -242,6 +242,8 @@ preempts an active run or bypasses recovery.
 
 Targeted watch advances only the selected issue and stops at readiness, pause,
 completion, or operator attention. Automatic bounded quota waits keep polling.
+Targeted ticks report the selected run's `handoff` or `repair` state without
+executing agent work, including after interruption reconciliation.
 Untargeted watch can advance other issues in saved order.
 The author rotation is global to this state directory and persists across restarts.
 Assignments and rotation advance together in a short SQLite transaction.

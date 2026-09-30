@@ -148,6 +148,12 @@ class ConcurrencyTests(unittest.TestCase):
                 persisted = self.store.get(run['id'])
                 self.assertEqual(persisted['stage'], stage)
                 self.assertFalse(persisted['in_flight'])
+                # Repeated targeted polls report recovery without invoking either agent.
+                with patch.object(team.agents, 'run') as call:
+                    self.assertEqual(team.tick('one', 1)['stage'], stage)
+                    self.assertEqual(team.tick('one')['stage'], 'waiting')
+                    call.assert_not_called()
+                self.assertEqual(self.store.get(run['id'])['stage'], stage)
                 with patch.object(team.github, 'issues', return_value=[], create=True):
                     self.assertEqual(team.queue('alias')['recovery_runs'], [run['id']])
                 with patch.object(team, 'prepare', side_effect=lambda p, r: self.store.save(r, stage='closed')):
