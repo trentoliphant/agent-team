@@ -48,9 +48,9 @@ other directories beside the author checkout, move aside as
 never runs Git in a directory the author could edit. Validation records the pins
 (`validated_companions`) and caches the manifest entries for that commit before
 running tests. Review uses the same pins and records them in the review record.
-The review stage, the `ci` stage, and ready reconciliation compare the current pins
-with the recorded ones. A difference sets a pending status and returns the same
-commit to validation. Review comment markers include a pin digest, so an
+Publication (before any push or PR write), the review stage, the `ci` stage, and
+ready reconciliation compare the current pins with the recorded ones. A difference
+sets a pending status on an existing PR and returns the same commit to validation. Review comment markers include a pin digest, so an
 earlier review of that commit stays published.
 
 After each validation command, and after review, each companion checkout must

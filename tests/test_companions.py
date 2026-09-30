@@ -185,6 +185,35 @@ class CompanionTests(unittest.TestCase):
         self.assertEqual(run["review_record"]["companions"], run["validated_companions"])
         self.assertIn(f"example/lib at {self.lib_v2}", self.agents.prompts["review"])
 
+    def test_changed_or_removed_pin_before_publication_requires_new_validation(self):
+        for name, rev in (("changed", self.lib_v2), ("removed", None)):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+                run = self.tick(3)
+                self.assertEqual(run["stage"], "publish")
+                self.project["companions"][0]["rev"] = rev
+                self.store.save_project(self.project)
+                run = self.tick()
+                # Publication waited: nothing was pushed and no PR was created with the old pins.
+                self.assertEqual(run["stage"], "validate")
+                self.assertIsNone(run.get("validated_sha"))
+                self.assertIsNone(run.get("published_sha"))
+                self.assertIsNone(run.get("pending_push_sha"))
+                self.assertEqual(self.github.creates, 0)
+                self.assertEqual(git(self.remote, "branch", "--list", run["branch"]), "")
+                if rev is None:
+                    run = self.tick()
+                    self.assertEqual(run["stage"], "blocked")
+                    self.assertIn("Missing companion pin for example/lib", run["error"])
+                    self.assertEqual(self.github.creates, 0)
+                    continue
+                run = self.until("ready")
+                self.assertEqual(run["validated_companions"], [{"repo": "example/lib", "rev": self.lib_v2}])
+                self.assertIn(self.lib_v2, self.github.pull["body"])
+                self.assertNotIn(self.lib_v1, self.github.pull["body"])
+
     def test_changed_pin_invalidates_ready_evidence(self):
         self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
         run = self.until("ready")

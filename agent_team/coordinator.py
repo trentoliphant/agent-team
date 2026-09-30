@@ -724,6 +724,10 @@ class Coordinator:
             raise TeamError("Candidate commit changed after validation")
         if sha == run["base_sha"]:
             raise TeamError("Worker produced no changes; no PR created")
+        # Validation with other pins cannot authorize publication; checked before any Git or GitHub write.
+        if self.pins_changed(project, run):
+            self.invalidate_pins(project, run)
+            return
         self.store.save(run, sha=sha, pending_push_sha=sha)
         # Explicit destination prevents worker-edited remote settings from redirecting publication.
         git(cwd, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
