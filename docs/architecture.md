@@ -15,12 +15,40 @@ this package or needs its workflow files.
 | `writing.py` | Writing-standard precedence, validation, and prompt text (style only); the coordinator applies the `status` policy to its status comments |
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
 | `cli.py` | Registration, scheduling, inspection, recovery |
+| `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
 
-Each project registers one repository. Register multiple repositories separately
-to work across projects. Cross-repository dependency scheduling and coordinated
-suite checkouts are not implemented in 0.1.0. An issue requiring undeclared sibling
+Each project registers one repository. It may also declare public companion
+repositories that its validation needs (see the README). Companions are read-only
+dependencies: the coordinator never pushes to them or schedules work across them.
+Register multiple repositories separately to work across projects. Cross-repository
+dependency scheduling is not implemented. An issue requiring undeclared sibling
 checkouts must be split or handled manually; do not substitute private workspace
 paths in validation commands.
+
+## Companion repositories
+
+Runs of a project with companions record the primary basename (`checkout`). The
+author checkout is `runs/<id>/author/<basename>`, and each validation or review
+directory holds `<basename>/` beside one directory per companion. Single-repository
+runs keep the `runs/<id>/author` layout.
+
+Pins come from the registration, replaced by entries in the manifest committed at
+the commit being used. `git show` reads the manifest, so ignored and uncommitted
+files never count. Manifest entries must name declared companions. Each pin is a
+full commit SHA. Clones use HTTPS with no credential helper and the worker
+environment allowlist, so private repositories fail. Each clone is checked out
+detached at its pin and verified.
+
+Before each implementation round, earlier author companion checkouts, and any
+other directories beside the author checkout, move aside as
+`companion-preserved-*`. Every companion is then cloned again, so the coordinator
+never runs Git in a directory the author could edit. Validation records the pins
+(`validated_companions`) and caches the manifest entries for that commit before
+running tests. Review uses the same pins and records them in the review record.
+The review stage, the `ci` stage, and ready reconciliation compare the current pins
+with the recorded ones. A difference sets a pending status and returns the same
+commit to validation. Review comment markers include a pin digest, so an
+earlier review of that commit stays published.
 
 ## Durable transitions
 

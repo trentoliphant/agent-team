@@ -49,6 +49,11 @@ GitHub CLI configuration directory discourages accidental worker authentication.
 These measures do not make credentials on the same OS account inaccessible to
 arbitrary code. Use a dedicated OS account or VM for stronger isolation.
 
+Companion repositories are declared by the operator, confirmed public at
+declaration, and cloned anonymously at full commit SHAs. A committed manifest can
+re-pin declared companions but cannot add new ones. Companion code runs during
+validation like project code, so declare only repositories you trust.
+
 Only register repositories you trust. Validation commands and project code execute
 in fresh candidate clones with the operator's filesystem access. Issue text is untrusted input, and
 prompts tell workers it cannot expand permissions. Prompts are not a security

@@ -10,6 +10,7 @@ import sqlite3
 import time
 import uuid
 
+from .companions import basename, configure as configure_companions
 from .process import TeamError
 
 ACTIVE = {"prepare", "implement", "validate", "publish", "review", "ci"}
@@ -94,6 +95,7 @@ class Store:
                        ready_label="agent:ready", timeout=1800, max_revisions=2,
                        quota_cooldown=3600, max_quota_retries=3, codex_model=None, claude_model=None)
         project.update(options)
+        configure_companions(repo, project.get("companions", []), project.get("companion_manifest"))
         self.save_project(project)
         return project
 
@@ -149,14 +151,26 @@ class Store:
                    in_flight=False, feedback="", created=time.time())
         run.update(issue_digest=issue_fingerprint(issue), quota_attempts=0, needs_revision=False)
         run["branch"] = f"agent-team/{run['issue']}-{run['id']}"
+        if project.get("companions"):
+            # Suite runs keep the primary basename so companions can sit beside it.
+            run["checkout"] = basename(project["repo"])
         self.db.execute("INSERT INTO runs VALUES (?,?,?,?)",
                         (run["id"], run["project"], run["issue"], json.dumps(run)))
         self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(index + 1)))
         self.db.commit()
         return run
 
+    def run_root(self, run):
+        return self.home / "runs" / run["id"]
+
     def workspace(self, run):
-        return self.home / "runs" / run["id"] / "author"
+        root = self.run_root(run) / "author"
+        return root / run["checkout"] if run.get("checkout") else root
+
+    def layout(self, run, name):
+        """(root, checkout) for a fresh workspace; suite runs nest the checkout under its basename."""
+        root = self.run_root(run) / name
+        return root, (root / run["checkout"] if run.get("checkout") else root)
 
     def artifacts(self, run):
         path = self.home / "runs" / run["id"] / "artifacts"

@@ -8,6 +8,7 @@ import tempfile
 import time
 
 from . import __version__
+from . import companions
 from .agents import Agents, subscription_status
 from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, Coordinator
 from .github import GitHub
@@ -15,6 +16,25 @@ from .process import TeamError, execute
 from .state import Store, default_home
 from . import writing
 from .writing import KINDS
+
+
+def companion_options(command):
+    command.add_argument("--companion", action="append", metavar="OWNER/REPO[@SHA]",
+                         help="Public companion repository cloned beside the checkout at a pinned commit; "
+                              "repeatable, and replaces the declared list")
+    command.add_argument("--companion-manifest", metavar="PATH",
+                         help="Committed JSON file in the repository that pins declared companions")
+
+
+def public_companions(github, values):
+    """Declared companions must be public: they are cloned anonymously at each run."""
+    declared = companions.parse(values)
+    for item in declared:
+        repo = github.repo(item["repo"])
+        if repo.get("private") or repo.get("visibility", "public") != "public":
+            raise TeamError(f"Companion {item['repo']} must be a public repository")
+        item["repo"] = repo["full_name"]
+    return declared
 
 
 def parser():
@@ -35,6 +55,7 @@ def parser():
     add.add_argument("--ready-label", default="agent:ready")
     add.add_argument("--codex-model")
     add.add_argument("--claude-model")
+    companion_options(add)
     project.add_parser("list")
     for verb in ("show", "setup", "pause", "resume"):
         item = project.add_parser(verb)
@@ -47,7 +68,10 @@ def parser():
     configure.add_argument("--max-quota-retries", type=int)
     configure.add_argument("--codex-model")
     configure.add_argument("--claude-model")
-    writing = commands.add_parser("writing", help="Writing standards for generated GitHub text").add_subparsers(
+    companion_options(configure)
+    configure.add_argument("--no-companions", action="store_true",
+                           help="Remove companions and the manifest; later runs are single-repository")
+    writing =commands.add_parser("writing", help="Writing standards for generated GitHub text").add_subparsers(
         dest="writing_command", required=True)
     show = writing.add_parser("show", help="Show the effective standard and the source of each value")
     show.add_argument("--project", help="Include this project's overrides")
@@ -149,9 +173,15 @@ def dispatch(args, store):
             repo = github.repo(args.repo)
             if repo.get("archived"):
                 raise TeamError("Cannot register an archived repository")
+            options = {}
+            # Single-repository registrations store no companion settings at all.
+            if args.companion:
+                options["companions"] = public_companions(github, args.companion)
+            if args.companion_manifest is not None:
+                options["companion_manifest"] = args.companion_manifest
             emit(store.register(args.name, repo["full_name"], args.base or repo["default_branch"], args.test,
                                 ready_label=args.ready_label, codex_model=args.codex_model,
-                                claude_model=args.claude_model))
+                                claude_model=args.claude_model, **options))
         else:
             project = store.project(args.name)
             if verb == "setup":
@@ -166,6 +196,16 @@ def dispatch(args, store):
                         if isinstance(value, int) and value < minimum:
                             raise TeamError(f"{key} must be at least {minimum}")
                         project[key] = value
+                if args.no_companions and (args.companion or args.companion_manifest is not None):
+                    raise TeamError("--no-companions cannot be combined with companion settings")
+                if args.no_companions:
+                    project.pop("companions", None)
+                    project.pop("companion_manifest", None)
+                if args.companion:
+                    project["companions"] = public_companions(github, args.companion)
+                if args.companion_manifest is not None:
+                    project["companion_manifest"] = args.companion_manifest
+                companions.configure(project["repo"], project.get("companions", []), project.get("companion_manifest"))
                 store.save_project(project)
             emit(project)
     elif args.command == "writing":
