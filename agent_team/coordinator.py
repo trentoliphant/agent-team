@@ -7,7 +7,7 @@ import time
 from .agents import Agents, FAMILIES
 from .github import GitHub
 from .process import execute, git, clone_repository, TeamError, QuotaError, worker_env, git_env, metadata, assert_metadata
-from .state import ACTIVE, issue_fingerprint
+from .state import ACTIVE, CapacityWait, issue_fingerprint
 from .writing import DEFAULTS, effective, guidance
 
 GUIDANCE = """Read applicable AGENTS.md, CLAUDE.md, CONTRIBUTING, and project documentation.
@@ -150,7 +150,7 @@ class Coordinator:
         self.store.save(run, status_drafts={**run.get("status_drafts", {}),
                                            kind: {"key": key, "state": "attempted"}})
         try:
-            record = self.agents.run(run["author"], "status", prompt, artifacts, artifacts, project)
+            record = self.call_agent(run["author"], "status", prompt, artifacts, artifacts, project)
             message = record["report"]["message"].strip()
         except (TeamError, OSError, ValueError, KeyError, TypeError, AttributeError):
             # Includes quota exhaustion: do not retry optional wording on each tick.
@@ -179,7 +179,7 @@ class Coordinator:
     def queue(self, name):
         """Read-only scheduling view; ordering never changes authorization or runs."""
         project = self.store.project(name)
-        runs = {r["issue"]: r for r in self.store.runs(name)}
+        runs = {r["issue"]: r for r in self.store.repository_runs(name)}
         issues = self.github.issues(project, ready=False)
         issues = sorted(issues, key=lambda i: (i.get("created_at", ""), i["number"]))
         by_number = {i["number"]: i for i in issues}
@@ -204,11 +204,24 @@ class Coordinator:
                                   if r["stage"] in {"blocked", "quota_wait"} or r.get("in_flight")],
                 "paused": project["paused"]}
 
+    def call_agent(self, agent, role, prompt, cwd, artifacts, project):
+        with self.store.subscription(agent, project["quota_cooldown"]):
+            return self.agents.run(agent, role, prompt, cwd, artifacts, project)
+
     def tick(self, name, issue_number=None):
+        with self.store.worker(name):
+            return self._tick(name, issue_number)
+
+    def _tick(self, name, issue_number=None):
         project = self.store.project(name)
         if project["paused"]:
             return {"project": name, "stage": "paused"}
-        runs = self.store.runs(name)
+        runs = self.store.repository_runs(name)
+        # An alias cannot adopt another registration's settings or recovery work.
+        if any(r["project"] != name and (r["stage"] in ACTIVE or
+               r["stage"] in {"blocked", "quota_wait"} or r.get("in_flight")) for r in runs):
+            return {"project": name, "stage": "waiting", "reason": "Repository work belongs to another registration"}
+        runs = [r for r in runs if r["project"] == name]
         selected = None
         if issue_number is not None:
             if type(issue_number) is not int or issue_number < 1:
@@ -283,6 +296,9 @@ class Coordinator:
                     assert_metadata(self.store.workspace(run), run["git_metadata"])
                 getattr(self, stage)(project, run)
             self.store.save(run, in_flight=False, quota_attempts=0)
+        except CapacityWait as exc:
+            self.store.save(run, stage="quota_wait", resume_stage=stage, in_flight=False,
+                            retry_at=exc.retry_at, error=str(exc))
         except QuotaError as exc:
             attempts = run.get("quota_attempts", 0) + 1
             waiting = attempts < project.get("max_quota_retries", 3)
@@ -344,7 +360,7 @@ class Coordinator:
                   f"Feedback from previous validation/review:\n{run['feedback']}\n"
                   "Edit files directly. Tests are run by the coordinator after you finish. "
                   "Report limitations honestly; do not claim tests you did not run.")
-        record = self.agents.run(run["author"], "implement", prompt, cwd,
+        record = self.call_agent(run["author"], "implement", prompt, cwd,
                                  self.store.artifacts(run) / f"author-{run['round']}", project)
         assert_metadata(cwd, run["git_metadata"])
         if git(cwd, "rev-parse", "HEAD") != before:
@@ -434,7 +450,7 @@ class Coordinator:
                   "regressions, and inadequate tests. Do not modify files. Do not assume passing tests prove correctness. "
                   "Return changes_requested for actionable findings, otherwise pass with an empty findings list.\n"
                   f"Diff:\n{diff}")
-        record = self.agents.run(run["reviewer"], "review", prompt, cwd,
+        record = self.call_agent(run["reviewer"], "review", prompt, cwd,
                                  self.store.artifacts(run) / f"review-{run['round']}", project)
         assert_metadata(cwd, baseline)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
@@ -481,7 +497,7 @@ class Coordinator:
                   "Do not report speculative bugs. Include source locations and acceptance criteria. "
                   f"Focus: {focus}\nExisting open issues (avoid duplicates):\n" +
                   json.dumps([{k: i[k] for k in ("number", "title", "body")} for i in existing]))
-        record = self.agents.run(agent, "discover", prompt, cwd, root / "artifacts", project)
+        record = self.call_agent(agent, "discover", prompt, cwd, root / "artifacts", project)
         titles = {i["title"].strip().casefold() for i in existing}
         created = []
         self.github.setup(project)

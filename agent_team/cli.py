@@ -12,7 +12,7 @@ from .agents import Agents, subscription_status
 from .coordinator import Coordinator
 from .github import GitHub
 from .process import TeamError, execute
-from .state import Store, default_home
+from .state import CoordinatorBusy, Store, default_home
 from . import writing
 from .writing import KINDS
 
@@ -22,6 +22,8 @@ def parser():
     root.add_argument("--version", action="version", version=__version__)
     root.add_argument("--home", type=Path, default=default_home(), help="External state directory")
     commands = root.add_subparsers(dest="command", required=True)
+    configure = commands.add_parser("configure", help="Configure single-host worker capacity")
+    configure.add_argument("--concurrency", type=int, required=True)
     commands.add_parser("init", help="Initialize local registry and state")
     commands.add_parser("doctor", help="Check CLI subscription logins and GitHub authentication, without inference")
     smoke = commands.add_parser("smoke", help="Small real subscription call; no GitHub writes")
@@ -99,7 +101,10 @@ def emit(value):
 def dispatch(args, store):
     github = GitHub()
     team = Coordinator(store, github)
-    if args.command == "init":
+    if args.command == "configure":
+        store.set_concurrency(args.concurrency)
+        emit({"concurrency": store.concurrency()})
+    elif args.command == "init":
         emit({"home": str(store.home), "version": __version__})
     elif args.command == "doctor":
         results = {}
@@ -124,10 +129,11 @@ def dispatch(args, store):
             cwd.mkdir()
             execute(["git", "init", str(cwd)])
             (cwd / "hello.txt").write_text("subscription smoke test\n")
-            emit(Agents().run(args.agent, "review",
-                             "Read hello.txt. Report pass with empty findings if it says subscription smoke test. "
-                             "Do not call any other tools or change files. Return the requested structured report.",
-                             cwd, Path(directory) / "artifacts", {"timeout": 180}))
+            with store.subscription(args.agent, 3600):
+                emit(Agents().run(args.agent, "review",
+                                 "Read hello.txt. Report pass with empty findings if it says subscription smoke test. "
+                                 "Do not call any other tools or change files. Return the requested structured report.",
+                                 cwd, Path(directory) / "artifacts", {"timeout": 180}))
     elif args.command == "project":
         verb = args.project_command
         if verb == "list":
@@ -146,14 +152,15 @@ def dispatch(args, store):
             elif verb in {"pause", "resume"}:
                 project = store.pause(args.name, verb == "pause")
             elif verb == "configure":
+                changes = {}
                 for key in ("timeout", "max_revisions", "quota_cooldown", "max_quota_retries", "codex_model", "claude_model"):
                     value = getattr(args, key)
                     if value is not None:
                         minimum = 0 if key == "max_revisions" else 1
                         if isinstance(value, int) and value < minimum:
                             raise TeamError(f"{key} must be at least {minimum}")
-                        project[key] = value
-                store.save_project(project)
+                        changes[key] = value
+                project = store.update_project(args.name, **changes)
             emit(project)
     elif args.command == "writing":
         project = store.project(args.project) if args.project else None
@@ -165,8 +172,7 @@ def dispatch(args, store):
                                      args.shared, args.kind, args.field, args.all)
         if args.writing_command != "show":
             if project:
-                project["writing"] = changed
-                store.save_project(project)
+                project = store.update_project(args.project, writing=changed)
             else:
                 store.save_writing(changed)
         policy, sources = writing.effective(store.writing(), project.get("writing") if project else None)
@@ -198,8 +204,10 @@ def dispatch(args, store):
             raise TeamError("Polling interval must be positive")
         # Lock per tick, not across sleep, so pause/status remain usable.
         while True:
-            with store.lock():
+            try:
                 value = team.tick(args.project, args.issue)
+            except CoordinatorBusy as exc:
+                value = {"project": args.project, "stage": "busy", "error": str(exc)}
             emit({k: value[k] for k in ("id", "project", "stage", "error", "pr") if k in value})
             if not args.watch or (args.issue is not None and value["stage"] in {
                     "ready", "stale", "blocked", "waiting", "paused", "closed", "merged", "idle"}):

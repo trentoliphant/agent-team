@@ -25,7 +25,9 @@ automatically. The initial adapters were exercised with Codex 0.157.1 and Claude
 Code 2.1.283.
 
 Authentication status checks cannot measure remaining subscription capacity or
-override account entitlements. Quota failures queue a later retry. A personal
+override account entitlements. Quota failures queue a bounded later retry and set a shared cooldown for that
+agent family in the local state directory. Calls within a family are serialized;
+other families and non-agent stages can continue. A personal
 subscription is not a guarantee of unlimited unattended throughput. Provider
 policies, administrative configuration, and CLI interfaces may change.
 
