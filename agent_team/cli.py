@@ -93,7 +93,8 @@ def parser():
     decide.add_argument("action", choices=list(ACTIONS))
     decide.add_argument("--revisions", type=int, help=f"Finite extension for extend (1-{MAX_EXTENSION})")
     decide.add_argument("--note", default="", help="Published with the decision")
-    adopt = commands.add_parser("adopt", help="Adopt a directly repaired PR head for new validation and review")
+    adopt = commands.add_parser("adopt", help="Adopt a direct repair (PR head, or local repair checkout "
+                                                "if never published) for new validation and review")
     adopt.add_argument("run_id")
     adopt.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), required=True,
                        help="Who contributed to the repair; repeatable")
@@ -255,10 +256,14 @@ def dispatch(args, store):
             for decision in run.get("decisions", []):
                 print(f"\nDecision after revision {decision['round']}: {decision['action']}"
                       + (f" ({decision['revisions']} more)" if decision["revisions"] else ""))
+            if run.get("repair_checkout"):
+                print(f"\nLocal repair checkout: {run['repair_checkout']['path']}\n"
+                      "Commit repairs there on top of the rejected commit, then run agent-team adopt.")
             print(f"\nCurrent stage: {run['stage']}")
     elif args.command == "decide":
         run = team.decide(args.run_id, args.action, args.revisions, args.note)
-        emit({k: run.get(k) for k in ("id", "stage", "round", "revision_limit", "extension", "decisions")})
+        emit({k: run.get(k) for k in ("id", "stage", "round", "revision_limit", "extension", "decisions",
+                                      "repair_checkout")})
     elif args.command == "adopt":
         run = team.adopt(args.run_id, args.contributor)
         emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions")})

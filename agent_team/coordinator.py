@@ -64,6 +64,9 @@ def pr_body(run):
             f"Author `{run['author']}` ({FAMILIES[run['author']]}); independent reviewer "
             f"`{run['reviewer']}` ({FAMILIES[run['reviewer']]}). Run `{run['id']}`.\n\n"
             f"Validation: {validation_text(run['tests'])}\n\n"
+            + "".join(f"Adopted direct repair `{a['sha']}` after revision {a['round'] - 1}: declared contributors "
+                      f"{', '.join(a['declared'])}; model families {', '.join(a['families'])}.\n\n"
+                      for a in run.get("adoptions", [])) +
             "Agent Team never merges. Review evidence follows as commit-bound comments.")
 
 
@@ -152,7 +155,8 @@ def handoff_comment(project, run, limit):
               "(prompts, reports, test logs); `agent-team handoff` and `agent-team inspect` show the record", "",
               "**Operator decision required.** Nothing retries until one is recorded:", "",
               f"- `agent-team decide {run['id']} extend --revisions N` authorizes N (1-{MAX_EXTENSION}) more revisions",
-              f"- `agent-team decide {run['id']} repair` hands off for direct repair of the PR branch",
+              f"- `agent-team decide {run['id']} repair` hands off for direct repair of "
+              + ("the PR branch" if run.get("published_sha") else "the candidate in a local repair checkout"),
               f"- `agent-team decide {run['id']} rescope` stops this run; changed scope needs a new linked issue and approval",
               f"- `agent-team decide {run['id']} stop` stops local orchestration and keeps the issue and PR open", "",
               "Only the maintainer decides whether to merge."]
@@ -166,9 +170,13 @@ def decision_comment(run, decision, limit):
         "extend": (f"The operator authorized {decision['revisions']} more revision(s); the limit is now {limit}. "
                    "Rejected evidence and history are kept. The next candidate must be a new commit and "
                    "needs new validation and independent review."),
-        "repair": (f"The operator handed this run off for direct repair. Push repair commits to "
-                   f"`{run['branch']}`, then run `agent-team adopt {run['id']} --contributor ...`. "
-                   "Adopted commits need new validation and review from a family that did not contribute."),
+        "repair": ((f"The operator handed this run off for direct repair. Push repair commits to "
+                    f"`{run['branch']}`, then run `agent-team adopt {run['id']} --contributor ...`. ")
+                   if run.get("published_sha") else
+                   ("The operator handed this unpublished candidate off for direct repair. Commit repairs in the "
+                    "local repair checkout on top of the rejected commit (`agent-team handoff` shows its path), then "
+                    f"run `agent-team adopt {run['id']} --contributor ...`. Nothing is pushed before validation. ")) +
+                  "Adopted commits need new validation and review from a family that did not contribute.",
         "rescope": ("The operator chose to change scope. Local orchestration stopped; the issue and PR stay open. "
                     "Changed scope needs a new linked issue and explicit approval."),
         "stop": "The operator stopped local orchestration. The issue, PR, and local work are kept.",
@@ -793,14 +801,24 @@ class Coordinator:
                 raise TeamError(f"extend requires --revisions between 1 and {MAX_EXTENSION}")
         elif revisions is not None:
             raise TeamError("--revisions applies only to extend")
+        repair_checkout = None
         if action == "repair" and not run.get("published_sha"):
-            raise TeamError("Direct repair needs a published PR branch; extend, rescope, or stop instead")
+            # Nothing was pushed, so the repair happens in a local clone of the rejected commit. The author
+            # checkout is untouched, and the clone is made before the decision is saved, so an interruption
+            # leaves at most an unused directory and the decision can be recorded again.
+            checkout = self.store.workspace(run).parent / f"repair-{time.time_ns()}"
+            execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
+                     str(self.store.workspace(run)), str(checkout)], env=git_env(), timeout=project["timeout"])
+            git(checkout, "checkout", "-B", run["branch"], run["sha"])
+            repair_checkout = {"path": str(checkout), "metadata": metadata(checkout), "candidate": run["sha"]}
         previous = limit = revision_limit(project, run)
         if action == "extend":
             # Count from the handoff round: an adoption can pass the limit, and N must mean N more revisions.
             limit = max(limit, run["round"]) + revisions
         decision = {"action": action, "revisions": revisions, "note": note or "", "round": run["round"],
                     "candidate": run["sha"], "limit": limit, "at": time.time()}
+        if repair_checkout:
+            decision["checkout"] = repair_checkout["path"]
         changes = dict(decisions=run.get("decisions", []) + [decision], error=None, in_flight=False)
         if action == "extend":
             # Continue exactly as a revision within the limit would; the feedback is the persisted rejection.
@@ -810,7 +828,8 @@ class Coordinator:
                            feedback=run["revision_history"][-1]["feedback"], stage="implement",
                            review_record=None, needs_revision=True)
         elif action == "repair":
-            changes.update(stage="repair", error="Awaiting direct repair; adopt it with agent-team adopt RUN_ID")
+            changes.update(stage="repair", repair_checkout=repair_checkout,
+                           error="Awaiting direct repair; adopt it with agent-team adopt RUN_ID")
         else:
             changes.update(stage="closed")
         write = {"type": "comment", "number": run["pr"] or run["issue"],
@@ -839,6 +858,8 @@ class Coordinator:
         if FAMILIES[run["reviewer"]] in contributing_families(run, declared):
             raise TeamError("The reviewer's family contributed to the repair, so no independent agent review "
                             "is possible; review it yourself, or rescope or stop the run")
+        if run["stage"] == "repair" and run.get("repair_checkout") and not run.get("published_sha"):
+            return self.adopt_local(project, run, declared)
         changes, families = self.integrate(project, run, self.contributor_check(run, declared, adopting=True))
         adoption = {"head": changes["published_sha"], "sha": changes["sha"], "base_sha": changes["base_sha"],
                     "declared": declared, "families": sorted(families), "round": changes["round"], "at": time.time()}
@@ -858,5 +879,62 @@ class Coordinator:
         changes.update(contributors=sorted(set(run.get("contributors", [])) | families | set(declared)),
                        adoptions=run.get("adoptions", []) + [adoption], **self.queue_writes(run, *writes))
         self.store.save(run, **changes)
+        self.notify(project, run)
+        return run
+
+    def adopt_local(self, project, run, declared):
+        """Adopt a repair committed in the local repair checkout of an unpublished candidate. The
+        repair must extend the rejected commit, so history is kept. The adopted commit is swapped in
+        as the author checkout and goes through validation, publication as a draft PR, and
+        independent review of that exact commit like any candidate."""
+        repair = run["repair_checkout"]
+        checkout = Path(repair["path"])
+        if not checkout.is_dir():
+            raise TeamError("Repair checkout is missing; stop or rescope the run (previous work retained)")
+        assert_metadata(checkout, repair["metadata"])
+        if git(checkout, "status", "--porcelain"):
+            raise TeamError("Commit or remove repair changes first; only an exact commit is adopted (previous work retained)")
+        candidate = git(checkout, "rev-parse", "HEAD")
+        if candidate in run.get("rejected_shas", []):
+            raise TeamError("Repair checkout is still at a rejected candidate; commit a repair first (previous work retained)")
+        cwd = self.store.workspace(run)
+        fresh = cwd.parent / f"adopt-{time.time_ns()}"
+        execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
+                 str(checkout), str(fresh)], env=git_env(), timeout=project["timeout"])
+        git(fresh, "checkout", "-B", run["branch"], candidate)
+        try:
+            git(fresh, "merge-base", "--is-ancestor", repair["candidate"], candidate)
+        except TeamError:
+            raise TeamError("The repair must build on the rejected commit without rewriting history "
+                            "(previous work retained)") from None
+        trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{run['base_sha']}..{candidate}")
+        families = contributing_families(run, declared) | {
+            line.strip().casefold() for line in trailers.splitlines() if line.strip()}
+        if FAMILIES[run["reviewer"]] in families:
+            raise TeamError("Commit trailers show the reviewer's family contributed; no independent agent "
+                            "review is possible (previous work retained)")
+        # A crash after the swap but before the save leaves the run in repair; adopting again is safe.
+        if cwd.exists():
+            cwd.rename(cwd.parent / f"author-preserved-{time.time_ns()}")
+        fresh.rename(cwd)
+        round_ = run["round"] + 1
+        adoption = {"head": candidate, "sha": candidate, "base_sha": run["base_sha"], "declared": declared,
+                    "families": sorted(families), "round": round_, "local": True, "at": time.time()}
+        body = (f"**Agent Team: adopted direct repair**\n\nRun `{run['id']}` adopted local repair commit "
+                f"`{candidate}`, which extends rejected candidate `{repair['candidate']}` and was never pushed.\n\n"
+                f"Declared contributors: {', '.join(declared)}. Contributing model families: "
+                f"{', '.join(adoption['families'])}. Independent review: `{run['reviewer']}` "
+                f"({FAMILIES[run['reviewer']]}), which did not contribute.\n\n"
+                f"New validation is required before it is published as a draft PR, then independent review of "
+                f"that exact commit (revision {round_}, limit {revision_limit(project, run)}); a rejection at or "
+                "past the limit returns to the operator. Only the maintainer decides whether to merge.")
+        write = {"type": "comment", "number": run["issue"], "marker": f"{run['id']}-adopt-{round_}",
+                 "body": body, "heading": "Agent Team adoption"}
+        self.store.save(run, sha=candidate, reviewed_sha=None, review_record=None, validated_sha=None,
+                        validated_tree=None, git_metadata=metadata(cwd), pending_push_sha=None,
+                        needs_revision=False, stage="validate", in_flight=False, round=round_, error=None,
+                        repair_checkout=None,
+                        contributors=sorted(set(run.get("contributors", [])) | families | set(declared)),
+                        adoptions=run.get("adoptions", []) + [adoption], **self.queue_writes(run, write))
         self.notify(project, run)
         return run

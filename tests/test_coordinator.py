@@ -691,8 +691,110 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["stage"], "handoff")
         self.assertEqual(self.github.creates, 0)
         handoff = self.github.comments[(1, f"{run['id']}-handoff-0")]  # no PR: the issue gets the handoff
-        for text in (run["sha"], "local only; never pushed", "`exit 1` exit 1", "no PR yet"):
+        for text in (run["sha"], "local only; never pushed", "`exit 1` exit 1", "no PR yet",
+                     "direct repair of the candidate in a local repair checkout"):
             self.assertIn(text, handoff)
+
+    def exhaust_unpublished(self):
+        """Validation rejects the only allowed revision, so the handoff has no PR or pushed commit."""
+        self.project.update(tests=["grep -q repaired feature.txt"], max_revisions=0)
+        self.store.save_project(self.project)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run.get("published_sha"), self.github.creates), ("handoff", None, 0))
+        return run
+
+    def commit_local(self, checkout, message="Human repair", text="repaired\n"):
+        (checkout / "feature.txt").write_text(text)
+        git(checkout, "add", "--all")
+        git(checkout, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", message)
+        return git(checkout, "rev-parse", "HEAD")
+
+    def test_unpublished_direct_repair_is_validated_before_publication_and_reviewed(self):
+        run = self.exhaust_unpublished()
+        rejected = run["sha"]
+        self.command("decide", run["id"], "repair", "--note", "I will fix it")
+        run = self.store.get(run["id"])
+        checkout = Path(run["repair_checkout"]["path"])
+        self.assertEqual((run["stage"], run["decisions"][0]["checkout"]), ("repair", str(checkout)))
+        self.assertEqual(git(checkout, "rev-parse", "HEAD"), rejected)
+        self.assertIn("unpublished candidate", self.github.comments[(1, f"{run['id']}-decision-1")])
+        self.assertEqual(self.tick()["stage"], "waiting")
+        with self.assertRaises(TeamError):  # still the rejected commit
+            self.team.adopt(run["id"], ["human"])
+        (checkout / "feature.txt").write_text("repaired\n")
+        with self.assertRaises(TeamError):  # only an exact commit is adopted
+            self.team.adopt(run["id"], ["human"])
+        head = self.commit_local(checkout)
+        with self.assertRaises(TeamError):  # the reviewer's family cannot review its own repair
+            self.team.adopt(run["id"], ["anthropic"])
+        self.command("adopt", run["id"], "--contributor", "human")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"], run["repair_checkout"]), ("validate", head, 1, None))
+        self.assertEqual((run["adoptions"][0]["families"], run["adoptions"][0]["local"]), (["openai"], True))
+        self.assertIn("human", run["contributors"])
+        self.assertEqual(len(run["revision_history"]), 1)
+        self.assertIn(rejected, run["rejected_shas"])
+        self.assertIn("Declared contributors: human", self.github.comments[(1, f"{run['id']}-adopt-1")])
+        # Nothing is pushed or published before validation.
+        self.assertEqual((self.github.creates, self.github.statuses), (0, []))
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"], run["published_sha"]), ("ready", head, head))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+        self.assertEqual(git(self.remote, "rev-parse", run["branch"]), head)
+        self.assertIn(f"Adopted direct repair `{head}`", self.github.pull["body"])
+        self.assertIn("declared contributors human", self.github.pull["body"])
+
+    def test_unpublished_repair_refuses_rewritten_history_and_reviewer_trailers(self):
+        run = self.exhaust_unpublished()
+        self.team.decide(run["id"], "repair")
+        checkout = Path(self.store.get(run["id"])["repair_checkout"]["path"])
+        git(checkout, "reset", "--hard", run["base_sha"])
+        self.commit_local(checkout, "Rewritten")
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["human"])
+        git(checkout, "reset", "--hard", run["sha"])
+        self.commit_local(checkout, "Repair\n\nAgent-Family: anthropic")
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("adoptions"), self.github.creates), ("repair", None, 0))
+        self.team.decide(run["id"], "stop")
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+
+    def test_interrupted_unpublished_repair_decision_and_adoption_recover(self):
+        run = self.exhaust_unpublished()
+        with patch.object(self.team, "queue_writes", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("decisions")), ("handoff", None))
+        self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        head = self.commit_local(Path(run["repair_checkout"]["path"]))
+        # Stop after the checkout swap, before the adoption is saved.
+        with patch("agent_team.coordinator.metadata", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("adoptions"), run["sha"]), ("repair", None, run["handoffs"][0]["candidate"]))
+        real = self.github.comment
+        def fail_adopt(repo, number, marker, *args, **kwargs):
+            if "-adopt-" in marker:
+                raise TeamError("GitHub unavailable")
+            return real(repo, number, marker, *args, **kwargs)
+        with patch.object(self.github, "comment", side_effect=fail_adopt):
+            with self.assertRaises(TeamError):
+                self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], len(run["adoptions"])), ("validate", head, 1))
+        self.assertEqual([w["marker"] for w in run["outbox"]], [f"{run['id']}-adopt-1"])
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"], run["outbox"]), ("ready", head, []))
+        self.assertIn((1, f"{run['id']}-adopt-1"), self.github.comments)
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
 
     def test_edit_after_validation_never_publishes(self):
         run = self.tick(3)

@@ -273,8 +273,8 @@ round flagged the same file with different wording), `new`, or `first`.
 ```sh
 agent-team handoff RUN_ID                       # show the handoff (read-only; --json for the record)
 agent-team decide RUN_ID extend --revisions 1   # finite extension, 1-3 more revisions
-agent-team decide RUN_ID repair                 # hand off for direct repair of the PR branch
-agent-team adopt RUN_ID --contributor human     # adopt the repaired head; repeatable
+agent-team decide RUN_ID repair                 # hand off for direct repair (PR branch or local checkout)
+agent-team adopt RUN_ID --contributor human     # adopt the repaired commit; repeatable
 agent-team decide RUN_ID rescope                # stop; changed scope needs a new linked issue
 agent-team decide RUN_ID stop                   # stop; issue, PR, and work are kept
 ```
@@ -301,6 +301,14 @@ the run goes `stale`. `refresh` then refuses the new head, even without
 `Agent-Family` trailers; run `adopt` and declare its contributors. Decisions and
 the extension are kept. If that head cannot be adopted, `decide RUN_ID rescope`
 or `decide RUN_ID stop` records the decision and closes the run locally.
+
+If validation used up the limit before anything was published, there is no PR
+branch. `decide RUN_ID repair` then creates a local repair checkout at the
+rejected commit; `agent-team handoff RUN_ID` shows its path. Commit repairs there
+on top of that commit, then run `adopt` as above. Uncommitted changes and
+rewritten history are refused. The adopted commit is validated before anything
+is pushed, then published as a draft PR and independently reviewed as that exact
+commit.
 `rescope` does not edit the issue. It stops this run; open a linked issue with the
 new scope and `approve` it.
 

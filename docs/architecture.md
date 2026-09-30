@@ -114,7 +114,11 @@ optional note, and queues its comment the same way:
   handoff round plus the authorized count. Later `max_revisions` changes do not
   affect it. Each decision records the resulting limit, and `extension` records
   the cumulative authorized amount.
-- `repair`: move to `repair`.
+- `repair`: move to `repair`. If validation exhausted the limit before anything
+  was published, `decide` first clones the author checkout at the rejected commit
+  into a local repair checkout and fingerprints its Git metadata. The author
+  checkout is not touched. An interruption before the save leaves only an unused
+  clone.
 - `rescope`: close locally.
 - `stop`: close locally.
 
@@ -135,6 +139,18 @@ validation and review under the same bound. Every refresh applies the same trail
 check. Explicit refresh of a stale run starts
 new validation and review; it does not silently authorize unlimited automatic
 revisions.
+
+For an unpublished candidate, `adopt` takes the committed HEAD of the local
+repair checkout instead of a PR head. It refuses uncommitted changes, changed Git
+metadata, a rejected commit, and a HEAD that does not descend from the rejected
+commit, so history is extended, never rewritten. The same contributor and trailer
+checks apply. The adopted commit replaces the author checkout (the old one is
+preserved) and enters `validate` in the next round. Nothing is pushed until it
+passes validation. It is then published as a draft PR, like any candidate, and
+reviewed as that exact commit before it can be ready. The adoption comment goes to
+the issue, and the PR body lists adopted repairs and their contributors. A crash
+after the checkout swap but before the save leaves the run in `repair`; adopting
+again is safe.
 
 Candidate SHA and tree are checked again before publication. Git configuration,
 excludes, and local attributes are fingerprinted; changes stop orchestration
