@@ -557,10 +557,14 @@ class Coordinator:
         """
         endpoint = run.get("stop_after")
         stage = stage or run["stage"]
-        if run.get("selection") and stage in ENTRY_POINTS and stage not in run.get("operations", []):
-            self.store.save(run, next_stage=stage, stage="stopped", in_flight=False,
-                            partial_result="Selected endpoint reached; whole workflow not certified")
-            return True
+        if run.get("selection"):
+            if stage in ENTRY_POINTS and stage not in run.get("operations", []):
+                self.store.save(run, next_stage=stage, stage="stopped", in_flight=False,
+                                partial_result="Selected endpoint reached; whole workflow not certified")
+                return True
+            # Selected sequences use their saved order, including endpoints that
+            # do not belong to the legacy pipeline.
+            return False
         if not endpoint or stage not in STOP_POINTS:
             return False
         if STOP_POINTS.index(stage) <= STOP_POINTS.index(endpoint):
@@ -646,7 +650,8 @@ class Coordinator:
                 raise TeamError("Changed work requires --contributor declarations before continuation")
             if previous and context["head"] != previous["head"]:
                 git(self.store.workspace(run), "merge-base", "--is-ancestor", previous["head"], context["head"])
-            families = self.contributor_check(run, contributors, adopting=not bool(context["dirty"]))(
+            families = self.contributor_check(run, contributors, adopting=not bool(context["dirty"]),
+                                              local_changes=bool(context["dirty"]))(
                 self.store.workspace(run), context["head"], run["base_sha"])
             self.store.save(run, contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
                             pending_contribution=None, commit_contributors=contributors,
@@ -1263,14 +1268,16 @@ class Coordinator:
                     stage="validate", in_flight=False, round=run["round"] + 1,
                     notification_pending=True, error=None), extra
 
-    def contributor_check(self, run, declared, adopting):
+    def contributor_check(self, run, declared, adopting, local_changes=False):
         """Refuse a PR head whose commits show the reviewer's family, via declarations, earlier
         adoptions, or Agent-Family trailers. Once a run has reached a handoff, an external head
-        must be adopted with declared contributors; refresh cannot take it on trailers alone."""
+        must be adopted with declared contributors; refresh cannot take it on trailers alone.
+        Declared dirty local repairs retain HEAD until validation commits them, so they
+        skip the remote-head guard while retaining the family and trailer checks."""
         def check(fresh, candidate, base_sha):
             if adopting and candidate in run.get("rejected_shas", []):
                 raise TeamError("PR head is still a rejected candidate; push a repair commit first (previous work retained)")
-            if not adopting and (recovering(run) or run.get("selection")) and candidate != run.get("published_sha"):
+            if not adopting and not local_changes and (recovering(run) or run.get("selection")) and candidate != run.get("published_sha"):
                 raise TeamError("PR head changed during recovery after the revision limit; declare its contributors "
                                 "with agent-team adopt RUN_ID --contributor ... (previous work retained)")
             if adopting and run.get("published_sha"):

@@ -353,6 +353,8 @@ class WorkflowTests(unittest.TestCase):
                                ref=sha, contributors=["human"])
         run = self.selected_ticks(run, 3)
         self.assertEqual(run["stage"], "checks")
+        self.assertEqual(run["performed_operations"], ["prepare", "validate", "publish"])
+        self.assertIsNone(run.get("reviewed_sha"))
         self.store.db.close()
         self.store = Store(self.root / "state")
         self.team = Coordinator(self.store, self.github, self.agents)
@@ -512,6 +514,13 @@ class WorkflowTests(unittest.TestCase):
         (self.store.workspace(run) / "feature.txt").write_text("human repair\n")
         with self.assertRaises(TeamError):
             self.team.select("demo", ["validate", "review"], [], run_id=run["id"], contributors=["human"])
+        saved = self.store.get(run["id"])
+        self.assertEqual(saved["contribution_history"][-1]["declared"], ["human"])
+        self.assertIsNone(saved["validated_sha"])
+        self.assertIsNone(saved["reviewed_sha"])
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
         run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"])
         run = self.selected_ticks(run, 2)
         self.assertEqual(run["stage"], "stopped")
@@ -520,6 +529,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotEqual(run["sha"], rejected[-1])
         self.assertEqual([role for _, role in self.agents.calls], ["implement", "review", "review"])
         self.assertEqual(run["reviewed_sha"], run["sha"])
+        trailers = git(self.store.workspace(run), "log", "-1", "--format=%B")
+        self.assertIn("Contributor: human", trailers)
+        self.assertNotIn("Agent-Family:", trailers)
         self.assertEqual(self.github.creates, 0)
 
     def test_explicit_continuation_preserves_evidence_and_stops_again(self):
