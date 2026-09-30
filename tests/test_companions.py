@@ -76,13 +76,13 @@ class CompanionTests(unittest.TestCase):
         execute(["git", "clone", "--bare", str(source), str(path)])
         return path
 
-    def primary(self, files, companion_list, manifest=None):
+    def primary(self, files, companion_list, manifest=None, test=None):
         source = self.source("demo")
         commit(source, {"README.md": "Fixture\n", **files})
         self.remote = self.bare(source, "demo")
         self.github.remote = self.remote
         # Passes only in a checkout named `demo` with the pinned companion beside it.
-        test = 'test "$(basename "$PWD")" = demo && test -f ../lib/lib.txt && test -f feature.txt'
+        test = test or 'test "$(basename "$PWD")" = demo && test -f ../lib/lib.txt && test -f feature.txt'
         self.project = self.store.register("demo", "example/demo", "main", [test],
                                            companions=companion_list,
                                            **({"companion_manifest": manifest} if manifest else {}))
@@ -197,6 +197,129 @@ class CompanionTests(unittest.TestCase):
         self.assertTrue(any(self.lib_v1 in body for body in reviews))
         self.assertTrue(any(self.lib_v2 in body for body in reviews))
         self.assertIn(self.lib_v2, self.github.comments[(7, f"{run['id']}-ready")])
+
+    def test_validation_cannot_change_companions(self):
+        for name, command in (("contents", "echo changed > ../lib/lib.txt"),
+                              ("added file", "echo extra > ../lib/extra.txt"),
+                              ("HEAD", "git -C ../lib checkout -q --detach HEAD~1"),
+                              ("configuration", "git -C ../lib config user.name Mallory"),
+                              ("failing command", "echo changed > ../lib/lib.txt; false")):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                self.primary({}, [{"repo": "example/lib", "rev": self.lib_v2}], test=command)
+                run = self.tick(3)
+                self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "validate"))
+                self.assertIn("Companion example/lib changed", run["error"])
+                self.assertIsNone(run.get("validated_sha"))
+                self.assertEqual(run.get("revision_history", []), [])
+                self.assertEqual(self.github.creates, 0)
+
+    def test_review_cannot_change_companions(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        self.assertEqual(self.tick(4)["stage"], "review")
+        original = self.agents.run
+
+        def mutating(agent, role, prompt, cwd, artifacts, project):
+            if role == "review":
+                (Path(cwd).parent / "lib" / "lib.txt").write_text("changed\n")
+            return original(agent, role, prompt, cwd, artifacts, project)
+
+        with patch.object(self.agents, "run", side_effect=mutating):
+            run = self.tick()
+        self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "review"))
+        self.assertIn("Companion example/lib changed", run["error"])
+        self.assertIsNone(run.get("review_record"))
+        self.assertFalse([m for _, m in self.github.comments if "-review-" in m])
+
+    def interrupt_review(self, reject, max_revisions=None):
+        """A verdict with the v1 pin is saved, then the process stops before it is recorded."""
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        if max_revisions is not None:
+            self.project["max_revisions"] = max_revisions
+            self.store.save_project(self.project)
+        self.agents.reject = reject
+        self.assertEqual(self.tick(4)["stage"], "review")
+        with patch.object(self.team, "record_review", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick()
+        self.tick()
+        run = self.store.runs()[0]
+        self.assertEqual((run["stage"], run["resume_stage"], run["review_sha"]), ("blocked", "review", run["sha"]))
+        self.project["companions"][0]["rev"] = self.lib_v2
+        self.store.save_project(self.project)
+        return run
+
+    def assert_superseded(self, run, verdict, sha):
+        self.assertNotIn(sha, run.get("rejected_shas", []))
+        self.assertEqual(run.get("revision_history", []), [])
+        [old] = run["superseded_evidence"]
+        self.assertEqual((old["kind"], old["sha"], old["record"]["report"]["verdict"]), ("review", sha, verdict))
+        self.assertEqual(old["companions"], [{"repo": "example/lib", "rev": self.lib_v1}])
+        self.assertEqual(run["validated_companions"], [{"repo": "example/lib", "rev": self.lib_v2}])
+        self.assertEqual(run["review_record"]["companions"], run["validated_companions"])
+        self.assertEqual(run["review_record"]["report"]["verdict"], "pass")
+
+    def test_interrupted_review_with_changed_pins_is_superseded_on_resume(self):
+        for reject, verdict in ((True, "changes_requested"), (False, "pass")):
+            with self.subTest(verdict):
+                self.tearDown()
+                self.setUp()
+                run = self.interrupt_review(reject)
+                sha = run["sha"]
+                self.command("resume", run["id"])
+                run = self.tick()
+                self.assertEqual(run["stage"], "validate")
+                self.assertIsNone(run["review_record"])
+                run = self.until("ready")
+                self.assertEqual((run["sha"], run["round"]), (sha, 0))
+                self.assert_superseded(run, verdict, sha)
+                self.assertEqual([role for _, role in self.agents.calls], ["implement", "review", "review"])
+                # The superseded verdict was never published as the outcome.
+                reviews = [body for (_, marker), body in self.github.comments.items() if "-review-" in marker]
+                self.assertEqual(len(reviews), 1)
+                self.assertIn(self.lib_v2, reviews[0])
+
+    def test_refresh_after_interrupted_review_with_changed_pins_does_not_record_it(self):
+        for reject, verdict in ((True, "changes_requested"), (False, "pass")):
+            with self.subTest(verdict):
+                self.tearDown()
+                self.setUp()
+                # With no revisions left, recording the old rejection would hand off to the operator.
+                run = self.interrupt_review(reject, max_revisions=0)
+                sha = run["sha"]
+                self.team.refresh(run["id"])
+                run = self.store.get(run["id"])
+                self.assertEqual(run["stage"], "validate")
+                self.assertNotIn(sha, run.get("rejected_shas", []))
+                self.assertEqual(run["superseded_evidence"][0]["record"]["report"]["verdict"], verdict)
+                self.assertNotIn("handoffs", run)
+                run = self.until("ready")
+                self.assert_superseded(run, verdict, sha)
+
+    def test_interrupted_validation_failure_with_changed_pins_is_superseded(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}], test='test "$(cat ../lib/lib.txt)" = v2')
+        with patch.object(self.team, "record_validation_failure", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick(3)
+        self.tick()
+        run = self.store.runs()[0]
+        self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "validate"))
+        self.project["companions"][0]["rev"] = self.lib_v2
+        self.store.save_project(self.project)
+        self.command("resume", run["id"])
+        run = self.until("ready")
+        self.assertEqual(run.get("revision_history", []), [])
+        self.assertNotIn(run["sha"], run.get("rejected_shas", []))
+        [old] = run["superseded_evidence"]
+        self.assertEqual((old["kind"], old["tests"][0]["exit_code"]), ("validation", 1))
+        self.assertEqual(old["companions"], [{"repo": "example/lib", "rev": self.lib_v1}])
+
+    def command(self, *args):
+        from agent_team.cli import dispatch, parser
+        with patch("agent_team.cli.Coordinator", return_value=self.team), patch("agent_team.cli.GitHub"), \
+                patch("agent_team.cli.emit"):
+            return dispatch(parser().parse_args(list(args)), self.store)
 
     def test_removed_manifest_pin_blocks_ready_run(self):
         manifest = {"companions": [{"repo": "example/lib", "rev": self.lib_v1}]}

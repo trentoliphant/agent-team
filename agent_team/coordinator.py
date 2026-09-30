@@ -540,14 +540,28 @@ class Coordinator:
             # A pin that is now missing needs validation to report it.
             return True
 
+    def supersede(self, run):
+        """Changes that retire this commit's saved verdict or failed validation. They were gathered
+        with other pins, so they no longer count, but stay on the run as historical evidence."""
+        kept = []
+        if run.get("review_record") and run.get("review_sha") == run["sha"]:
+            kept.append({"kind": "review", "record": run["review_record"]})
+        if self.pending_validation_failure(run):
+            kept.append({"kind": "validation", "tests": run["validation_failure"]["tests"],
+                         "feedback": run["validation_failure"]["feedback"]})
+        history = [dict(e, sha=run["sha"], companions=run.get("validated_companions") or [], at=time.time())
+                   for e in kept]
+        return dict(superseded_evidence=run.get("superseded_evidence", []) + history, review_record=None,
+                    review_sha=None, reviewed_sha=None,
+                    **({"validation_failure": None} if self.pending_validation_failure(run) else {}))
+
     def invalidate_pins(self, project, run):
         """Changed companion pins void earlier validation and review; the same commit is checked again."""
         if run.get("pr"):
             self.github.status(project["repo"], run.get("published_sha") or run["sha"], "pending",
                                "Companion pins changed; validation and review need renewal")
-        self.store.save(run, stage="validate", validated_sha=None, validated_tree=None, reviewed_sha=None,
-                        review_record=None, review_sha=None, needs_revision=False, notification_pending=True,
-                        error=None)
+        self.store.save(run, **self.supersede(run), stage="validate", validated_sha=None, validated_tree=None,
+                        needs_revision=False, notification_pending=True, error=None)
 
     def prepare(self, project, run):
         cwd = self.store.workspace(run)
@@ -592,8 +606,11 @@ class Coordinator:
     def validate(self, project, run):
         # A failure persisted for this exact commit is recorded after an interruption, never rerun.
         if self.pending_validation_failure(run):
-            self.record_validation_failure(project, run)
-            return
+            if not self.pins_changed(project, run):
+                self.record_validation_failure(project, run)
+                return
+            # The failure was with other pins: keep it as history and validate with the current ones.
+            self.store.save(run, **self.supersede(run))
         author = self.store.workspace(run)
         git(author, "add", "--all")
         if git(author, "status", "--porcelain"):
@@ -611,9 +628,10 @@ class Coordinator:
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                  str(author), str(cwd)], env=git_env(), timeout=project["timeout"])
         git(cwd, "checkout", "--detach", sha)
+        pins, baselines = [], {}
         if self.suite(project, run):
             entries, pins = self.manifest(project, run, cwd, sha)
-            companions.populate(root, pins, project["timeout"])
+            baselines = companions.populate(root, pins, project["timeout"])
             # Recorded before the tests run, so failed validation evidence names the pins too.
             self.store.save(run, validated_companions=pins, companion_manifest={
                 "sha": sha, "path": project.get("companion_manifest"), "entries": entries})
@@ -630,6 +648,8 @@ class Coordinator:
             (self.store.artifacts(run) / f"test-{run['round']}-{index}.log").write_text(output)
             assert_metadata(cwd, baseline)
             assert_metadata(author, run["git_metadata"])
+            # Evidence names the pins, so the companions must still be exactly the pinned commits.
+            companions.verify(root, pins, baselines)
             results.append({"command": command, "exit_code": result.returncode})
             if result.returncode:
                 # The failure is bound to this commit before the rejection is recorded.
@@ -720,7 +740,7 @@ class Coordinator:
         git(cwd, "checkout", "--detach", run["sha"])
         # The review stage checked these are still the current pins.
         pins = run.get("validated_companions") or []
-        companions.populate(root, pins, project["timeout"])
+        baselines = companions.populate(root, pins, project["timeout"])
         baseline = metadata(cwd)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Review checkout changed; inspect before retry")
@@ -744,6 +764,7 @@ class Coordinator:
         assert_metadata(cwd, baseline)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Reviewer modified candidate; evidence rejected")
+        companions.verify(root, pins, baselines)
         return dict(record, companions=pins) if pins else record
 
     def review(self, project, run):
@@ -751,12 +772,13 @@ class Coordinator:
             raise TeamError("Reviewer must come from a family that did not contribute to the candidate")
         if run["sha"] in run.get("rejected_shas", []):
             raise TeamError("Candidate was already rejected; a new commit is required for another review")
+        # Checked before any saved verdict is reused: one gathered with other pins is superseded, not recorded.
+        if self.pins_changed(project, run):
+            self.invalidate_pins(project, run)
+            return
         record = run.get("review_record")
         # A verdict persisted for this exact commit is reused after an interruption, never rerolled.
         if not (record and run.get("review_sha") == run["sha"]):
-            if self.pins_changed(project, run):
-                self.invalidate_pins(project, run)
-                return
             record = self.independent_review(project, run)
             self.store.save(run, review_record=record, review_sha=run["sha"])
         self.record_review(project, run, record)
@@ -784,6 +806,14 @@ class Coordinator:
         cannot discard the evidence and review or validate the same commit again. Returns True if a
         rejection was recorded. A closed or merged run is terminal; recording a rejection would reactivate it."""
         if run["stage"] in {"closed", "merged"}:
+            return False
+        pending = self.pending_validation_failure(run) or (
+            run.get("review_record") and run.get("review_sha") == run["sha"]
+            and run["sha"] not in run.get("rejected_shas", []))
+        if pending and self.pins_changed(project, run):
+            # Evidence gathered with other pins must not consume the revision budget or reject the
+            # commit; it is kept as history, and the caller's transition requires new validation and review.
+            self.store.save(run, **self.supersede(run))
             return False
         record = run.get("review_record")
         if self.pending_validation_failure(run):

@@ -50,6 +50,16 @@ with the recorded ones. A difference sets a pending status and returns the same
 commit to validation. Review comment markers include a pin digest, so an
 earlier review of that commit stays published.
 
+After each validation command, and after review, each companion checkout must
+still be a real directory with its original Git configuration, HEAD at the pin,
+and a clean `git status` (ignored files excepted). Otherwise the stage blocks
+and its results are not accepted. Configuration is checked before Git runs there.
+
+Pins are compared before a saved verdict or failed validation is reused after an
+interruption, including in `refresh` and `adopt`. Evidence gathered with other
+pins does not reject the commit or use a revision. It moves to
+`superseded_evidence` with its pins, and the commit needs new validation and review.
+
 ## Durable transitions
 
 Every tick saves its intended stage before doing work. If the process disappears,

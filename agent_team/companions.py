@@ -9,7 +9,7 @@ import json
 from pathlib import PurePosixPath
 import re
 
-from .process import TeamError, execute, git, worker_env
+from .process import TeamError, assert_metadata, execute, git, metadata, worker_env
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -113,7 +113,9 @@ def clone(repo, destination, timeout):
 
 
 def populate(root, pins, timeout):
-    """Fresh sibling checkouts of each companion at its pin, under `root`."""
+    """Fresh sibling checkouts of each companion at its pin, under `root`. Returns each
+    checkout's Git metadata so `verify` can check it before running Git there again."""
+    baselines = {}
     for pin in pins:
         destination = root / basename(pin["repo"])
         if destination.exists():
@@ -125,3 +127,23 @@ def populate(root, pins, timeout):
             raise TeamError(f"Companion {pin['repo']} revision {pin['rev']} is not published") from None
         if git(destination, "rev-parse", "HEAD") != pin["rev"]:
             raise TeamError(f"Companion {pin['repo']} checkout does not match pin {pin['rev']}")
+        baselines[pin["repo"]] = metadata(destination)
+    return baselines
+
+
+def verify(root, pins, baselines):
+    """Refuse evidence from companion checkouts that no longer match their pins: replaced
+    directories, changed Git configuration, a moved HEAD, or changed or added files.
+    Configuration is checked before Git runs in a checkout that commands could edit."""
+    for pin in pins:
+        destination = root / basename(pin["repo"])
+        changed = TeamError(f"Companion {pin['repo']} changed from pin {pin['rev']} during the stage; "
+                            "dependency evidence rejected, inspect before retry")
+        if destination.is_symlink() or not destination.is_dir():
+            raise changed
+        try:
+            assert_metadata(destination, baselines[pin["repo"]])
+        except TeamError:
+            raise changed from None
+        if git(destination, "rev-parse", "HEAD") != pin["rev"] or git(destination, "status", "--porcelain"):
+            raise changed
