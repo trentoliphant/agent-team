@@ -22,6 +22,7 @@ class FakeGitHub:
         self.pull = None
         self.comments = {}
         self.statuses = []
+        self.status_descriptions = []
         self.creates = 0
         self.check_state = "success"
         self.external_sha = None
@@ -52,6 +53,7 @@ class FakeGitHub:
 
     def status(self, repo, sha, state, description):
         self.statuses.append((sha, state))
+        self.status_descriptions.append((sha, state, description))
 
     def ci(self, repo, sha):
         return self.check_state
@@ -421,6 +423,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(run["validated_sha"])
         self.assertEqual(self.github.creates, 0)
 
+    def test_reviewed_local_candidate_publication_only_reports_remaining_readiness(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "review"], [],
+                               task="Review existing feature for publication only",
+                               ref=sha, contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        calls = list(self.agents.calls)
+        run = self.team.select("demo", ["publish"], ["push", "github"], run_id=run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertTrue(self.github.pull["draft"])
+        self.assertEqual(self.github.status_descriptions[-1],
+                         (sha, "pending", "Independent review passed; readiness not checked"))
+        marker = f"{run['id']}-review-{run['round']}-{sha}"
+        self.assertIn(sha, self.github.comments[(run["pr"], marker)])
+        self.assertEqual(self.agents.calls, calls)
+
     def test_reviewed_local_candidate_can_select_publication_then_readiness(self):
         sha = self.existing_feature()
         run = self.team.select("demo", ["validate", "review"], [],
@@ -441,6 +460,8 @@ class WorkflowTests(unittest.TestCase):
         run = self.selected_ticks(run, 1)
         self.assertEqual(run["stage"], "ci")
         self.assertEqual(self.github.creates, 1)
+        self.assertEqual(self.github.status_descriptions[-1],
+                         (sha, "pending", "Independent review passed; readiness not checked"))
         marker = f"{run['id']}-review-{run['round']}-{sha}"
         review_body = self.github.comments[(run["pr"], marker)]
         self.assertIn(run["review_record"]["report"]["summary"], review_body)
@@ -816,6 +837,34 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["stage"], "stopped")
         self.assertNotEqual(result["sha"], rejected[-1])
         self.assertEqual(result["next_stage"], "ci")
+
+    def assert_closed_before_prepare(self, run):
+        self.assertEqual(run["stage"], "closed")
+        self.assertNotIn("git_metadata", run)
+        self.assertFalse(run["in_flight"])
+        self.assertFalse(self.store.workspace(run).exists())
+        self.assertEqual(self.agents.calls, [])
+        self.assertEqual(self.github.creates, 0)
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+        self.assertEqual(self.tick()["stage"], "idle")
+        self.assertEqual(self.agents.calls, [])
+
+    def test_selected_issue_closed_before_prepare_is_terminal(self):
+        run = self.team.select("demo", ["implement"], ["edit"], issue_number=1)
+        self.github.items[0]["state"] = "closed"
+        run = self.selected_ticks(run, 1)
+        self.assert_closed_before_prepare(run)
+
+    def test_legacy_stop_bounded_issue_closed_before_prepare_is_terminal(self):
+        issue = dict(self.github.items[0])
+        self.github.items[0]["state"] = "closed"
+        # Intake sees the open issue; it closes before the execution read.
+        with patch.object(self.github, "issue", side_effect=[issue, self.github.items[0]]):
+            run = self.team.tick("demo", issue_number=1, stop_after="validate")
+        self.assert_closed_before_prepare(run)
 
     def test_partial_stop_survives_restart_and_untargeted_ticks(self):
         self.team.tick("demo", 1, "validate")

@@ -872,7 +872,8 @@ class Coordinator:
                                     unperformed_operations=[op for op in (ENTRY_POINTS if run.get("selection") else STOP_POINTS)
                                                             if op not in performed])
             self.enforce_boundary(run)
-            if run.get("stop_after") and run["stage"] not in {"prepare", "blocked", "quota_wait"}:
+            if (run.get("stop_after") and run.get("git_metadata")
+                    and run["stage"] not in {"prepare", "blocked", "quota_wait", "closed", "merged"}):
                 self.store.save(run, evidence_context=self.evidence_context(project, run))
             self.store.save(run, in_flight=False, quota_attempts=0)
         except CapacityWait as exc:
@@ -1133,11 +1134,14 @@ class Coordinator:
         pr = self.github.create_pr(project, run, pr_body(run))
         self.store.save(run, pr=pr["number"])
         writes = {}
-        if (run.get("reviewed_sha") == sha and run.get("review_sha") == sha
-                and run.get("review_record") and run["review_record"]["report"]["verdict"] == "pass"):
+        reviewed = (run.get("reviewed_sha") == sha and run.get("review_sha") == sha
+                    and run.get("review_record") and run["review_record"]["report"]["verdict"] == "pass")
+        if reviewed:
             writes = self.queue_writes(run, self.review_write(run, run["review_record"]))
         self.store.save(run, stage=self.successor(run, "publish", "review"), **writes)
-        self.github.status(project["repo"], sha, "pending", "Awaiting independent cross-family review")
+        description = ("Independent review passed; readiness not checked" if reviewed
+                       else "Awaiting independent cross-family review")
+        self.github.status(project["repo"], sha, "pending", description)
 
     def independent_review(self, project, run):
         cwd = self.store.workspace(run).parent / f"review-{run['round']}-{time.time_ns()}"
