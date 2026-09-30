@@ -5,7 +5,7 @@ holds the issues, PRs, review evidence, and commit status. Your machine runs the
 official Codex and Claude Code CLIs. You decide what gets merged.
 
 **Early release:** macOS and Linux, Python 3.11+, GitHub.com, two agent families,
-one worker at a time per state directory. No Python runtime dependencies, model
+bounded concurrent workers in one shared state directory (serial by default). No Python runtime dependencies, model
 API SDKs, server, or repository-installed agent framework.
 
 ## What it does
@@ -48,7 +48,9 @@ agent-team doctor
 
 `doctor` does not call a model. `agent-team smoke --agent codex` and
 `agent-team smoke --agent claude` make a small real subscription call to test
-the adapter, without changing GitHub.
+the adapter, without changing GitHub. Smoke calls share the family lock and respect
+existing cooldowns. A smoke quota failure is reported without setting or extending
+the production cooldown.
 
 Both agents must report subscription authentication. The coordinator refuses
 API-key authentication and excludes API keys and alternate cloud-provider
@@ -169,7 +171,8 @@ agent-team project add suite your-account/builder \
 - Validation commands and reviewers must not change companions. A moved HEAD,
   changed Git configuration, or changed or added files block the run, and the
   results are not accepted. This includes files hidden from Git by index flags
-  or ignore rules.
+  or ignore rules, and replacement refs, grafts, or other `.git` changes that
+  make Git return different contents for the pinned commit.
 
 `project configure NAME --companion ...` replaces the declared list;
 `--companion-manifest PATH` sets the manifest; `--no-companions` removes both.
@@ -224,7 +227,7 @@ agent-team project configure example --max-quota-retries 3
 
 - Pause takes effect between stages; it does not interrupt an in-flight call.
   You can request pause while a worker is running. Configuration changes require
-  an idle worker lock; pause first if a watch loop is active.
+  all workers to be idle; pause projects first if watch loops are active.
 - `resume` retries the recorded stage after you inspect a blocked run. It does not
   apply after the revision limit; see below. Quota
   waits resume automatically after their cooldown, up to three consecutive
@@ -245,7 +248,8 @@ agent-team project configure example --max-quota-retries 3
   Once assigned, the snapshot is immutable: restore it to resume, or close the
   run and create a new linked issue for changed scope.
 
-An unresolved blocked, quota, handoff, or repair run stops new assignments for that project. Ready
+An unresolved blocked, quota, handoff, or repair run stops new assignments for
+that repository, including its other registrations. Ready
 and stale PRs do not stop new assignments. A changed PR head/base becomes stale
 and requires `refresh`; `resume` cannot reuse its old evidence.
 Explicit selection overrides the saved order for one invocation:
@@ -279,11 +283,67 @@ preempts an active run or bypasses recovery.
 
 Targeted watch advances only the selected issue and stops at readiness, pause,
 completion, or operator attention. Automatic bounded quota waits keep polling.
+Targeted ticks report the selected run's `handoff` or `repair` state without
+executing agent work, including after interruption reconciliation.
 Untargeted watch can advance other issues in saved order.
 The author rotation is global to this state directory and persists across restarts.
-Two processes sharing the same directory cannot execute stages concurrently.
-Use **one coordinator state directory per set of repositories**; separate hosts
-do not share a distributed claim lock.
+Assignments and rotation advance together in a short SQLite transaction.
+
+Enable concurrency while all workers are idle:
+
+```sh
+agent-team configure --concurrency 2
+agent-team run example --watch
+# In another terminal, using the same state directory:
+agent-team run another-project --watch
+```
+
+The positive concurrency limit defaults to `1`. It limits whole stage ticks,
+including validation and GitHub publication. Separate processes run separate
+projects; the coordinator does not spawn a worker pool. Watch polls report `busy`
+when no slot is available or that repository already has a worker, then retry at
+the configured interval. A single tick reports `busy` and returns without work.
+Locks are released between ticks and quota waits. Ordinary blocked work in one
+repository does not stop unrelated repositories.
+
+Repository identity is the registered GitHub `OWNER/REPO`, compared without case.
+Multiple registrations of that identity share a worker lock and issue claims.
+Active or interrupted work must continue through its original registration;
+another registration reports waiting and cannot adopt its settings. Completed
+issue claims remain shared. GitHub renames or transfers are not resolved locally;
+keep registrations consistent with the canonical identity.
+
+Subscription calls are serialized per agent family across the state directory.
+Codex and Claude can call concurrently. A quota failure starts a shared family
+cooldown. Other runs defer without consuming a model call or their quota retry
+budget. Actual consecutive quota failures still exhaust the configured bounded
+retry budget. Explicit run resume resets that budget but does not bypass a shared
+cooldown. Validation, publication, and the other family can continue.
+
+Pause applies only to the named registration and takes effect between ticks;
+it does not stop an in-flight stage. Project resume permits scheduling again;
+it does not recover blocked work. Configuration changes require all workers to
+be idle. Run recovery, decisions, adoption, refresh, approvals, queue edits,
+and label setup lock only the affected repository. They remain available while
+unrelated workers run, even when all worker slots are occupied. They report lock contention when that repository has a live worker. Discovery takes a repository lock
+and a worker slot, so it can overlap unrelated work within the configured limit.
+Read-only status and transactional project pause/resume remain available during
+execution.
+
+A live repository lock prevents another tick from treating its in-flight marker
+as interrupted. After a worker exits, the OS releases its locks. Its next tick
+blocks an unfinished stage without repeating agent work. Inspect artifacts and
+publication state, then use `agent-team resume RUN_ID` explicitly. A watch process
+restart never authorizes repeating an interrupted subscription call. Pending push
+SHAs and marked GitHub writes retain their existing reconciliation behavior.
+
+Use **one coordinator state directory on one host per set of repositories**.
+These advisory file locks require a local filesystem; sharing state across hosts
+or using separate directories for the same repositories provides no coordinated
+claims. Stop every worker before backing up, moving, or upgrading shared state.
+Do not mix older coordinators with this version against one directory. Companion
+checkouts belong to each run, so concurrent runs never share them. Multi-host
+coordination is a separate feature.
 
 Optional model selection is external configuration, not hard-coded in a project:
 
@@ -384,7 +444,7 @@ agent-team writing unset --project example --all
 
 Setting instructions to `''` or words to `0` clears a lower-precedence value.
 `unset` removes a setting so the next level applies again. Like other
-configuration changes, `set` and `unset` need an idle worker lock.
+configuration changes, `set` and `unset` require all workers to be idle.
 
 The coordinator adds the effective standard to discovery, implementation, and
 review prompts, after its fixed rules. The coordinator writes status comments

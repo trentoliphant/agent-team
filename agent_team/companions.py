@@ -16,6 +16,8 @@ from .process import TeamError, assert_metadata, execute, git, metadata
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# Files that make Git reads return other objects or history than the pinned commit's.
+SUBSTITUTES = ("info/grafts", "shallow", "objects/info/alternates", "objects/info/http-alternates")
 
 
 def basename(repo):
@@ -68,7 +70,7 @@ def configure(primary, companions, manifest):
 def read_manifest(checkout, rev, path):
     """Manifest entries committed at `rev`. Ignored or uncommitted files are never read."""
     try:
-        text = git(checkout, "show", f"{rev}:{path}")
+        text = git(checkout, "--no-replace-objects", "show", f"{rev}:{path}")
     except TeamError:
         raise TeamError(f"Companion manifest {path} is not committed at {rev}; companion pins are missing") from None
     try:
@@ -137,15 +139,51 @@ def snapshot(checkout):
     """Every path in the working tree outside `.git`, read from the filesystem rather than
     through Git, so index flags such as assume-unchanged or skip-worktree and ignore rules
     cannot hide an edited or added file."""
+    return tree(checkout, {".git"})
+
+
+def git_tree(checkout):
+    """Every path in `.git` except the index, which Git read commands may rewrite. Replacement
+    refs, grafts, alternates, and added or edited objects or refs all change it, even if they
+    are removed after use: objects they wrote remain."""
+    return tree(checkout / ".git", {"index"})
+
+
+def substitutions(checkout):
+    """Replacement refs, grafts, shallow boundaries, and alternate object stores, found on the
+    filesystem without running Git."""
+    root = checkout / ".git"
+    found = [rel for rel in SUBSTITUTES if os.path.lexists(root / rel)]
+    replace = root / "refs" / "replace"
+    if replace.is_symlink() or (replace.is_dir() and any(replace.rglob("*"))):
+        found.append("refs/replace")
+    packed = root / "packed-refs"
+    if packed.is_symlink() or (packed.is_file() and b" refs/replace/" in packed.read_bytes()):
+        found.append("packed-refs")
+    return found
+
+
+def replacement_refs(checkout):
+    """Replacement refs as Git lists them, for ref storage that `substitutions` cannot read."""
+    return git(checkout, "--no-replace-objects", "for-each-ref", "--format=%(refname)", "refs/replace")
+
+
+def index(checkout):
+    """Staged entries (mode, object, stage, path) as read from the original objects."""
+    return git(checkout, "--no-replace-objects", "ls-files", "--stage")
+
+
+def tree(top, skip):
+    """Filesystem contents under `top`, skipping the named top-level entries."""
     entries = {}
-    for directory, dirs, files in os.walk(checkout):
+    for directory, dirs, files in os.walk(top):
         base = Path(directory)
-        if base == checkout:
-            dirs[:] = [d for d in dirs if d != ".git"]
-            files = [f for f in files if f != ".git"]
+        if base == top:
+            dirs[:] = [d for d in dirs if d not in skip]
+            files = [f for f in files if f not in skip]
         for name in dirs + files:
             path = base / name
-            rel = path.relative_to(checkout).as_posix()
+            rel = path.relative_to(top).as_posix()
             info = path.lstat()
             if stat.S_ISLNK(info.st_mode):
                 entries[rel] = ["link", os.readlink(path)]
@@ -173,23 +211,32 @@ def populate(root, pins, timeout):
         if destination.exists():
             raise TeamError(f"Companion checkout {destination.name} already exists; inspect before retry")
         clone(pin["repo"], destination, timeout)
+        if substitutions(destination):
+            raise TeamError(f"Companion {pin['repo']} clone substitutes Git objects or history; refused")
         try:
-            git(destination, "-c", "advice.detachedHead=false", "checkout", "--detach", pin["rev"])
+            git(destination, "--no-replace-objects", "-c", "advice.detachedHead=false",
+                "checkout", "--detach", pin["rev"])
         except TeamError:
             raise TeamError(f"Companion {pin['repo']} revision {pin['rev']} is not published") from None
         # A fresh checkout with an untouched index, so a clean status means the files are the pin's.
-        if git(destination, "rev-parse", "HEAD") != pin["rev"] or git(destination, "status", "--porcelain"):
+        if (git(destination, "--no-replace-objects", "rev-parse", "HEAD") != pin["rev"]
+                or git(destination, "--no-replace-objects", "status", "--porcelain")
+                or replacement_refs(destination)):
             raise TeamError(f"Companion {pin['repo']} checkout does not match pin {pin['rev']}")
-        baselines[pin["repo"]] = {"git": metadata(destination), "files": snapshot(destination)}
+        # Taken after the last Git command that may rewrite the index.
+        baselines[pin["repo"]] = {"git": metadata(destination), "files": snapshot(destination),
+                                  "store": git_tree(destination), "index": index(destination)}
     return baselines
 
 
 def verify(root, pins, baselines):
     """Refuse evidence from companion checkouts that no longer match their pins: replaced
-    directories, changed Git configuration, a moved HEAD, or changed, hidden, ignored, or
-    added files. Contents are compared with the snapshot taken at checkout, not with Git's
-    view, which index flags and ignore rules can change. Configuration is checked before
-    Git runs in a checkout that commands could edit."""
+    directories, changed Git configuration, a moved HEAD, changed, hidden, ignored, or added
+    files, or Git objects, refs, replacement refs, grafts, or alternates that make Git reads
+    return other contents than the pin's. Contents are compared with snapshots taken at
+    checkout, not with Git's view, which index flags, ignore rules, and replacement refs can
+    change. Configuration and the object store are checked before Git runs in a checkout that
+    commands could edit, and that Git ignores replacement refs."""
     for pin in pins:
         destination = root / basename(pin["repo"])
         changed = TeamError(f"Companion {pin['repo']} changed from pin {pin['rev']} during the stage; "
@@ -199,8 +246,14 @@ def verify(root, pins, baselines):
         baseline = baselines[pin["repo"]]
         try:
             assert_metadata(destination, baseline["git"])
+            if substitutions(destination):
+                raise changed
             files = snapshot(destination)
+            objects = git_tree(destination)
         except (TeamError, OSError):
             raise changed from None
-        if files != baseline["files"] or git(destination, "rev-parse", "HEAD") != pin["rev"]:
+        if files != baseline["files"] or objects != baseline["store"]:
+            raise changed
+        if (git(destination, "--no-replace-objects", "rev-parse", "HEAD") != pin["rev"]
+                or replacement_refs(destination) or index(destination) != baseline["index"]):
             raise changed

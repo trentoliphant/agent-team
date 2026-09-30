@@ -25,7 +25,9 @@ automatically. The initial adapters were exercised with Codex 0.157.1 and Claude
 Code 2.1.283.
 
 Authentication status checks cannot measure remaining subscription capacity or
-override account entitlements. Quota failures queue a later retry. A personal
+override account entitlements. Quota failures queue a bounded later retry and set a shared cooldown for that
+agent family in the local state directory. Calls within a family are serialized;
+other families and non-agent stages can continue. A personal
 subscription is not a guarantee of unlimited unattended throughput. Provider
 policies, administrative configuration, and CLI interfaces may change.
 
@@ -53,7 +55,11 @@ Companion repositories are declared by the operator, confirmed public at
 declaration, and cloned anonymously at full commit SHAs. Clones run with an
 empty temporary home, so local credentials such as `.netrc` are not used. A committed manifest can
 re-pin declared companions but cannot add new ones. Companion code runs during
-validation like project code, so declare only repositories you trust.
+validation like project code, so declare only repositories you trust. Companion
+checkouts are compared with their fresh-clone state after each validation command
+and after review, including `.git` (replacement refs, grafts, alternates, objects).
+A command that changes a checkout and fully restores it before exiting is not
+detected.
 
 Only register repositories you trust. Validation commands and project code execute
 in fresh candidate clones with the operator's filesystem access. Issue text is untrusted input, and

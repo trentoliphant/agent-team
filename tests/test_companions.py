@@ -102,7 +102,10 @@ class CompanionTests(unittest.TestCase):
             run = self.tick()
             if run["stage"] == stage:
                 return run
-        self.fail(f"run did not reach {stage}: {run['stage']} {run.get('error')}")
+        # A "waiting" result names no run; the stored runs' errors explain it.
+        stored = [(r["stage"], r.get("error")) for r in self.store.runs()]
+        self.fail(f"run did not reach {stage}: {run['stage']} {run.get('error') or run.get('reason')}; "
+                  f"runs: {stored}")
 
     def test_manifest_pinned_suite_preserves_basenames_and_records_pins(self):
         manifest = {"companions": [{"repo": "example/lib", "rev": self.lib_v1}]}
@@ -186,10 +189,12 @@ class CompanionTests(unittest.TestCase):
         self.assertIn(f"example/lib at {self.lib_v2}", self.agents.prompts["review"])
 
     def test_changed_or_removed_pin_before_publication_requires_new_validation(self):
-        for name, rev in (("changed", self.lib_v2), ("removed", None)):
+        for name in ("changed", "removed"):
             with self.subTest(name):
                 self.tearDown()
                 self.setUp()
+                # Read after setUp: each setUp commits new fixtures, whose SHAs differ once the clock ticks.
+                rev = self.lib_v2 if name == "changed" else None
                 self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
                 run = self.tick(3)
                 self.assertEqual(run["stage"], "publish")
@@ -264,6 +269,42 @@ class CompanionTests(unittest.TestCase):
                 self.assertIsNone(run.get("validated_sha"))
                 self.assertEqual(run.get("revision_history", []), [])
                 self.assertEqual(self.github.creates, 0)
+
+    def test_validation_cannot_substitute_companion_objects(self):
+        replace = ("cd ../lib && blob=$(echo replaced | git hash-object -w --stdin)"
+                   " && tree=$(printf '100644 blob %s\\tlib.txt\\n' \"$blob\" | git mktree)"
+                   " && commit=$(git -c user.name=M -c user.email=m@example.invalid commit-tree \"$tree\" -m r)"
+                   " && git replace HEAD \"$commit\" && git show HEAD:lib.txt")
+        for name, command, consumed in (
+                ("replacement ref", replace, True),
+                ("replacement removed after use", replace + ' && git replace -d "$(git rev-parse HEAD)"', True),
+                ("graft", "cd ../lib && git rev-parse HEAD > .git/info/grafts && git rev-list --count HEAD", False)):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                self.primary({}, [{"repo": "example/lib", "rev": self.lib_v2}], test=command)
+                run = self.tick(3)
+                if consumed:
+                    # The command read the replacement's contents while HEAD still named the pin.
+                    log = (self.store.artifacts(run) / "test-0-0.log").read_text()
+                    self.assertIn("replaced", log)
+                self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "validate"))
+                self.assertIn("Companion example/lib changed", run["error"])
+                self.assertIsNone(run.get("validated_sha"))
+                self.assertIsNone(run.get("tests"))
+                self.assertEqual(self.github.creates, 0)
+
+    def test_verify_rejects_replacement_refs(self):
+        pins = [{"repo": "example/lib", "rev": self.lib_v2}]
+        baselines = companions.populate(self.root, pins, 60)
+        lib = self.root / "lib"
+        git(lib, "replace", self.lib_v2, self.lib_v1)
+        # Git reads through the replacement return other contents under the pinned name.
+        self.assertEqual(git(lib, "rev-parse", "HEAD"), self.lib_v2)
+        self.assertEqual(git(lib, "show", "HEAD:lib.txt"), "v1")
+        self.assertEqual(companions.substitutions(lib), ["refs/replace"])
+        with self.assertRaisesRegex(TeamError, "Companion example/lib changed"):
+            companions.verify(self.root, pins, baselines)
 
     @staticmethod
     def hide_edit(lib):
