@@ -115,10 +115,11 @@ optional note, and queues its comment the same way:
   affect it. Each decision records the resulting limit, and `extension` records
   the cumulative authorized amount.
 - `repair`: move to `repair`. If validation exhausted the limit before anything
-  was published, `decide` first clones the author checkout at the rejected commit
-  into a local repair checkout and fingerprints its Git metadata. The author
-  checkout is not touched. An interruption before the save leaves only an unused
-  clone.
+  was published, `decide` first checks the author checkout's recorded Git
+  metadata, then clones it at the rejected commit into a local repair checkout
+  and fingerprints that checkout's metadata. Changed author metadata is refused
+  before any Git command runs. The author checkout is not touched. An
+  interruption before the save leaves only an unused clone.
 - `rescope`: close locally.
 - `stop`: close locally.
 
@@ -146,7 +147,11 @@ For an unpublished candidate, `adopt` takes the committed HEAD of the local
 repair checkout instead of a PR head. It refuses uncommitted changes, changed Git
 metadata, a rejected commit, and a HEAD that does not descend from the rejected
 commit, so history is extended, never rewritten. The same contributor and trailer
-checks apply. The adopted commit replaces the author checkout (the old one is
+checks apply; trailers on commits from the base are excluded. Like remote
+adoption, it fetches the current registered base and merges it into a clone of
+the repair. On a conflict, adoption is refused and the repair checkout is kept;
+merge the base there and adopt again. The run records the merged candidate and
+the new base commit. That candidate replaces the author checkout (the old one is
 preserved) and enters `validate` in the next round. Nothing is pushed until it
 passes validation. It is then published as a draft PR, like any candidate, and
 reviewed as that exact commit before it can be ready. The adoption comment goes to

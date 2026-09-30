@@ -310,7 +310,9 @@ If validation used up the limit before anything was published, there is no PR
 branch. `decide RUN_ID repair` then creates a local repair checkout at the
 rejected commit; `agent-team handoff RUN_ID` shows its path. Commit repairs there
 on top of that commit, then run `adopt` as above. Uncommitted changes and
-rewritten history are refused. The adopted commit is validated before anything
+rewritten history are refused. Adoption merges the current base into the
+repair; on a conflict, the repair checkout is kept so you can merge the base
+there and adopt again. The adopted commit is validated before anything
 is pushed, then published as a draft PR and independently reviewed as that exact
 commit.
 `rescope` does not edit the issue. It stops this run; open a linked issue with the

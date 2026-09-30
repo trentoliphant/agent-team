@@ -128,6 +128,8 @@ class WorkflowTests(unittest.TestCase):
             if "push" in args:
                 index = args.index("push")
                 args[index + 1] = str(self.remote)
+            if "fetch" in args:
+                args = [str(self.remote) if str(a).startswith("https://github.com/") else a for a in args]
             return git(cwd, *args)
 
         self.exec_patch = patch("agent_team.coordinator.clone_repository", side_effect=local_clone)
@@ -860,6 +862,67 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["reviewed_sha"], run["outbox"]), ("ready", head, []))
         self.assertIn((1, f"{run['id']}-adopt-1"), self.github.comments)
         self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def advance_base(self, name="base.txt", text="base\n"):
+        work = self.root / f"base-{time.time_ns()}"
+        execute(["git", "clone", "--branch", "main", str(self.remote), str(work)])
+        (work / name).write_text(text)
+        git(work, "add", "--all")
+        git(work, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Base moved\n\nAgent-Family: anthropic")
+        git(work, "push", "origin", "HEAD")
+        return git(work, "rev-parse", "HEAD")
+
+    def test_repair_decision_checks_author_metadata_before_cloning(self):
+        run = self.exhaust_unpublished()
+        config = self.store.workspace(run) / ".git" / "config"
+        config.write_text(config.read_text() + "[core]\n\tfsmonitor = touch-owned\n")
+        with patch("agent_team.coordinator.execute") as clone:
+            with self.assertRaises(TeamError):
+                self.team.decide(run["id"], "repair")
+            clone.assert_not_called()
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("decisions"), run.get("repair_checkout")), ("handoff", None, None))
+        self.assertEqual(list(self.store.workspace(run).parent.glob("repair-*")), [])
+
+    def test_unpublished_repair_integrates_moved_base_before_validation(self):
+        run = self.exhaust_unpublished()
+        self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        head = self.commit_local(Path(run["repair_checkout"]["path"]))
+        # The base moves during the handoff; its trailers are not the repair's contributors.
+        base = self.advance_base()
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        sha = run["sha"]
+        self.assertNotEqual(sha, head)
+        self.assertEqual((run["stage"], run["base_sha"]), ("validate", base))
+        self.assertEqual({k: run["adoptions"][0][k] for k in ("head", "sha", "base_sha")},
+                         {"head": head, "sha": sha, "base_sha": base})
+        for parent in (head, base):
+            git(self.store.workspace(run), "merge-base", "--is-ancestor", parent, sha)
+        self.assertIn(f"merges current base `{base}`", self.github.comments[(1, f"{run['id']}-adopt-1")])
+        self.assertEqual(self.github.creates, 0)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["validated_sha"], run["published_sha"], run["reviewed_sha"]),
+                         ("ready", sha, sha, sha))
+        self.assertEqual(git(self.remote, "rev-parse", run["branch"]), sha)
+
+    def test_unpublished_repair_conflicting_with_moved_base_keeps_repair_checkout(self):
+        run = self.exhaust_unpublished()
+        self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        checkout = Path(run["repair_checkout"]["path"])
+        head = self.commit_local(checkout)
+        self.advance_base("feature.txt", "conflicting\n")
+        with self.assertRaises(TeamError) as caught:
+            self.team.adopt(run["id"], ["human"])
+        self.assertIn("conflicts with current base", str(caught.exception))
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("adoptions"), run["repair_checkout"]["path"]),
+                         ("repair", None, str(checkout)))
+        self.assertEqual((git(checkout, "rev-parse", "HEAD"), git(checkout, "status", "--porcelain")), (head, ""))
+        self.assertEqual(self.github.creates, 0)
 
     def test_edit_after_validation_never_publishes(self):
         run = self.tick(3)

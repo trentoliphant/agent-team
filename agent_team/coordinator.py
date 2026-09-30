@@ -832,6 +832,8 @@ class Coordinator:
             # checkout is untouched, and the clone is made before the decision is saved, so an interruption
             # leaves at most an unused directory and the decision can be recorded again.
             checkout = self.store.workspace(run).parent / f"repair-{time.time_ns()}"
+            # Like any active stage, check the author checkout's recorded metadata before Git runs against it.
+            assert_metadata(self.store.workspace(run), run["git_metadata"])
             execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                      str(self.store.workspace(run)), str(checkout)], env=git_env(), timeout=project["timeout"])
             git(checkout, "checkout", "-B", run["branch"], run["sha"])
@@ -938,21 +940,38 @@ class Coordinator:
         except TeamError:
             raise TeamError("The repair must build on the rejected commit without rewriting history "
                             "(previous work retained)") from None
-        trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{run['base_sha']}..{candidate}")
+        # Like remote adoption, integrate the current registered base before validation, so the
+        # validated and published candidate is not built on a stale base.
+        git(fresh, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+            "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/heads/{project['base']}")
+        base_sha = git(fresh, "rev-parse", "FETCH_HEAD")
+        # Base commits are not part of the repair, so their trailers are excluded.
+        trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", candidate,
+                       f"^{run['base_sha']}", f"^{base_sha}")
         families = contributing_families(run, declared) | {
             line.strip().casefold() for line in trailers.splitlines() if line.strip()}
         if FAMILIES[run["reviewer"]] in families:
             raise TeamError("Commit trailers show the reviewer's family contributed; no independent agent "
                             "review is possible (previous work retained)")
+        try:
+            git(fresh, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
+                "-c", "commit.gpgsign=false", "merge", "--no-edit", base_sha)
+        except TeamError:
+            raise TeamError(f"The repair conflicts with current base {base_sha}; merge it in the repair checkout "
+                            "and adopt again (repair checkout retained)") from None
+        sha = git(fresh, "rev-parse", "HEAD")
         # A crash after the swap but before the save leaves the run in repair; adopting again is safe.
         if cwd.exists():
             cwd.rename(cwd.parent / f"author-preserved-{time.time_ns()}")
         fresh.rename(cwd)
         round_ = run["round"] + 1
-        adoption = {"head": candidate, "sha": candidate, "base_sha": run["base_sha"], "declared": declared,
+        adoption = {"head": candidate, "sha": sha, "base_sha": base_sha, "declared": declared,
                     "families": sorted(families), "round": round_, "local": True, "at": time.time()}
+        merged = (f" Candidate `{sha}` merges current base `{base_sha}`." if sha != candidate
+                  else f" It is up to date with base `{base_sha}`.")
         body = (f"**Agent Team: adopted direct repair**\n\nRun `{run['id']}` adopted local repair commit "
-                f"`{candidate}`, which extends rejected candidate `{repair['candidate']}` and was never pushed.\n\n"
+                f"`{candidate}`, which extends rejected candidate `{repair['candidate']}` and was never pushed."
+                f"{merged}\n\n"
                 f"Declared contributors: {', '.join(declared)}. Contributing model families: "
                 f"{', '.join(adoption['families'])}. Independent review: `{run['reviewer']}` "
                 f"({FAMILIES[run['reviewer']]}), which did not contribute.\n\n"
@@ -961,7 +980,7 @@ class Coordinator:
                 "past the limit returns to the operator. Only the maintainer decides whether to merge.")
         write = {"type": "comment", "number": run["issue"], "marker": f"{run['id']}-adopt-{round_}",
                  "body": body, "heading": "Agent Team adoption"}
-        self.store.save(run, sha=candidate, reviewed_sha=None, review_record=None, validated_sha=None,
+        self.store.save(run, sha=sha, base_sha=base_sha, reviewed_sha=None, review_record=None, validated_sha=None,
                         validated_tree=None, git_metadata=metadata(cwd), pending_push_sha=None,
                         needs_revision=False, stage="validate", in_flight=False, round=round_, error=None,
                         repair_checkout=None,
