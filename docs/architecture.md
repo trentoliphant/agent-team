@@ -94,7 +94,9 @@ and a failure status) in an `outbox`. Notification ticks publish the outbox with
 idempotent marked comments. A crash or GitHub failure therefore delays
 publication but never loses or duplicates it. A review verdict is saved with its
 commit before being published. If an interruption happens before the handoff,
-`resume` reuses that verdict instead of calling the reviewer again.
+`resume` reuses that verdict instead of calling the reviewer again. The handoff
+save also clears the in-flight marker, and crash reconciliation keeps a run in
+`handoff` or `repair` rather than blocking it, so decisions stay available.
 
 Handoff and repair runs are recovery states. They stop new intake and refuse
 `resume` and `refresh`. `decide` records one of four operator decisions, with an
@@ -105,12 +107,15 @@ optional note, and queues its comment the same way:
 - `rescope`: close locally.
 - `stop`: close locally.
 
-`adopt` accepts a repaired PR head only in `repair`. The head must not be a
+`adopt` accepts a repaired PR head in `repair`, or in `stale` after an earlier
+adoption. After an adoption, `refresh` refuses a changed head, so every later
+external head goes through `adopt` with declared contributors. The head must not be a
 rejected commit. The run's contributing families are the author's family, the
 declared contributors, and any `Agent-Family` trailers between base and head.
 If the reviewer's family is among them, adoption is refused. Review also
 enforces this check. Adoption reuses refresh integration, then requires new
-validation and review under the same bound. Explicit refresh of a stale run starts
+validation and review under the same bound. Every refresh applies the same trailer
+check. Explicit refresh of a stale run starts
 new validation and review; it does not silently authorize unlimited automatic
 revisions.
 

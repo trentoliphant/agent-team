@@ -351,7 +351,10 @@ class Coordinator:
             runs = [target] if target else []
         # A dead process never causes silent agent re-execution.
         for run in runs:
-            if run.get("in_flight"):
+            if run.get("in_flight") and run["stage"] in {"handoff", "repair"}:
+                # A handoff or decision is recorded in one save; keep it so decisions stay available.
+                self.store.save(run, in_flight=False, notification_pending=True)
+            elif run.get("in_flight"):
                 self.store.save(run, resume_stage=run["stage"], stage="blocked", in_flight=False,
                                 error="Previous process stopped mid-stage. Inspect artifacts, then resume.",
                                 notification_pending=True)
@@ -542,7 +545,8 @@ class Coordinator:
                            "description": "Revision limit reached; operator decision needed"})
         handoffs = run.get("handoffs", []) + [{"round": run["round"], "limit": limit, "candidate": run["sha"],
                                                "text": body, "at": time.time()}]
-        self.store.save(run, **changes, stage="handoff", resume_stage=None, handoffs=handoffs,
+        # The handoff is complete once saved, so the same save ends the in-flight stage.
+        self.store.save(run, **changes, stage="handoff", resume_stage=None, handoffs=handoffs, in_flight=False,
                         error="Revision limit reached; operator decision required (agent-team handoff RUN_ID)",
                         **self.queue_writes(run, *writes))
 
@@ -687,14 +691,35 @@ class Coordinator:
                     stage="validate", in_flight=False, round=run["round"] + 1,
                     notification_pending=True, error=None), extra
 
+    def contributor_check(self, run, declared, adopting):
+        """Refuse a PR head whose commits show the reviewer's family, via declarations, earlier
+        adoptions, or Agent-Family trailers. After an adopted repair, a changed head must be
+        adopted again with declared contributors; refresh cannot take it silently."""
+        def check(fresh, candidate, base_sha):
+            if adopting and candidate in run.get("rejected_shas", []):
+                raise TeamError("PR head is still a rejected candidate; push a repair commit first (previous work retained)")
+            if not adopting and run.get("adoptions") and candidate != run.get("published_sha"):
+                raise TeamError("PR head changed after an adopted repair; declare its contributors with "
+                                "agent-team adopt RUN_ID --contributor ... (previous work retained)")
+            trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{base_sha}..{candidate}")
+            found = {line.strip().casefold() for line in trailers.splitlines() if line.strip()}
+            families = contributing_families(run, declared) | found
+            if FAMILIES[run["reviewer"]] in families:
+                raise TeamError("Commit trailers show the reviewer's family contributed; no independent agent "
+                                "review is possible (previous work retained)")
+            return families
+        return check
+
     def refresh(self, run_id):
         """Explicitly adopt current remote PR and integrate base, retaining old work."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
-        if run["stage"] in {"handoff", "repair"}:
+        if run["stage"] in {"handoff", "repair"} or (
+                run["stage"] == "blocked" and run.get("resume_stage") in {"handoff", "repair"}):
             raise TeamError("The revision limit was reached: record a decision with decide, "
                             "and adopt direct repairs with adopt")
-        changes, _ = self.integrate(project, run)
+        changes, families = self.integrate(project, run, self.contributor_check(run, [], adopting=False))
+        changes.update(contributors=sorted(set(run.get("contributors", [])) | families))
         self.store.save(run, **changes)
         self.github.status(project["repo"], run["published_sha"], "pending", "Refresh requested; tests and independent review must run again")
         self.notify(project, run)
@@ -738,30 +763,20 @@ class Coordinator:
     def adopt(self, run_id, contributors):
         """Adopt an externally repaired PR head as a new candidate. The operator declares who
         contributed; Agent-Family commit trailers add to that. The reviewer's family must not
-        appear, and the candidate needs new validation and review within the revision limit."""
+        appear, and the candidate needs new validation and review within the revision limit.
+        A recovered run whose head changed again (stale) is adopted the same way."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
-        if run["stage"] != "repair":
-            raise TeamError("Adopt applies only to runs handed off for direct repair")
+        if not (run["stage"] == "repair" or (run["stage"] == "stale" and run.get("adoptions"))):
+            raise TeamError("Adopt applies only to runs handed off for direct repair, "
+                            "or to recovered runs whose PR head changed again")
         declared = sorted(set(contributors or []))
         if not declared or not set(declared) <= set(CONTRIBUTORS):
             raise TeamError(f"Declare at least one contributor: {', '.join(CONTRIBUTORS)}")
         if FAMILIES[run["reviewer"]] in contributing_families(run, declared):
             raise TeamError("The reviewer's family contributed to the repair, so no independent agent review "
                             "is possible; review it yourself, or rescope or stop the run")
-
-        def check(fresh, candidate, base_sha):
-            if candidate in run.get("rejected_shas", []):
-                raise TeamError("PR head is still a rejected candidate; push a repair commit first (previous work retained)")
-            trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{base_sha}..{candidate}")
-            found = {line.strip().casefold() for line in trailers.splitlines() if line.strip()}
-            families = contributing_families(run, declared) | found
-            if FAMILIES[run["reviewer"]] in families:
-                raise TeamError("Commit trailers show the reviewer's family contributed; no independent agent "
-                                "review is possible (previous work retained)")
-            return families
-
-        changes, families = self.integrate(project, run, check)
+        changes, families = self.integrate(project, run, self.contributor_check(run, declared, adopting=True))
         adoption = {"head": changes["published_sha"], "sha": changes["sha"], "base_sha": changes["base_sha"],
                     "declared": declared, "families": sorted(families), "round": changes["round"], "at": time.time()}
         limit = project["max_revisions"] + run.get("extension", 0)

@@ -199,10 +199,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["stage"], "handoff")
         return run
 
-    def push_repair(self, run, message="Human repair"):
+    def push_repair(self, run, message="Human repair", text="repaired\n"):
         work = self.root / f"repair-{time.time_ns()}"
         execute(["git", "clone", "--branch", run["branch"], str(self.remote), str(work)])
-        (work / "feature.txt").write_text("repaired\n")
+        (work / "feature.txt").write_text(text)
         git(work, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
             "-c", "commit.gpgsign=false", "commit", "-am", message)
         git(work, "push", "origin", "HEAD")
@@ -325,6 +325,71 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(TeamError):
             self.team.adopt(run["id"], ["human"])
         self.assertEqual(self.store.get(run["id"])["stage"], "repair")
+
+    def test_head_change_after_adoption_needs_new_adoption_and_independent_review(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run)
+        self.team.adopt(run["id"], ["human"])
+        calls = len(self.agents.calls)
+        self.push_repair(run, "Second repair\n\nAgent-Family: anthropic", "repaired again\n")
+        self.tick()
+        run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "stale")
+        with self.assertRaises(TeamError):  # refresh cannot take a new external head without declarations
+            self.team.refresh(run["id"])
+        with self.assertRaises(TeamError):  # trailers show the reviewer's family contributed
+            self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "stale")
+        self.assertNotIn("anthropic", run["contributors"])
+        self.assertEqual(len(run["adoptions"]), 1)
+        self.assertEqual(self.agents.calls[calls:], [])
+
+    def test_second_human_repair_after_adoption_is_adopted_again(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run)
+        self.team.adopt(run["id"], ["human"])
+        head = self.push_repair(run, "Second repair", "repaired again\n")
+        self.assertEqual(self.tick()["stage"], "stale")
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], len(run["adoptions"])), ("validate", head, 2))
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", head))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def test_interruption_right_after_handoff_save_keeps_decisions(self):
+        real = self.team.revise
+        def crash(project, run, *args, **kwargs):
+            real(project, run, *args, **kwargs)
+            if run["stage"] == "handoff":
+                raise KeyboardInterrupt()
+        with patch.object(self.team, "revise", side_effect=crash):
+            with self.assertRaises(KeyboardInterrupt):
+                self.exhaust()
+        run = self.store.runs()[0]
+        self.assertEqual((run["stage"], run["in_flight"], len(run["outbox"])), ("handoff", False, 2))
+        # State left by an older coordinator that saved the handoff while still in flight.
+        self.store.save(run, in_flight=True)
+        calls = len(self.agents.calls)
+        self.assertEqual(self.tick()["stage"], "waiting")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["in_flight"], run["outbox"]), ("handoff", False, []))
+        self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+        self.assertEqual(len(self.agents.calls), calls)
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
+        self.team.decide(run["id"], "repair")
+        self.assertEqual(self.store.get(run["id"])["stage"], "repair")
+
+    def test_refresh_refuses_blocked_handoff(self):
+        run = self.exhaust()
+        self.store.save(run, stage="blocked", resume_stage="handoff")
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
 
     def test_interrupted_handoff_publication_is_retried_without_agents(self):
         real = self.github.comment

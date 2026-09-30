@@ -171,7 +171,7 @@ recovery unless already explicitly granted; do not loop recovery commands.
 | Stale PR head or base | `agent-team refresh RUN_ID` adopts the current head, integrates the registered base, preserves previous work, and requires fresh validation and review. `resume` cannot reuse stale evidence. |
 | Abandon local orchestration | `agent-team close RUN_ID` preserves work and leaves the GitHub issue and PR open; it can publish a status notification. |
 | Revision limit reached (`handoff`) | `agent-team handoff RUN_ID` shows the handoff, then record the operator's choice. `agent-team decide RUN_ID extend --revisions N` authorizes N (1-3) more revisions. `decide RUN_ID repair` hands off for direct repair. `decide RUN_ID rescope` or `decide RUN_ID stop` stops the run. Add `--note TEXT` to publish a note. `resume` and `refresh` are refused. |
-| Direct repair pushed (`repair`) | `agent-team adopt RUN_ID --contributor human` (repeat for each of `openai`, `anthropic`, `human` that contributed) adopts the new PR head for new validation and independent review. |
+| Direct repair pushed (`repair`) | `agent-team adopt RUN_ID --contributor human` (repeat for each of `openai`, `anthropic`, `human` that contributed) adopts the new PR head for new validation and independent review. If the head changes again after adoption (`stale`), `refresh` is refused; run `adopt` again with the new contributors. |
 
 At a handoff, report the run, PR, candidate commit, validation, and each
 remaining finding with its `repeated`, `uncertain`, `new`, or `first` label. Do

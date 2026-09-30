@@ -286,6 +286,8 @@ because no independent agent review is then possible. In that case, review it
 yourself, or rescope or stop. An adopted head merges the current base, preserves
 the previous checkout, and needs new validation and exact-commit review. It stays
 in the same run, PR, and history. A rejection after adoption returns to `handoff`.
+If the PR head changes again after adoption, the run goes `stale`. `refresh` then
+refuses it; run `adopt` again and declare the new contributors.
 `rescope` does not edit the issue. It stops this run; open a linked issue with the
 new scope and `approve` it.
 
