@@ -993,6 +993,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.tick()["stage"], "waiting")
         self.assertEqual(len(self.agents.calls), calls)
         self.store.save(run, retry_at=time.time() - 1)
+        self.store.db.execute("DELETE FROM meta WHERE key LIKE 'quota-%'")
+        self.store.db.commit()
         self.assertEqual(self.tick()["stage"], "validate")
 
     def test_interruption_requires_explicit_resume(self):
@@ -1159,6 +1161,10 @@ class WorkflowTests(unittest.TestCase):
             if attempt < 2:
                 self.assertEqual(run["stage"], "quota_wait")
                 self.store.save(run, retry_at=time.time() - 1)
+                self.store.db.execute("DELETE FROM meta WHERE key LIKE 'quota-%'")
+                self.store.db.commit()
+        self.store.db.execute("DELETE FROM meta WHERE key LIKE 'quota-%'")
+        self.store.db.commit()
         self.assertEqual(run["stage"], "blocked")
         self.assertEqual(run["quota_attempts"], 3)
 
@@ -1304,6 +1310,9 @@ class WorkflowTests(unittest.TestCase):
         for outcome in (TeamError("failed"), QuotaError("quota exhausted"),
                         {"report": {"message": " "}}):
             with self.subTest(outcome=outcome):
+                # Isolate each outcome from the preceding shared quota cooldown.
+                self.store.db.execute("DELETE FROM meta WHERE key LIKE 'quota-%'")
+                self.store.db.commit()
                 # A new policy is a distinct update, allowing one new attempt.
                 self.store.save_writing({"status": {"instructions": str(outcome)}})
                 kwargs = ({"side_effect": outcome} if isinstance(outcome, Exception)
@@ -1432,7 +1441,7 @@ class ContractTests(unittest.TestCase):
             store = Store(tmp)
             store.register("one", "example/repo", "main", ["true"])
             with self.assertRaises(TeamError):
-                store.register("two", "example/repo", "main", ["true"])
+                store.register("one", "example/other", "main", ["true"])
             store.db.close()
 
 

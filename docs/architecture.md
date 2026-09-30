@@ -25,7 +25,7 @@ paths in validation commands.
 ## Durable transitions
 
 Every tick saves its intended stage before doing work. If the process disappears,
-the next tick moves the run to blocked and requires explicit resume. Finished
+the next tick after acquiring its repository lock moves the run to blocked and requires explicit resume. Finished
 stages are saved before publishing the issue status comment. A pending-notification
 flag lets a later tick retry a failed comment update. Comment markers and PR head
 branches make retries idempotent in a single coordinator installation. Bodies
@@ -51,12 +51,39 @@ a successful push can be reconciled without treating it as an external edit.
 Unexpected remote heads require explicit refresh. The coordinator does not
 force-push or reset the author's checkout.
 
-One global advisory process lock serializes mutating commands on a single host.
-Pause is stored immediately and takes effect after the current stage finishes.
-Read-only status works during a run. Other mutating commands fail with a clear
-busy message if they cannot acquire the worker lock.
-The watch loop releases the lock between ticks. A service manager may restart a
-watch process, but interrupted agent work still requires explicit recovery.
+Workers share an advisory administrative gate and hold an exclusive lock for the
+case-insensitive registered GitHub repository identity. A bounded set of slot
+locks limits concurrent ticks (`configure --concurrency`, default 1). Multiple
+registrations share repository exclusion and durable issue claims. Active work
+stays with the original registration. Global configuration (concurrency, project
+registration/configuration, and writing changes) takes the gate exclusively and
+requires all workers to be idle. Run recovery and decisions, adoption, refresh,
+approvals, queue edits, and label setup take the shared gate and the affected
+repository lock without consuming a slot. Discovery takes the same locks as a
+worker, including a bounded slot, across its model call and publication. Pause uses a short independent
+SQLite transaction and takes effect between ticks. Watch releases its locks
+between ticks and polls on contention; read-only status remains available.
+
+SQLite write transactions serialize assignment rotation and duplicate-claim
+checks across repository aliases. Run updates and journal entries commit together.
+Configuration field updates read the current project inside their transaction,
+so a concurrent pause cannot be overwritten by an older project snapshot.
+Locks remain on disk and must never be unlinked while the directory is in use.
+OS lock ownership, rather than PID checks or elapsed time, distinguishes live
+workers from interrupted in-flight stages. Interrupted work still requires an
+explicit resume after inspection; no automatic subscription replay occurs.
+
+Subscription calls take a separate per-family lock. A quota error persists a
+family cooldown shared across workers. Busy families and cooldowns defer runs
+without calls or quota attempt increments. Actual quota failures retain bounded
+retries. Diagnostic smoke calls serialize and respect existing cooldowns but
+never persist a cooldown on failure. Other families and stages remain available. Optional status rewrites
+retain their one-attempt fallback when capacity is unavailable.
+
+This coordination boundary is one host and one shared local state directory.
+Independent directories, remote filesystems, GitHub repository aliases caused by
+renames, and mixed coordinator versions are outside the boundary. Stop all workers
+before migration or backup. Companion repository validation is independent work.
 
 ## Review independence
 
@@ -180,7 +207,7 @@ Repositories with no GitHub checks still require local validation and agent
 review. Branch protection remains the authoritative merge-time CI gate, including
 checks that appear after the coordinator's poll.
 
-This release does not provide a web UI, multi-host leases, parallel workers,
+This release does not provide a web UI, multi-host leases,
 GitHub Projects synchronization, automatic semantic issue deduplication,
 general-purpose plugin loading, autonomous prioritization, or automatic merge.
 GitHub issues, comments, PRs, and commit statuses are the shared record; SQLite
@@ -189,10 +216,10 @@ holds resumable execution details and local logs.
 ## Issue ordering
 
 Projects store `queue_order` in their existing SQLite configuration. Queue edits
-use the coordinator lock. Inspection reads open issues and matching approvals
+use the affected repository lock and shared administrative gate. Inspection reads open issues and matching approvals
 without publishing changes. Eligible listed issues precede unlisted issues by
 creation time (issue number breaks ties). Explicit selection does not rewrite
 the queue. Existing active runs take priority; blocked, quota-waiting, handoff, and repair runs
 prevent new assignments. Targeted ticks reject conflicting work and limit
 reconciliation, notifications, and execution to the selected issue. Interrupted
-stages still require recovery. Completed runs retain their unique issue claim.
+stages still require recovery. Completed runs retain their unique repository-wide issue claim.
