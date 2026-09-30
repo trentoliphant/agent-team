@@ -682,7 +682,8 @@ class Coordinator:
                                               local_changes=bool(context["dirty"]))(
                 self.store.workspace(run), context["head"], run["base_sha"])
             self.store.save(run, contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
-                            pending_contribution=None, commit_contributors=contributors,
+                            pending_contribution=None,
+                            commit_contributors=sorted(set(run.get("commit_contributors") or []) | set(contributors)),
                             contribution_history=run.get("contribution_history", []) +
                             [{"at": time.time(), "context": context, "declared": contributors}])
         if previous and context != previous:
@@ -986,9 +987,12 @@ class Coordinator:
         assert_metadata(cwd, run["git_metadata"])
         if git(cwd, "rev-parse", "HEAD") != before:
             raise TeamError("Worker changed commit history; manual inspection required")
-        if run.get("commit_contributors"):
-            self.store.save(run, commit_contributors=sorted(set(run["commit_contributors"]) | {FAMILIES[run["author"]]}))
-        self.store.save(run, author_record=record, stage=self.successor(run, "revision" if run["stage"] == "revision" else "implement", "validate"))
+        # Keep attribution until validation commits the candidate, including
+        # when a human contributes after an implementation stop boundary.
+        self.store.save(run, commit_contributors=sorted(set(run.get("commit_contributors") or []) |
+                                                       {FAMILIES[run["author"]]}),
+                        author_record=record,
+                        stage=self.successor(run, "revision" if run["stage"] == "revision" else "implement", "validate"))
 
     def validate(self, project, run):
         # A failure persisted for this exact commit is recorded after an interruption, never rerun.

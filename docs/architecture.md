@@ -219,7 +219,7 @@ Projects store `queue_order` in their existing SQLite configuration. Queue edits
 use the affected repository lock and shared administrative gate. Inspection reads open issues and matching approvals
 without publishing changes. Eligible listed issues precede unlisted issues by
 creation time (issue number breaks ties). Explicit selection does not rewrite
-the queue. Existing active runs take priority; blocked, quota-waiting, handoff, and repair runs
+the queue. Existing active runs take priority; blocked, quota-waiting, handoff, repair, and stopped runs
 prevent new assignments. Targeted ticks reject conflicting work and limit
 reconciliation, notifications, and execution to the selected issue. Interrupted
 stages still require recovery. Completed runs retain their unique repository-wide issue claim.
@@ -241,11 +241,19 @@ adoption from outside the coordinator remains companion #10.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor
-work. Selected extension/adoption returns to a stop boundary. Failed evidence,
+work. A stopped selection holds the repository, including other registrations,
+and blocks queue work and new selections across restarts. Explicit continuation
+reuses the run; `close RUN_ID` releases the repository while preserving work and
+history and leaving GitHub issues and PRs open. Closing is terminal, so the same
+issue or task scope cannot restart the run. Close finished partial work only when
+no continuation is planned.
+Selected extension/adoption returns to a stop boundary. Failed evidence,
 contributor declarations, and revision limits survive re-entry. Identical task
 scope cannot be recreated to discard history, and rejected input commits cannot
 be imported into new runs. Local handoff edits require declared contributors;
-human edits are never labeled as work by the assigned model family.
+human-only edits are never labeled as work by the assigned model family. When an
+author pass has left uncommitted work, its family attribution survives a human
+handoff until the candidate commit records both contributors.
 
 Candidate fingerprints include working content, tracked trees and pins, exact
 HEAD/base, immutable scope, and execution configuration. Evidence-consuming stages

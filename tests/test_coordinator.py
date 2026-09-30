@@ -599,6 +599,35 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("Agent-Family:", message)
         self.assertEqual(self.github.creates, 0)
 
+    def test_uncommitted_agent_handoff_preserves_agent_and_human_attribution(self):
+        for selected in (False, True):
+            with self.subTest(selected=selected):
+                if selected:
+                    run = self.team.select("demo", ["implement"], ["edit"],
+                                           task="Add feature with a human handoff")
+                    run = self.selected_ticks(run, 2)
+                else:
+                    self.team.tick("demo", 1, "implement")
+                    run = self.team.tick("demo", 1)
+                self.assertEqual(run["stage"], "stopped")
+                family = FAMILIES[run["author"]]
+                self.assertEqual(run["commit_contributors"], [family])
+                cwd = self.store.workspace(run)
+                (cwd / "human.txt").write_text("human addition\n")
+                # Attribution must survive a coordinator restart before re-entry.
+                self.store.db.close()
+                self.store = Store(self.root / "state")
+                self.team = Coordinator(self.store, self.github, self.agents)
+                run = self.team.continue_run(run["id"], ["validate"], ["human"])
+                run = self.team.tick("demo", run_id=run["id"])
+                self.assertEqual(run["stage"], "stopped")
+                message = git(cwd, "log", "-1", "--format=%B")
+                self.assertIn(f"Agent-Family: {family}", message)
+                self.assertIn("Contributor: human", message)
+                self.assertIsNone(run["commit_contributors"])
+                self.assertEqual(self.github.creates, 0)
+                self.store.save(run, stage="closed")
+
     def test_ci_stop_point_rejection_stops_before_revision(self):
         self.agents.reject = True
         self.team.tick("demo", 1, "ci")

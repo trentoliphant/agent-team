@@ -209,7 +209,7 @@ agent-team project configure example --max-quota-retries 3
   Once assigned, the snapshot is immutable: restore it to resume, or close the
   run and create a new linked issue for changed scope.
 
-An unresolved blocked, quota, handoff, or repair run stops new assignments for
+An unresolved blocked, quota, handoff, repair, or stopped run stops new assignments for
 that repository, including its other registrations. Ready
 and stale PRs do not stop new assignments. A changed PR head/base becomes stale
 and requires `refresh`; `resume` cannot reuse its old evidence.
@@ -239,7 +239,7 @@ Explicit selection requires an open issue with current approval and the ready
 label. Invalid selections fail without choosing another issue or changing the
 saved order. An eligible existing run continues without duplication; completed
 runs cannot restart. Another issue's active work or recovery (blocked, quota,
-handoff, or repair) prevents targeted execution. Saved ordering applies to new assignments and never
+handoff, repair, or stopped) prevents targeted execution. Saved ordering applies to new assignments and never
 preempts an active run or bypasses recovery.
 
 Targeted watch advances only the selected issue and stops at readiness, pause,
@@ -579,6 +579,13 @@ agent-team inspect RUN_ID
 ```
 
 `stopped` means the selected work ended, not that the whole workflow passed.
+A stopped run holds the repository across restarts, including its other
+registrations. It blocks queue work and new selections until explicitly continued
+with `select --run RUN_ID` (or legacy `continue`) or closed with
+`agent-team close RUN_ID`. Close finished partial work when no continuation is
+planned. Closing preserves work and history, leaves GitHub issues and PRs open,
+and releases the repository for other runs. It is terminal: the same issue or
+task scope cannot be selected again to restart that run.
 `inspect` records cumulative requested and performed operations, omitted stages
 outside those requests, unperformed operations, continuation segments, input revisions, contributor declarations, validation,
 review, and output stages. Each continuation records its grants and effects;

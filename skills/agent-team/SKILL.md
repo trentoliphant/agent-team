@@ -243,7 +243,15 @@ approving an issue. The separate legacy `discover` command publishes unready iss
 
 Report the run ID, exact candidate/base revisions, selected and performed stages,
 validation/review evidence, and omitted checks. `stopped` does not mean whole
-workflow success. All rejections stop selected work before fixes; revision
+workflow success. All rejections stop selected work before fixes.
+A stopped run holds the repository across restarts,
+including other registrations, and blocks queue work and new selections. Report
+this hold when reporting partial completion. Continue explicitly with
+`select --run RUN_ID`, or use `agent-team close RUN_ID` when the operator has
+authorized ending orchestration and no continuation is planned. Closing releases
+the repository, preserves work and history, and leaves GitHub issues and PRs open.
+It is terminal: the same issue or task scope cannot restart the run. Do not close
+a run automatically just because its selected operations finished. Revision
 exhaustion requires `decide`. An extension or adoption returns selected work to
 an explicit boundary. Reselect operations without resetting its budget/history.
 Changed candidate, base, scope, configuration, or dependency pins invalidate
