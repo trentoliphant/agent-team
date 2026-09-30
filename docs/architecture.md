@@ -104,8 +104,11 @@ Handoff and repair runs are recovery states. They stop new intake and refuse
 `resume` and `refresh`. `decide` records one of four operator decisions, with an
 optional note, and queues its comment the same way:
 
-- `extend`: 1-3 more revisions counted from the handoff round, stored as a
-  cumulative `extension`; each decision records the resulting limit.
+- `extend`: 1-3 more revisions counted from the handoff round. The first
+  handoff freezes the run's `revision_limit`; an extension sets it to the
+  handoff round plus the authorized count. Later `max_revisions` changes do not
+  affect it. Each decision records the resulting limit, and `extension` records
+  the cumulative authorized amount.
 - `repair`: move to `repair`.
 - `rescope`: close locally.
 - `stop`: close locally.

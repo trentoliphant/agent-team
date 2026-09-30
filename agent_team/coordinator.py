@@ -105,6 +105,19 @@ def recovering(run):
     return bool(run.get("decisions") or run.get("adoptions"))
 
 
+def revision_limit(project, run):
+    """The run's effective revision limit. The first handoff freezes it on the run; after that only
+    operator decisions change it, so later project configuration changes cannot widen a recovery."""
+    if run.get("revision_limit") is not None:
+        return run["revision_limit"]
+    # Runs handed off before the limit was stored: recovery limits only grow, so the largest recorded one applies.
+    recorded = [h["limit"] for h in run.get("handoffs", [])] + [
+        d["limit"] for d in run.get("decisions", []) if d["action"] == "extend"]
+    if recorded:
+        return max(recorded)
+    return project["max_revisions"] + run.get("extension", 0)
+
+
 def handoff_comment(project, run, limit):
     """Plain template, no model: every finding and history entry is published in full."""
     repo, latest = project["repo"], run["revision_history"][-1]
@@ -199,7 +212,7 @@ def status_forms(project, run):
     detailed = (f"**Agent Team: {run['stage']}**\n\nRun `{run['id']}` · "
                 f"author `{run['author']}` ({FAMILIES[run['author']]}) · "
                 f"reviewer `{run['reviewer']}` ({FAMILIES[run['reviewer']]}) · "
-                f"revision {run['round']}/{project['max_revisions'] + run.get('extension', 0)}\n\n")
+                f"revision {run['round']}/{revision_limit(project, run)}\n\n")
     if run.get("pr"):
         detailed += f"PR #{run['pr']} · commit `{run.get('sha')}`\n\n"
     detailed += action + safeguard
@@ -538,7 +551,7 @@ class Coordinator:
                                                       "requested_model", "observed_models")}
         changes = dict(feedback=feedback, revision_history=history + [entry],
                        rejected_shas=list(dict.fromkeys(run.get("rejected_shas", []) + [run["sha"]])))
-        limit = project["max_revisions"] + run.get("extension", 0)
+        limit = revision_limit(project, run)
         if run["round"] < limit:
             self.store.save(run, **changes, round=run["round"] + 1, stage="implement",
                             review_record=None, needs_revision=True, **self.queue_writes(run, *writes))
@@ -556,6 +569,7 @@ class Coordinator:
                                                "text": body, "at": time.time()}]
         # The handoff is complete once saved, so the same save ends the in-flight stage.
         self.store.save(run, **changes, stage="handoff", resume_stage=None, handoffs=handoffs, in_flight=False,
+                        revision_limit=limit,
                         error="Revision limit reached; operator decision required (agent-team handoff RUN_ID)",
                         **self.queue_writes(run, *writes))
 
@@ -756,7 +770,7 @@ class Coordinator:
             raise TeamError("--revisions applies only to extend")
         if action == "repair" and not run.get("published_sha"):
             raise TeamError("Direct repair needs a published PR branch; extend, rescope, or stop instead")
-        limit = project["max_revisions"] + run.get("extension", 0)
+        previous = limit = revision_limit(project, run)
         if action == "extend":
             # Count from the handoff round: an adoption can pass the limit, and N must mean N more revisions.
             limit = max(limit, run["round"]) + revisions
@@ -765,7 +779,9 @@ class Coordinator:
         changes = dict(decisions=run.get("decisions", []) + [decision], error=None, in_flight=False)
         if action == "extend":
             # Continue exactly as a revision within the limit would; the feedback is the persisted rejection.
-            changes.update(extension=limit - project["max_revisions"], round=run["round"] + 1,
+            # The run-specific limit is authoritative; `extension` records the cumulative authorized amount.
+            changes.update(revision_limit=limit, extension=run.get("extension", 0) + limit - previous,
+                           round=run["round"] + 1,
                            feedback=run["revision_history"][-1]["feedback"], stage="implement",
                            review_record=None, needs_revision=True)
         elif action == "repair":
@@ -799,7 +815,7 @@ class Coordinator:
         changes, families = self.integrate(project, run, self.contributor_check(run, declared, adopting=True))
         adoption = {"head": changes["published_sha"], "sha": changes["sha"], "base_sha": changes["base_sha"],
                     "declared": declared, "families": sorted(families), "round": changes["round"], "at": time.time()}
-        limit = project["max_revisions"] + run.get("extension", 0)
+        limit = revision_limit(project, run)
         body = (f"**Agent Team: adopted direct repair**\n\nRun `{run['id']}` adopted PR head "
                 f"`{adoption['head']}` (candidate `{adoption['sha']}` after merging base `{adoption['base_sha']}`).\n\n"
                 f"Declared contributors: {', '.join(declared)}. Contributing model families: "

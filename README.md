@@ -278,7 +278,9 @@ agent-team decide RUN_ID stop                   # stop; issue, PR, and work are 
 saved in the run and posted as a PR (or issue) comment. History is never reset.
 A rejected commit can never be validated or reviewed again, so every extension
 or repair must add a new commit. `extend --revisions N` always allows exactly N
-more revisions after the handoff round, even after an adoption. When an extension
+more revisions after the handoff round, even after an adoption. The limit is
+stored on the run at the first handoff, so changing the project's
+`max_revisions` later does not widen or shrink it. When an extension
 is used up, the run returns to `handoff` for a new decision.
 
 For direct repair, push commits to the run's branch, then run `adopt`. List every

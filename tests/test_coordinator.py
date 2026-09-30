@@ -271,6 +271,39 @@ class WorkflowTests(unittest.TestCase):
         self.team.decide(run["id"], "extend", 1)
         self.assertEqual(self.tick(5)["stage"], "ready")
 
+    def test_config_change_before_extension_cannot_widen_it(self):
+        run = self.exhaust()
+        self.assertEqual(run["revision_limit"], 1)
+        self.project["max_revisions"] = 100
+        self.store.save_project(self.project)
+        self.team.decide(run["id"], "extend", 1)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["round"], run["revision_limit"], run["extension"]),
+                         ("implement", 2, 2, 1))
+        self.assertEqual(run["decisions"][0]["limit"], 2)
+        self.assertIn("the limit is now 2", self.github.comments[(7, f"{run['id']}-decision-1")])
+        # The one authorized revision is used up: a rejection hands off again.
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["round"], len(run["revision_history"])), ("handoff", 2, 3))
+
+    def test_config_change_after_extension_cannot_widen_it(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 1)
+        self.project["max_revisions"] = 100
+        self.store.save_project(self.project)
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["round"], run["revision_limit"]), ("handoff", 2, 2))
+        self.assertIn("revision 2/2", self.github.comments[(7, f"{run['id']}-handoff-2")])
+        # Lowering the configuration cannot shrink an authorized extension either.
+        self.team.decide(run["id"], "extend", 1)
+        self.project["max_revisions"] = 0
+        self.store.save_project(self.project)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["round"], run["revision_limit"], run["extension"]), (3, 3, 2))
+        self.assertEqual(self.tick(5)["stage"], "ready")
+
     def test_no_change_extension_cannot_reroll_rejected_evidence(self):
         run = self.exhaust()
         self.team.decide(run["id"], "extend", 1)

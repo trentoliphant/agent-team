@@ -258,7 +258,7 @@ def dispatch(args, store):
             print(f"\nCurrent stage: {run['stage']}")
     elif args.command == "decide":
         run = team.decide(args.run_id, args.action, args.revisions, args.note)
-        emit({k: run.get(k) for k in ("id", "stage", "round", "extension", "decisions")})
+        emit({k: run.get(k) for k in ("id", "stage", "round", "revision_limit", "extension", "decisions")})
     elif args.command == "adopt":
         run = team.adopt(args.run_id, args.contributor)
         emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions")})
