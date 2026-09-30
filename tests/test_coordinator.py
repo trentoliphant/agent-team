@@ -598,7 +598,8 @@ class WorkflowTests(unittest.TestCase):
                         self.tick()
                 self.tick()
                 run = self.store.runs()[0]
-                sha, head, base = run["sha"], self.github.pull["head"]["sha"], self.github.pull["base"]["sha"]
+                pull = self.github.pr(None, 7)
+                sha, head, base = run["sha"], pull["head"]["sha"], pull["base"]["sha"]
                 self.assertEqual((run["stage"], run["resume_stage"], run["review_sha"]), ("blocked", "review", sha))
                 self.assertNotIn(sha, run.get("rejected_shas", []))
                 calls = len(self.agents.calls)
@@ -612,7 +613,8 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIn('"evidence": "Bug"', run["feedback"])
                 self.assertEqual(run["outbox"], [])
                 self.assertIn((7, f"{run['id']}-review-0-{sha}"), self.github.comments)
-                self.assertEqual((self.github.pull["head"]["sha"], self.github.pull["base"]["sha"]), (head, base))
+                pull = self.github.pr(None, 7)
+                self.assertEqual((pull["head"]["sha"], pull["base"]["sha"]), (head, base))
                 if stage == "handoff":
                     self.assertEqual(len(run["handoffs"]), 1)
                     with self.assertRaises(TeamError):  # a decision is required now
