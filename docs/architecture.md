@@ -96,7 +96,10 @@ ticks publish the outbox with idempotent marked comments. A crash or GitHub
 failure therefore delays publication but never loses or duplicates it, and
 never keeps a rejected run from reaching `handoff`. A review verdict is saved
 with its commit before its outcome is recorded. If an interruption happens
-between them, `resume` reuses that verdict instead of calling the reviewer again. The handoff
+between them, `resume` reuses that verdict instead of calling the reviewer again.
+`refresh` and `adopt` first record such a pending rejection and stop, so they
+cannot discard it and send the same commit to review again. The run then revises
+within the limit or hands off. The handoff
 save also clears the in-flight marker, and crash reconciliation keeps a run in
 `handoff` or `repair` rather than blocking it, so decisions stay available.
 

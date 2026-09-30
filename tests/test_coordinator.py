@@ -584,6 +584,45 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["stage"], "handoff")
         self.assertEqual(len(self.agents.calls), calls)  # the persisted verdict is not rerolled
 
+    def test_refresh_after_interrupted_rejection_records_it_instead_of_rerolling(self):
+        for limit, stage, round_ in ((0, "handoff", 0), (1, "implement", 1)):
+            with self.subTest(limit=limit):
+                self.tearDown()
+                self.setUp()
+                self.project["max_revisions"] = limit
+                self.store.save_project(self.project)
+                self.agents.reject = True
+                self.tick(4)
+                with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.tick()
+                self.tick()
+                run = self.store.runs()[0]
+                sha, head, base = run["sha"], self.github.pull["head"]["sha"], self.github.pull["base"]["sha"]
+                self.assertEqual((run["stage"], run["resume_stage"], run["review_sha"]), ("blocked", "review", sha))
+                self.assertNotIn(sha, run.get("rejected_shas", []))
+                calls = len(self.agents.calls)
+                # Head and base are unchanged; refresh must not discard the verdict and review the same commit.
+                self.team.refresh(run["id"])
+                run = self.store.get(run["id"])
+                self.assertEqual((run["stage"], run["round"], run["sha"]), (stage, round_, sha))
+                self.assertIn(sha, run["rejected_shas"])
+                self.assertEqual([(e["round"], e["kind"], e["sha"]) for e in run["revision_history"]],
+                                 [(0, "review", sha)])
+                self.assertIn('"evidence": "Bug"', run["feedback"])
+                self.assertEqual(run["outbox"], [])
+                self.assertIn((7, f"{run['id']}-review-0-{sha}"), self.github.comments)
+                self.assertEqual((self.github.pull["head"]["sha"], self.github.pull["base"]["sha"]), (head, base))
+                if stage == "handoff":
+                    self.assertEqual(len(run["handoffs"]), 1)
+                    with self.assertRaises(TeamError):  # a decision is required now
+                        self.team.refresh(run["id"])
+                    self.assertEqual(self.tick()["stage"], "waiting")
+                else:
+                    self.assertTrue(run["needs_revision"])
+                    self.tick()  # the revision is authored, never a second review of the rejected commit
+                self.assertNotIn(("claude", "review"), self.agents.calls[calls:])
+
     def test_interrupted_decision_publication_is_retried(self):
         run = self.exhaust()
         real = self.github.comment

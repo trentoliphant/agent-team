@@ -629,6 +629,9 @@ class Coordinator:
         if not (record and run.get("review_sha") == run["sha"]):
             record = self.independent_review(project, run)
             self.store.save(run, review_record=record, review_sha=run["sha"])
+        self.record_review(project, run, record)
+
+    def record_review(self, project, run, record):
         # The outcome is saved with its GitHub writes queued, so a failed write cannot hide a
         # rejection or a handoff; `flush` publishes them afterwards and retries on later ticks.
         comment = {"type": "comment", "number": run["pr"], "marker": f"{run['id']}-review-{run['round']}-{run['sha']}",
@@ -640,6 +643,20 @@ class Coordinator:
                         writes=[comment, status])
         else:
             self.store.save(run, reviewed_sha=run["sha"], stage="ci", **self.queue_writes(run, comment))
+
+    def finalize_rejection(self, project, run):
+        """Record a rejection whose verdict was persisted but not yet recorded (the process stopped
+        between the two saves). Recovery transitions call this first so they cannot discard the
+        verdict and review the same commit again. Returns True if a rejection was recorded."""
+        record = run.get("review_record")
+        if not (record and run.get("review_sha") == run["sha"] and record["report"]["verdict"] != "pass"
+                and run["sha"] not in run.get("rejected_shas", [])):
+            return False
+        self.record_review(project, run, record)
+        if run["stage"] == "implement":
+            self.store.save(run, resume_stage=None, error=None)
+        self.notify(project, run)
+        return True
 
     def ci(self, project, run):
         if run.get("reviewed_sha") != run["sha"] or not run.get("review_record"):
@@ -741,6 +758,9 @@ class Coordinator:
         """Explicitly adopt current remote PR and integrate base, retaining old work."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
+        # Refresh does not integrate after this: the run continues as a revision or a handoff.
+        if self.finalize_rejection(project, run):
+            return run
         if run["stage"] in {"handoff", "repair"} or (
                 run["stage"] == "blocked" and run.get("resume_stage") in {"handoff", "repair"}):
             raise TeamError("The revision limit was reached: record a decision with decide, "
@@ -806,6 +826,8 @@ class Coordinator:
         if not (run["stage"] == "repair" or (run["stage"] == "stale" and recovering(run))):
             raise TeamError("Adopt applies only to runs handed off for direct repair, "
                             "or to recovered runs whose PR head changed")
+        if self.finalize_rejection(project, run):
+            return run
         declared = sorted(set(contributors or []))
         if not declared or not set(declared) <= set(CONTRIBUTORS):
             raise TeamError(f"Declare at least one contributor: {', '.join(CONTRIBUTORS)}")

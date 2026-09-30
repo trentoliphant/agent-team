@@ -194,6 +194,10 @@ agent-team project configure example --max-quota-retries 3
 - `refresh` explicitly adopts the current PR head, merges the current registered
   base into a new checkout, preserves the previous author checkout, and requires
   new tests and review. Conflicts stop without overwriting previous work.
+  If a review verdict was saved but the process stopped before the rejection was
+  recorded, `refresh` (and `adopt`) records that rejection first and stops. The
+  run then revises within the limit or hands off; the rejected commit is never
+  reviewed again.
 - `close` stops local orchestration only. It preserves work and leaves the
   GitHub issue and PR open for your decision.
 - One issue has one run. Closed runs are not silently re-created. Track a new
