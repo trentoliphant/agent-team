@@ -219,7 +219,10 @@ def dispatch(args, store):
         # Lock per tick, not across sleep, so pause/status remain usable.
         while True:
             try:
-                value = team.tick(args.project, args.issue, args.stop_after)
+                if args.stop_after is None:
+                    value = team.tick(args.project, args.issue)
+                else:
+                    value = team.tick(args.project, args.issue, args.stop_after)
             except CoordinatorBusy as exc:
                 value = {"project": args.project, "stage": "busy", "error": str(exc)}
             emit({k: value[k] for k in ("id", "project", "stage", "error", "pr") if k in value})

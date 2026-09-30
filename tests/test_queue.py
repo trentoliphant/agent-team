@@ -151,13 +151,23 @@ class QueueTests(unittest.TestCase):
             other.db.close()
 
     def test_targeted_watch_stops_at_boundaries(self):
-        for stage in ('ready', 'blocked', 'handoff', 'repair', 'stale', 'waiting', 'paused', 'closed', 'merged'):
+        for stage in ('stopped', 'ready', 'blocked', 'handoff', 'repair', 'stale', 'waiting', 'paused', 'closed', 'merged'):
             with self.subTest(stage=stage), patch('agent_team.cli.Coordinator') as team, \
                     patch('agent_team.cli.emit'), patch('agent_team.cli.time.sleep') as sleep:
                 team.return_value.tick.return_value = {'stage': stage}
                 dispatch(parser().parse_args(['run', 'demo', '--issue', '2', '--watch']), self.store)
                 team.return_value.tick.assert_called_once_with('demo', 2)
                 sleep.assert_not_called()
+
+    def test_targeted_watch_passes_explicit_stop_boundary(self):
+        with patch('agent_team.cli.Coordinator') as team, patch('agent_team.cli.emit'), \
+                patch('agent_team.cli.time.sleep') as sleep:
+            team.return_value.tick.return_value = {'stage': 'stopped'}
+            dispatch(parser().parse_args([
+                'run', 'demo', '--issue', '2', '--stop-after', 'validate', '--watch',
+            ]), self.store)
+            team.return_value.tick.assert_called_once_with('demo', 2, 'validate')
+            sleep.assert_not_called()
 
     def test_untargeted_watch_continues_and_target_quota_waits(self):
         for selection in ([], ['--issue', '2']):
