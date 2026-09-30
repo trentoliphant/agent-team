@@ -95,6 +95,17 @@ class Store:
         self.save_project(project)
         return project
 
+    def set_queue(self, name, numbers):
+        numbers = list(numbers)
+        if any(type(n) is not int or n < 1 for n in numbers):
+            raise TeamError("Queue entries must be positive issue numbers")
+        if len(numbers) != len(set(numbers)):
+            raise TeamError("Duplicate queue entries are not allowed")
+        project = self.project(name)
+        project["queue_order"] = numbers
+        self.save_project(project)
+        return numbers
+
     def writing(self):
         """Personal writing defaults for every project in this state directory."""
         row = self.db.execute("SELECT value FROM meta WHERE key='writing'").fetchone()

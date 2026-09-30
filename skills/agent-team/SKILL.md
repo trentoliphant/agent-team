@@ -102,6 +102,12 @@ for explicit approval. Never rewrite an issue to make an existing approval match
 With authorization to execute the project's approved queue:
 
 ```sh
+agent-team queue show example
+agent-team queue set example '7, 9, 10, 8, 2'
+agent-team queue reorder example '9, 7, 10, 8, 2'
+agent-team queue clear example
+agent-team run example --issue 123
+agent-team run example --issue 123 --watch
 agent-team run example
 agent-team status --project example
 agent-team inspect RUN_ID
@@ -111,6 +117,17 @@ One `run` advances one durable stage. It selects eligible work from the project'
 queue, not necessarily the issue most recently discussed. Check the queue and
 existing runs before execution. Use `agent-team run example --watch` only when
 continued polling is authorized; it can move on to other eligible issues.
+Queue changes save ordering only and require authorization to change local
+configuration. They never approve issues or change ready labels. Explicit
+selection overrides saved order only for that invocation and requires current
+approval and the ready label. Invalid selections fail without fallback. Saved
+listed eligible issues precede unlisted eligible issues oldest-first; no saved
+order means oldest-first. Duplicate or nonpositive entries are rejected.
+Missing/closed, unapproved, unready, and already assigned entries are explained
+by `queue show` and skipped for intake. Existing active work continues first;
+selection cannot bypass active-work conflicts or blocked-run recovery. Targeted
+watch stops at readiness or operator attention and never advances another issue;
+bounded automatic quota waits continue polling.
 Execution can consume subscriptions and publish branches, draft PRs, and review
 evidence through the coordinator. Leave configured validation and independent
 review to it. Review must use the other model family in a fresh session at the

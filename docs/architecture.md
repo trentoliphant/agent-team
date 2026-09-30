@@ -109,3 +109,14 @@ GitHub Projects synchronization, automatic semantic issue deduplication,
 general-purpose plugin loading, autonomous prioritization, or automatic merge.
 GitHub issues, comments, PRs, and commit statuses are the shared record; SQLite
 holds resumable execution details and local logs.
+
+## Issue ordering
+
+Projects store `queue_order` in their existing SQLite configuration. Queue edits
+use the coordinator lock. Inspection reads open issues and matching approvals
+without publishing changes. Eligible listed issues precede unlisted issues by
+creation time (issue number breaks ties). Explicit selection does not rewrite
+the queue. Existing active runs take priority; blocked and quota-waiting runs
+prevent new assignments. Targeted ticks reject conflicting work and limit
+reconciliation, notifications, and execution to the selected issue. Interrupted
+stages still require recovery. Completed runs retain their unique issue claim.

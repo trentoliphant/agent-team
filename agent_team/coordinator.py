@@ -165,11 +165,66 @@ class Coordinator:
         self.github.comment(project["repo"], run["issue"], run["id"], body)
         self.store.save(run, notification_pending=False)
 
-    def tick(self, name):
+    def ineligible(self, project, issue):
+        if "pull_request" in issue:
+            return "not an issue"
+        if issue["state"] != "open":
+            return "closed issue"
+        if project["ready_label"] not in {label["name"] for label in issue["labels"]}:
+            return "missing ready label"
+        if not self.github.authorized(project, issue):
+            return "missing current approval"
+        return None
+
+    def queue(self, name):
+        """Read-only scheduling view; ordering never changes authorization or runs."""
+        project = self.store.project(name)
+        runs = {r["issue"]: r for r in self.store.runs(name)}
+        issues = self.github.issues(project, ready=False)
+        issues = sorted(issues, key=lambda i: (i.get("created_at", ""), i["number"]))
+        by_number = {i["number"]: i for i in issues}
+        order = project.get("queue_order", [])
+        entries = []
+        for number in order + [i["number"] for i in issues if i["number"] not in order]:
+            issue = by_number.get(number)
+            run = runs.get(number)
+            if issue is None:
+                # Listed closed/missing issues are absent from the open-issue listing.
+                reason = "missing or closed issue"
+            else:
+                reason = self.ineligible(project, issue)
+            if run:
+                reason = f"existing run: {run['stage']}"
+            entries.append({"issue": number, "listed": number in order,
+                            "eligible": reason is None, "reason": reason})
+        return {"project": name, "saved_order": order, "entries": entries,
+                "effective_queue": [e["issue"] for e in entries if e["eligible"]],
+                "active_runs": [r["id"] for r in runs.values() if r["stage"] in ACTIVE],
+                "recovery_runs": [r["id"] for r in runs.values()
+                                  if r["stage"] in {"blocked", "quota_wait"} or r.get("in_flight")],
+                "paused": project["paused"]}
+
+    def tick(self, name, issue_number=None):
         project = self.store.project(name)
         if project["paused"]:
             return {"project": name, "stage": "paused"}
         runs = self.store.runs(name)
+        selected = None
+        if issue_number is not None:
+            if type(issue_number) is not int or issue_number < 1:
+                raise TeamError("Issue number must be positive")
+            selected = self.github.issue(project["repo"], issue_number)
+            reason = self.ineligible(project, selected)
+            if reason:
+                raise TeamError(f"Cannot select issue #{issue_number}: {reason}")
+            target = next((r for r in runs if r["issue"] == issue_number), None)
+            if target and target["stage"] in {"closed", "merged"}:
+                raise TeamError(f"Issue #{issue_number} already has a completed run")
+            if any(r["issue"] != issue_number and (r["stage"] in ACTIVE or
+                   r["stage"] in {"blocked", "quota_wait"} or r.get("in_flight")) for r in runs):
+                raise TeamError("Another issue has active work or requires recovery; inspect existing runs first")
+            # A targeted invocation must never advance or reconcile another issue.
+            runs = [target] if target else []
         # A dead process never causes silent agent re-execution.
         for run in runs:
             if run.get("in_flight"):
@@ -193,13 +248,22 @@ class Coordinator:
                     self.notify(project, run)
         active = next((r for r in runs if r["stage"] in ACTIVE), None)
         if not active:
+            if issue_number is not None and runs and runs[0]["stage"] == "quota_wait":
+                return runs[0]
             if any(r["stage"] in {"blocked", "quota_wait"} for r in runs):
                 return {"project": name, "stage": "waiting", "reason": "Resolve or resume existing run first"}
-            known = {r["issue"] for r in runs}
-            issue = next((i for i in self.github.issues(project)
-                          if i["number"] not in known and self.github.authorized(project, i)), None)
-            if issue is None:
-                return {"project": name, "stage": "idle"}
+            if issue_number is not None:
+                if runs:
+                    return runs[0]
+                issue = selected
+            else:
+                view = self.queue(name)
+                if not view["effective_queue"]:
+                    return {"project": name, "stage": "idle"}
+                issue = self.github.issue(project["repo"], view["effective_queue"][0])
+                reason = self.ineligible(project, issue)
+                if reason:
+                    raise TeamError(f"Queue candidate became ineligible: {reason}")
             active = self.store.create(project, issue)
         run = active
         stage = run["stage"]

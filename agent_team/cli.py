@@ -66,8 +66,16 @@ def parser():
     unset.add_argument("--all", action="store_true", help="Every setting at this level")
     run = commands.add_parser("run", help="Advance one stage, or poll with --watch")
     run.add_argument("project")
+    run.add_argument("--issue", type=int, help="Select only this approved ready issue")
     run.add_argument("--watch", action="store_true")
     run.add_argument("--interval", type=int, default=30)
+    queue = commands.add_parser("queue", help="Inspect or save a project's implementation order").add_subparsers(
+        dest="queue_command", required=True)
+    for verb in ("show", "set", "reorder", "clear"):
+        item = queue.add_parser(verb)
+        item.add_argument("project")
+        if verb in {"set", "reorder"}:
+            item.add_argument("order", help="Comma-separated positive issue numbers")
     approve = commands.add_parser("approve", help="Approve current issue content and add the ready label")
     approve.add_argument("project")
     approve.add_argument("issue", type=int)
@@ -167,6 +175,22 @@ def dispatch(args, store):
         if args.writing_command == "show" and args.kind:
             result["prompt"] = writing.guidance(policy, args.kind)
         emit(result)
+    elif args.command == "queue":
+        if args.queue_command in {"set", "reorder"}:
+            try:
+                numbers = [int(n.strip()) for n in args.order.split(",")]
+            except ValueError as exc:
+                raise TeamError("Order must be comma-separated positive issue numbers") from exc
+            if args.queue_command == "reorder" and set(numbers) != set(
+                    store.project(args.project).get("queue_order", [])):
+                raise TeamError("Reorder must contain exactly the saved entries; use set to replace them")
+            store.set_queue(args.project, numbers)
+        elif args.queue_command == "clear":
+            store.set_queue(args.project, [])
+        if args.queue_command == "show":
+            emit(team.queue(args.project))
+        else:
+            emit({"project": args.project, "saved_order": store.project(args.project)["queue_order"]})
     elif args.command == "approve":
         emit(github.approve(store.project(args.project), args.issue))
     elif args.command == "run":
@@ -175,9 +199,10 @@ def dispatch(args, store):
         # Lock per tick, not across sleep, so pause/status remain usable.
         while True:
             with store.lock():
-                value = team.tick(args.project)
+                value = team.tick(args.project, args.issue)
             emit({k: value[k] for k in ("id", "project", "stage", "error", "pr") if k in value})
-            if not args.watch:
+            if not args.watch or (args.issue is not None and value["stage"] in {
+                    "ready", "stale", "blocked", "waiting", "paused", "closed", "merged", "idle"}):
                 break
             time.sleep(args.interval)
     elif args.command == "status":
@@ -217,7 +242,8 @@ def main(argv=None):
     try:
         if (args.command in {"run", "status", "inspect", "doctor", "smoke", "init"} or
                 (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"}) or
-                (args.command == "writing" and args.writing_command == "show")):
+                (args.command == "writing" and args.writing_command == "show") or
+                (args.command == "queue" and args.queue_command == "show")):
             code = dispatch(args, store)
         else:
             with store.lock():
