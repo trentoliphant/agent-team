@@ -244,11 +244,7 @@ def dispatch(args, store):
     elif args.command == "inspect":
         emit(store.get(args.run_id))
     elif args.command == "resume":
-        run = store.get(args.run_id)
-        if run["stage"] not in {"blocked", "quota_wait"}:
-            raise TeamError("Only blocked or quota-waiting runs can be resumed")
-        store.save(run, stage=run["resume_stage"], error=None, in_flight=False, quota_attempts=0)
-        emit(run)
+        emit(team.resume(args.run_id))
     elif args.command == "close":
         run = store.get(args.run_id)
         store.save(run, stage="closed", in_flight=False, notification_pending=True)

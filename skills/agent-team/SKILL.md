@@ -199,6 +199,8 @@ Other endpoints are `publish`, `review`, and `ci`. Explain that each command sta
 at preparation, consumes subscriptions, and writes issue status comments; publish
 also pushes and creates a draft PR. The saved endpoint cannot be expanded by
 later ticks. Report `stopped` as partial completion, including unperformed checks.
+The CI endpoint waits through pending polls and finishes in `ready`. Stopped
+runs with PRs still detect changed head/base commits and closed or merged PRs.
 Do not use `resume` to continue it. Independent entry with existing work and
 explicit continuation are not yet supported; report that limitation rather than
 creating an issue or authorizing extra stages. Do not replace a partial request

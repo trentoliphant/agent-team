@@ -495,7 +495,10 @@ See [architecture and limitations](docs/architecture.md),
 `agent-team run example --issue 123 --stop-after validate --watch` implements
 an approved issue and validates it without pushing or creating a PR. The boundary
 is saved atomically with assignment. Later ticks, watch restarts, and `resume`
-cannot expand it. A stopped run requires operator attention and blocks intake.
+cannot expand it. Successor stages are checked before execution, crash recovery,
+and explicit resume. Pending CI remains in `ci`; successful CI retains `ready`
+and its normal reconciliation. Stopped runs with PRs also reconcile head/base
+changes and closure. A stopped run requires operator attention and blocks intake.
 The result certifies only the performed stages. Validation or review rejection
 records the existing revision history and budget, then stops before applying fixes.
 

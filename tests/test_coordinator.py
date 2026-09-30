@@ -200,6 +200,80 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.tick()["stage"], "idle")
         self.assertEqual(len(self.store.runs()), 1)
 
+    def test_partial_ci_pending_then_success(self):
+        self.team.tick("demo", 1, "ci")
+        for _ in range(4):
+            self.team.tick("demo", 1)
+        self.github.check_state = "pending"
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "ci")
+        self.assertTrue(self.github.pull["draft"])
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        self.github.check_state = "success"
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "ready")
+        self.github.pull["state"] = "closed"
+        self.team.tick("demo", 1)
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+
+    def test_partial_crash_window_resume_and_quota_retry(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        # Simulate validate's successor save before the endpoint save.
+        self.store.save(run, stage="publish", in_flight=True)
+        self.team.tick("demo", 1)
+        self.assertEqual(self.store.get(run["id"])["stage"], "stopped")
+        self.store.save(run, stage="blocked", resume_stage="publish")
+        self.assertEqual(self.team.resume(run["id"])["stage"], "stopped")
+        self.store.save(run, stage="quota_wait", resume_stage="publish", retry_at=0)
+        self.team.tick("demo", 1)
+        self.assertEqual(self.store.get(run["id"])["stage"], "stopped")
+        self.assertEqual(self.github.creates, 0)
+
+    def test_partial_publish_stops_before_review_and_reconciles_close(self):
+        self.team.tick("demo", 1, "publish")
+        for _ in range(3):
+            run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "review")
+        self.assertEqual(self.github.creates, 1)
+        self.assertEqual(len(self.agents.calls), 1)
+        self.github.pull["state"] = "closed"
+        self.team.tick("demo", 1)
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+
+    def test_partial_review_rejection_does_not_apply_fixes(self):
+        self.agents.reject = True
+        self.team.tick("demo", 1, "review")
+        for _ in range(4):
+            run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "implement")
+        self.assertIn(run["sha"], run["rejected_shas"])
+        self.team.tick("demo", 1)
+        self.assertEqual(len(self.agents.calls), 2)
+
+    def test_full_review_rejection_does_not_add_partial_fields(self):
+        self.agents.reject = True
+        run = self.tick(5)
+        self.assertEqual(run["stage"], "implement")
+        self.assertNotIn("next_stage", run)
+        self.assertNotIn("partial_result", run)
+
+    def test_partial_review_pass_stops_before_ci_and_detects_changed_head(self):
+        self.team.tick("demo", 1, "review")
+        for _ in range(4):
+            run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "ci")
+        self.assertTrue(self.github.pull["draft"])
+        self.github.external_sha = "f" * 40
+        self.team.tick("demo", 1)
+        self.assertEqual(self.store.get(run["id"])["stage"], "stale")
+
     def test_author_rotation_across_projects(self):
         first = self.tick()
         other = self.store.register("other", "example/other", "main", ["true"])

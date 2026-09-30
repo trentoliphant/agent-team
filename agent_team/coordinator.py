@@ -380,6 +380,33 @@ class Coordinator:
         with self.store.worker(name):
             return self._tick(name, issue_number, stop_after)
 
+    def enforce_boundary(self, run, stage=None):
+        """Recover a completed endpoint before executing or resuming its successor.
+
+        Stage methods journal their successor before the tick clears in_flight.
+        A crash in that window must not authorize the successor. CI pending is
+        still the selected operation; readiness remains a reconciled final state.
+        """
+        endpoint = run.get("stop_after")
+        stage = stage or run["stage"]
+        if not endpoint or stage not in STOP_POINTS:
+            return False
+        if STOP_POINTS.index(stage) <= STOP_POINTS.index(endpoint):
+            return False
+        self.store.save(run, next_stage=stage, stage="stopped", in_flight=False,
+                        partial_result="Selected endpoint reached; whole workflow not certified",
+                        notification_pending=True)
+        return True
+
+    def resume(self, run_id):
+        run = self.store.get(run_id)
+        if run["stage"] not in {"blocked", "quota_wait"}:
+            raise TeamError("Only blocked or quota-waiting runs can be resumed")
+        if not self.enforce_boundary(run, run["resume_stage"]):
+            self.store.save(run, stage=run["resume_stage"], error=None,
+                            in_flight=False, quota_attempts=0)
+        return run
+
     def _tick(self, name, issue_number=None, stop_after=None):
         if stop_after is not None and (stop_after not in STOP_POINTS or issue_number is None):
             raise TeamError("A supported stop point requires an explicitly selected issue")
@@ -412,6 +439,8 @@ class Coordinator:
             runs = [target] if target else []
         # A dead process never causes silent agent re-execution.
         for run in runs:
+            self.enforce_boundary(run, run.get("resume_stage") if run["stage"] in {"blocked", "quota_wait"}
+                                  else run["stage"])
             if run.get("in_flight") and run["stage"] in {"handoff", "repair"}:
                 # A handoff or decision is recorded in one save; keep it so decisions stay available.
                 self.store.save(run, in_flight=False, notification_pending=True)
@@ -425,7 +454,7 @@ class Coordinator:
                 self.store.save(run, stage=run["resume_stage"], error=None)
         # Monitor ready PRs so changes invalidate the local ready state.
         for run in runs:
-            if run["stage"] == "ready":
+            if run["stage"] == "ready" or (run["stage"] == "stopped" and run.get("pr")):
                 self.reconcile(project, run)
                 if run.get("notification_pending"):
                     self.notify(project, run)
@@ -476,9 +505,7 @@ class Coordinator:
                 if stage != "prepare":
                     assert_metadata(self.store.workspace(run), run["git_metadata"])
                 getattr(self, stage)(project, run)
-            if run.get("stop_after") == stage and run["stage"] in ACTIVE | {"ready"}:
-                self.store.save(run, next_stage=run["stage"], stage="stopped",
-                                partial_result="Selected endpoint reached; whole workflow not certified")
+            self.enforce_boundary(run)
             self.store.save(run, in_flight=False, quota_attempts=0)
         except CapacityWait as exc:
             self.store.save(run, stage="quota_wait", resume_stage=stage, in_flight=False,
@@ -626,8 +653,9 @@ class Coordinator:
                        rejected_shas=list(dict.fromkeys(run.get("rejected_shas", []) + [run["sha"]])))
         limit = revision_limit(project, run)
         if run["round"] < limit:
+            if run.get("stop_after"):
+                changes.update(next_stage="implement", partial_result="Rejected candidate; explicit continuation required")
             self.store.save(run, **changes, round=run["round"] + 1, stage="stopped" if run.get("stop_after") else "implement",
-                            next_stage="implement", partial_result="Rejected candidate; explicit continuation required" if run.get("stop_after") else None,
                             review_record=None, needs_revision=True, **self.queue_writes(run, *writes))
             return
         # The limit is a deliberate evaluation point. One save records the rejection, the handoff,
