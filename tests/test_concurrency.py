@@ -132,6 +132,28 @@ class ConcurrencyTests(unittest.TestCase):
         finally:
             other.db.close()
 
+    def test_handoff_and_repair_exclude_alias_intake_but_not_other_repositories(self):
+        self.store.set_concurrency(2)
+        run = self.store.create(self.store.project('one'), GitHub().issue('', 1))
+        team = Coordinator(self.store, GitHub())
+        for stage in ('handoff', 'repair'):
+            with self.subTest(stage=stage):
+                self.store.save(run, stage=stage, in_flight=True)
+                with patch.object(self.store, 'create', wraps=self.store.create) as create:
+                    self.assertEqual(team.tick('alias', 2)['stage'], 'waiting')
+                    self.assertEqual(team.tick('alias')['stage'], 'waiting')
+                    create.assert_not_called()
+                # A saved operator recovery state survives interruption reconciliation.
+                self.assertEqual(team.tick('one', 1)['stage'], stage)
+                persisted = self.store.get(run['id'])
+                self.assertEqual(persisted['stage'], stage)
+                self.assertFalse(persisted['in_flight'])
+                with patch.object(team.github, 'issues', return_value=[], create=True):
+                    self.assertEqual(team.queue('alias')['recovery_runs'], [run['id']])
+                with patch.object(team, 'prepare', side_effect=lambda p, r: self.store.save(r, stage='closed')):
+                    self.assertEqual(team.tick('two', 2 if stage == 'handoff' else 3)['stage'], 'closed')
+                self.assertEqual(len(self.store.repository_runs('alias')), 1)
+
     def test_shared_quota_and_family_capacity_do_not_repeat_calls(self):
         other = Store(self.tmp.name)
         try:
