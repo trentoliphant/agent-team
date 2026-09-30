@@ -647,7 +647,10 @@ class Coordinator:
     def finalize_rejection(self, project, run):
         """Record a rejection whose verdict was persisted but not yet recorded (the process stopped
         between the two saves). Recovery transitions call this first so they cannot discard the
-        verdict and review the same commit again. Returns True if a rejection was recorded."""
+        verdict and review the same commit again. Returns True if a rejection was recorded.
+        A closed or merged run is terminal; recording a rejection would reactivate it."""
+        if run["stage"] in {"closed", "merged"}:
+            return False
         record = run.get("review_record")
         if not (record and run.get("review_sha") == run["sha"] and record["report"]["verdict"] != "pass"
                 and run["sha"] not in run.get("rejected_shas", [])):
@@ -758,6 +761,8 @@ class Coordinator:
         """Explicitly adopt current remote PR and integrate base, retaining old work."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
+        if run["stage"] in {"closed", "merged"}:
+            raise TeamError(f"Run is {run['stage']}; refresh requires an open run")
         # Refresh does not integrate after this: the run continues as a revision or a handoff.
         if self.finalize_rejection(project, run):
             return run

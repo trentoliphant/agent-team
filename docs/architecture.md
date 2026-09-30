@@ -99,7 +99,9 @@ with its commit before its outcome is recorded. If an interruption happens
 between them, `resume` reuses that verdict instead of calling the reviewer again.
 `refresh` and `adopt` first record such a pending rejection and stop, so they
 cannot discard it and send the same commit to review again. The run then revises
-within the limit or hands off. The handoff
+within the limit or hands off. Closed and merged runs are terminal: `refresh`
+refuses them and a pending rejection is never recorded on them, so a closed run
+cannot be reopened for more model work. The handoff
 save also clears the in-flight marker, and crash reconciliation keeps a run in
 `handoff` or `repair` rather than blocking it, so decisions stay available.
 

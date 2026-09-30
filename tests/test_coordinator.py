@@ -625,6 +625,29 @@ class WorkflowTests(unittest.TestCase):
                     self.tick()  # the revision is authored, never a second review of the rejected commit
                 self.assertNotIn(("claude", "review"), self.agents.calls[calls:])
 
+    def test_refresh_after_interrupted_rejection_and_close_keeps_run_closed(self):
+        self.project["max_revisions"] = 1
+        self.store.save_project(self.project)
+        self.agents.reject = True
+        self.tick(4)
+        with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick()
+        self.tick()
+        run = self.store.runs()[0]
+        self.assertEqual((run["stage"], run["review_sha"]), ("blocked", run["sha"]))
+        self.command("close", run["id"])
+        calls = len(self.agents.calls)
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
+        run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "closed")
+        self.assertNotIn(run["sha"], run.get("rejected_shas", []))
+        self.assertFalse(self.team.finalize_rejection(self.project, run))
+        self.tick(2)
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+        self.assertEqual(len(self.agents.calls), calls)
+
     def test_interrupted_decision_publication_is_retried(self):
         run = self.exhaust()
         real = self.github.comment
