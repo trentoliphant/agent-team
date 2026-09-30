@@ -48,7 +48,9 @@ agent-team doctor
 
 `doctor` does not call a model. `agent-team smoke --agent codex` and
 `agent-team smoke --agent claude` make a small real subscription call to test
-the adapter, without changing GitHub.
+the adapter, without changing GitHub. Smoke calls share the family lock and respect
+existing cooldowns. A smoke quota failure is reported without setting or extending
+the production cooldown.
 
 Both agents must report subscription authentication. The coordinator refuses
 API-key authentication and excludes API keys and alternate cloud-provider
@@ -282,7 +284,11 @@ cooldown. Validation, publication, and the other family can continue.
 Pause applies only to the named registration and takes effect between ticks;
 it does not stop an in-flight stage. Project resume permits scheduling again;
 it does not recover blocked work. Configuration changes require all workers to
-be idle. Read-only status and transactional pause/resume remain available during
+be idle. Run recovery, decisions, adoption, refresh, approvals, queue edits,
+and label setup lock only the affected repository. They remain available while
+unrelated workers run, even when all worker slots are occupied. They report lock contention when that repository has a live worker. Discovery takes a repository lock
+and a worker slot, so it can overlap unrelated work within the configured limit.
+Read-only status and transactional project pause/resume remain available during
 execution.
 
 A live repository lock prevents another tick from treating its in-flight marker

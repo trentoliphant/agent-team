@@ -142,7 +142,7 @@ def dispatch(args, store):
             cwd.mkdir()
             execute(["git", "init", str(cwd)])
             (cwd / "hello.txt").write_text("subscription smoke test\n")
-            with store.subscription(args.agent, 3600):
+            with store.subscription(args.agent):
                 emit(Agents().run(args.agent, "review",
                                  "Read hello.txt. Report pass with empty findings if it says subscription smoke test. "
                                  "Do not call any other tools or change files. Return the requested structured report.",
@@ -285,7 +285,20 @@ def main(argv=None):
     args = parser().parse_args(argv)
     store = Store(args.home)
     try:
-        if (args.command in {"run", "status", "inspect", "handoff", "doctor", "smoke", "init"} or
+        if args.command in {"resume", "close", "decide", "adopt", "refresh"}:
+            with store.repository_lock(store.get(args.run_id)["project"]):
+                code = dispatch(args, store)
+        elif args.command == "discover":
+            with store.worker(args.project):
+                code = dispatch(args, store)
+        elif (args.command == "approve" or
+              (args.command == "queue" and args.queue_command != "show")):
+            with store.repository_lock(args.project):
+                code = dispatch(args, store)
+        elif args.command == "project" and args.project_command == "setup":
+            with store.repository_lock(args.name):
+                code = dispatch(args, store)
+        elif (args.command in {"run", "status", "inspect", "handoff", "doctor", "smoke", "init"} or
                 (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"}) or
                 (args.command == "writing" and args.writing_command == "show") or
                 (args.command == "queue" and args.queue_command == "show")):

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.coordinator import Coordinator
-from agent_team.cli import dispatch, parser
+from agent_team.cli import dispatch, main, parser
 from agent_team.process import QuotaError, TeamError
 from agent_team.state import CapacityWait, CoordinatorBusy, Store
 
@@ -250,6 +250,75 @@ class ConcurrencyTests(unittest.TestCase):
             self.assertEqual(other.project('one')['queue_order'], [2, 1])
         finally:
             other.db.close()
+
+    def test_resume_is_available_with_unrelated_worker_and_full_capacity(self):
+        run = self.store.create(self.store.project('one'), GitHub().issue('', 1))
+        self.store.save(run, stage='blocked', resume_stage='implement', quota_attempts=2)
+        with self.store.worker('two'), patch('agent_team.cli.emit'):
+            with self.assertRaises(SystemExit) as exit_code:
+                main(['--home', self.tmp.name, 'resume', run['id']])
+            self.assertEqual(exit_code.exception.code, 0)
+        resumed = self.store.get(run['id'])
+        self.assertEqual(resumed['stage'], 'implement')
+        self.assertEqual(resumed['quota_attempts'], 0)
+        self.store.save(resumed, stage='blocked')
+        with self.store.worker('alias'), patch('agent_team.cli.dispatch') as command, \
+                patch('sys.stderr'):
+            with self.assertRaises(SystemExit) as exit_code:
+                main(['--home', self.tmp.name, 'resume', run['id']])
+            self.assertEqual(exit_code.exception.code, 1)
+            command.assert_not_called()
+        self.assertEqual(self.store.get(run['id'])['stage'], 'blocked')
+
+    def test_repository_operator_routes_and_discovery_overlap(self):
+        self.store.set_concurrency(2)
+        run = self.store.create(self.store.project('one'), GitHub().issue('', 1))
+        commands = [
+            ['close', run['id']], ['decide', run['id'], 'stop'],
+            ['adopt', run['id'], '--contributor', 'human'], ['refresh', run['id']],
+            ['approve', 'one', '1'], ['queue', 'set', 'one', '1'],
+            ['project', 'setup', 'one'], ['discover', 'one'],
+        ]
+        for argv in commands:
+            with self.subTest(command=argv), self.store.worker('two'):
+                def dispatched(args, store):
+                    with self.assertRaises(CoordinatorBusy), self.store.worker('alias'):
+                        pass
+                    with self.assertRaises(CoordinatorBusy), self.store.lock():
+                        pass
+                    return 0
+                with patch('agent_team.cli.dispatch', side_effect=dispatched) as command:
+                    with self.assertRaises(SystemExit) as exit_code:
+                        main(['--home', self.tmp.name] + argv)
+                    self.assertEqual(exit_code.exception.code, 0)
+                    command.assert_called_once()
+        self.store.set_concurrency(1)
+        with self.store.worker('two'), patch('agent_team.cli.dispatch') as command, patch('sys.stderr'):
+            with self.assertRaises(SystemExit) as exit_code:
+                main(['--home', self.tmp.name, 'discover', 'one'])
+            self.assertEqual(exit_code.exception.code, 1)
+            command.assert_not_called()
+
+    def test_smoke_quota_failure_does_not_set_production_cooldown(self):
+        with patch('agent_team.cli.execute'), patch('agent_team.cli.Agents') as agents:
+            agents.return_value.run.side_effect = QuotaError('quota')
+            with self.assertRaises(QuotaError):
+                dispatch(parser().parse_args(['smoke', '--agent', 'codex']), self.store)
+            agents.return_value.run.assert_called_once()
+            self.assertIsNone(self.store.db.execute(
+                "SELECT value FROM meta WHERE key='quota-codex'").fetchone())
+            with self.store.subscription('codex', 60):
+                pass
+            with self.assertRaises(QuotaError), self.store.subscription('codex', 60):
+                raise QuotaError('production quota')
+            cooldown = self.store.db.execute(
+                "SELECT value FROM meta WHERE key='quota-codex'").fetchone()[0]
+            agents.return_value.run.reset_mock()
+            with self.assertRaises(CapacityWait):
+                dispatch(parser().parse_args(['smoke', '--agent', 'codex']), self.store)
+            agents.return_value.run.assert_not_called()
+            self.assertEqual(self.store.db.execute(
+                "SELECT value FROM meta WHERE key='quota-codex'").fetchone()[0], cooldown)
 
     def test_targeted_watch_polls_busy_workers_without_recovery(self):
         args = parser().parse_args(['run', 'one', '--issue', '1', '--watch'])

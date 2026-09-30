@@ -86,26 +86,32 @@ class Store:
         self.db.commit()
 
     @contextmanager
-    def worker(self, name):
+    def repository_lock(self, name):
+        """Exclude work on this repository without consuming a worker slot."""
         with self.file_lock("coordinator.lock", shared=True):
             repo = self.project(name)["repo"].lower()
             digest = hashlib.sha256(repo.encode()).hexdigest()
             with self.file_lock(f"repository-{digest}.lock"):
-                slot = None
-                for index in range(self.concurrency()):
-                    candidate = self.file_lock(f"worker-{index}.lock")
-                    try:
-                        candidate.__enter__()
-                    except TeamError:
-                        continue
-                    slot = candidate
-                    break
-                if slot is None:
-                    raise CoordinatorBusy("Coordinator concurrency limit reached")
+                yield
+
+    @contextmanager
+    def worker(self, name):
+        with self.repository_lock(name):
+            slot = None
+            for index in range(self.concurrency()):
+                candidate = self.file_lock(f"worker-{index}.lock")
                 try:
-                    yield
-                finally:
-                    slot.__exit__(None, None, None)
+                    candidate.__enter__()
+                except TeamError:
+                    continue
+                slot = candidate
+                break
+            if slot is None:
+                raise CoordinatorBusy("Coordinator concurrency limit reached")
+            try:
+                yield
+            finally:
+                slot.__exit__(None, None, None)
 
     def repository_runs(self, name):
         repo = self.project(name)["repo"].lower()
@@ -113,7 +119,8 @@ class Store:
         return [r for r in self.runs() if r["project"] in names]
 
     @contextmanager
-    def subscription(self, agent, cooldown):
+    def subscription(self, agent, cooldown=None):
+        """Serialize calls and respect cooldowns; None does not record failures."""
         lock = self.file_lock(f"subscription-{agent}.lock")
         try:
             lock.__enter__()
@@ -127,9 +134,10 @@ class Store:
             try:
                 yield
             except QuotaError:
-                self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)",
-                                (key, str(time.time() + cooldown)))
-                self.db.commit()
+                if cooldown is not None:
+                    self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)",
+                                    (key, str(time.time() + cooldown)))
+                    self.db.commit()
                 raise
         finally:
             lock.__exit__(None, None, None)

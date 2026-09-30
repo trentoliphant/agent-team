@@ -55,8 +55,12 @@ Workers share an advisory administrative gate and hold an exclusive lock for the
 case-insensitive registered GitHub repository identity. A bounded set of slot
 locks limits concurrent ticks (`configure --concurrency`, default 1). Multiple
 registrations share repository exclusion and durable issue claims. Active work
-stays with the original registration. Administrative commands take the gate
-exclusively and require all workers to be idle. Pause uses a short independent
+stays with the original registration. Global configuration (concurrency, project
+registration/configuration, and writing changes) takes the gate exclusively and
+requires all workers to be idle. Run recovery and decisions, adoption, refresh,
+approvals, queue edits, and label setup take the shared gate and the affected
+repository lock without consuming a slot. Discovery takes the same locks as a
+worker, including a bounded slot, across its model call and publication. Pause uses a short independent
 SQLite transaction and takes effect between ticks. Watch releases its locks
 between ticks and polls on contention; read-only status remains available.
 
@@ -72,7 +76,8 @@ explicit resume after inspection; no automatic subscription replay occurs.
 Subscription calls take a separate per-family lock. A quota error persists a
 family cooldown shared across workers. Busy families and cooldowns defer runs
 without calls or quota attempt increments. Actual quota failures retain bounded
-retries. Other families and stages remain available. Optional status rewrites
+retries. Diagnostic smoke calls serialize and respect existing cooldowns but
+never persist a cooldown on failure. Other families and stages remain available. Optional status rewrites
 retain their one-attempt fallback when capacity is unavailable.
 
 This coordination boundary is one host and one shared local state directory.
@@ -211,7 +216,7 @@ holds resumable execution details and local logs.
 ## Issue ordering
 
 Projects store `queue_order` in their existing SQLite configuration. Queue edits
-use the coordinator lock. Inspection reads open issues and matching approvals
+use the affected repository lock and shared administrative gate. Inspection reads open issues and matching approvals
 without publishing changes. Eligible listed issues precede unlisted issues by
 creation time (issue number breaks ties). Explicit selection does not rewrite
 the queue. Existing active runs take priority; blocked, quota-waiting, handoff, and repair runs
