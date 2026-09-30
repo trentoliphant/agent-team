@@ -201,7 +201,13 @@ also pushes and creates a draft PR. The saved endpoint cannot be expanded by
 later ticks. Report `stopped` as partial completion, including unperformed checks.
 The CI endpoint waits through pending polls and finishes in `ready`. Stopped
 runs with PRs still detect changed head/base commits and closed or merged PRs.
-Do not use `resume` to continue it. Independent entry with existing work and
-explicit continuation are not yet supported; report that limitation rather than
+Do not use `resume` to continue it. Use `agent-team continue RUN_ID --operations
+validate` (or a contiguous sequence beginning at the recorded `next_stage`) for
+explicit continuation, then `agent-team run example --issue 123 --watch`. Explain
+the effects of each selected stage before execution and honor existing operator
+authorization. Publication pushes and writes GitHub content; review writes
+evidence; CI can change readiness. Continuation preserves rejected commits and
+revision budgets and refuses incompatible evidence. Handoff still requires
+`decide`. Independent entry with existing work is not yet supported; report that limitation rather than
 creating an issue or authorizing extra stages. Do not replace a partial request
 with the full queue workflow. Honor authorization already given for these effects.

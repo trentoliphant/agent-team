@@ -498,7 +498,7 @@ is saved atomically with assignment. Later ticks, watch restarts, and `resume`
 cannot expand it. Successor stages are checked before execution, crash recovery,
 and explicit resume. Pending CI remains in `ci`; successful CI retains `ready`
 and its normal reconciliation. Stopped runs with PRs also reconcile head/base
-changes and closure. A stopped run requires operator attention and blocks intake.
+changes and closure. A stopped run requires operator attention and blocks intake until explicit continuation or closure.
 The result certifies only the performed stages. Validation or review rejection
 records the existing revision history and budget, then stops before applying fixes.
 
@@ -512,8 +512,53 @@ records the existing revision history and budget, then stops before applying fix
 
 These selections all start with preparation and implementation. They retain the
 existing issue-status writes. They do not separate individual effect permissions.
-Validation only, publication of existing work, review only, revision followed by
-review, CI only, scoped tasks without issues, and explicit continuation from a
-stopped run are not implemented yet. Existing-PR entry belongs to companion #10.
+Independent entry from branches, commits, scoped tasks without issues, or PRs
+is not implemented yet. Existing-PR entry belongs to companion #10. Tracked-run
+continuation supports the operations below.
 Do not create synthetic issues or rerun implementation to substitute for these
 unsupported operations. Discovery retains its existing separate command.
+
+### Explicit continuation of tracked work
+
+`continue` selects a contiguous sequence starting at the stopped run's recorded
+`next_stage`. It preserves the candidate, rejection history, round, and revision
+limit. Repeating the same command before execution does not add another handoff.
+It does not execute a stage; use `run --issue` to advance the saved selection.
+
+```sh
+# Implementation without publication, then validation only:
+agent-team run example --issue 123 --stop-after implement --watch
+agent-team continue RUN_ID --operations validate
+agent-team run example --issue 123 --watch
+# Publish the tracked, validated candidate without another implementation:
+agent-team continue RUN_ID --operations publish
+agent-team run example --issue 123 --watch
+# Review only, followed later by CI/readiness:
+agent-team continue RUN_ID --operations review
+agent-team run example --issue 123 --watch
+agent-team continue RUN_ID --operations ci
+agent-team run example --issue 123 --watch
+# After a rejection, explicitly authorize revision through review:
+agent-team continue RUN_ID --operations implement validate publish review
+agent-team run example --issue 123 --watch
+```
+
+| Continuation | Input | Effects | Prerequisites |
+| --- | --- | --- | --- |
+| `validate` | Stopped tracked run | Candidate commit, configured tests, issue status | Recorded next stage; unchanged approved scope |
+| `publish` | Stopped tracked run | Push, draft PR creation/update, statuses | Compatible successful validation |
+| `review` | Stopped tracked run with PR | Subscription review, comments/statuses | Exact candidate and independent family |
+| `implement validate publish review` | Rejected tracked run | Local revision through review; push and GitHub writes | Remaining revision budget; recorded implementation successor |
+| `ci` | Reviewed tracked run | CI reads, status/comment writes, PR readiness | Exact passing review and validation |
+
+Continuation compares local HEAD, committed tree (including tracked dependency
+pins), dirty state, issue scope, and validation/model configuration. Drift clears
+validation/review eligibility and records the old and new context. Changed remote
+base refuses continuation and requires explicit integration; unpublished base
+integration is not provided by this command. PR reconciliation still checks head,
+base, and closure. Failed evidence and revision budgets remain durable.
+
+These commands retain the full workflow's effect authorization. Separate grants
+for local edits, push, GitHub content, and readiness are not implemented. Inputs
+outside tracked approved-issue runs remain unsupported; this change does not
+complete issue #9 or companion #10.

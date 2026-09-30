@@ -393,10 +393,76 @@ class Coordinator:
             return False
         if STOP_POINTS.index(stage) <= STOP_POINTS.index(endpoint):
             return False
-        self.store.save(run, next_stage=stage, stage="stopped", in_flight=False,
+        project = self.store.project(run["project"])
+        context = self.evidence_context(project, run)
+        self.store.save(run, evidence_context=context, next_stage=stage, stage="stopped", in_flight=False,
                         partial_result="Selected endpoint reached; whole workflow not certified",
                         notification_pending=True)
         return True
+
+    def evidence_context(self, project, run):
+        """Fingerprint the candidate and trusted configuration, including tracked pins."""
+        cwd = self.store.workspace(run)
+        assert_metadata(cwd, run["git_metadata"])
+        # write-tree includes tracked dependency pins and scope files. Do not stage
+        # operator edits: a dirty checkout cannot reuse committed evidence.
+        return {"head": git(cwd, "rev-parse", "HEAD"),
+                "tree": git(cwd, "rev-parse", "HEAD^{tree}"),
+                "dirty": git(cwd, "status", "--porcelain"),
+                "base": run["base_sha"], "scope": run["issue_digest"],
+                "configuration": {k: project.get(k) for k in
+                                  ("repo", "base", "tests", "timeout", "codex_model", "claude_model")}}
+
+    def continue_run(self, run_id, operations):
+        """Explicit re-entry; never clear rejection history or revision limits."""
+        operations = list(operations)
+        if not operations or any(op not in STOP_POINTS for op in operations):
+            raise TeamError("Select supported operations explicitly")
+        start = STOP_POINTS.index(operations[0])
+        if operations != list(STOP_POINTS[start:start + len(operations)]):
+            raise TeamError("Operations must be a contiguous supported sequence")
+        run = self.store.get(run_id)
+        # A repeated command after a successful save is a read-only reconciliation.
+        if run["stage"] in ACTIVE and run.get("continuations"):
+            if run["continuations"][-1]["operations"] == operations:
+                return run
+        if run["stage"] != "stopped":
+            raise TeamError("Only stopped runs can continue; handoff decisions remain required")
+        if operations[0] != run.get("next_stage"):
+            raise TeamError("Continuation must start at the recorded next stage")
+        project = self.store.project(run["project"])
+        issue = self.github.issue(project["repo"], run["issue"])
+        if self.ineligible(project, issue) or issue_fingerprint(issue) != run["issue_digest"]:
+            raise TeamError("Assigned issue scope or approval changed")
+        if self.finalize_rejection(project, run):
+            return run
+        if run.get("pr") and not self.reconcile(project, run):
+            return run
+        context = self.evidence_context(project, run)
+        previous = run.get("evidence_context")
+        if previous and context != previous:
+            self.store.save(run, evidence_context=context, validated_sha=None, validated_tree=None,
+                            reviewed_sha=None, review_sha=None, review_record=None,
+                            evidence_invalidations=run.get("evidence_invalidations", []) +
+                            [{"at": time.time(), "before": previous, "after": context}],
+                            next_stage="implement" if run.get("needs_revision") else "validate")
+            raise TeamError("Candidate or configuration changed; evidence invalidated. Inspect and select the recorded next stage")
+        # Fetch only after metadata/scope checks. Base drift cannot reuse evidence.
+        cwd = self.store.workspace(run)
+        git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git",
+            f"refs/heads/{project['base']}")
+        base = git(cwd, "rev-parse", "FETCH_HEAD")
+        if base != run["base_sha"]:
+            self.store.save(run, validated_sha=None, validated_tree=None, reviewed_sha=None,
+                            stage="stale", error="Base changed; integrate explicitly before re-entry")
+            raise TeamError("Base changed; old evidence cannot authorize continuation")
+        history = run.get("continuations", []) + [{"at": time.time(), "operations": operations,
+                   "context": context, "round": run["round"], "previous_endpoint": run.get("stop_after")}]
+        self.store.save(run, stage=operations[0], stop_after=operations[-1],
+                        requested_operations=operations, omitted_operations=[op for op in STOP_POINTS if op not in operations],
+                        continuations=history, partial_result=None, in_flight=False,
+                        error=None, notification_pending=True)
+        return run
 
     def resume(self, run_id):
         run = self.store.get(run_id)
@@ -506,6 +572,8 @@ class Coordinator:
                     assert_metadata(self.store.workspace(run), run["git_metadata"])
                 getattr(self, stage)(project, run)
             self.enforce_boundary(run)
+            if run["stage"] == "stopped":
+                self.store.save(run, evidence_context=self.evidence_context(project, run))
             self.store.save(run, in_flight=False, quota_attempts=0)
         except CapacityWait as exc:
             self.store.save(run, stage="quota_wait", resume_stage=stage, in_flight=False,

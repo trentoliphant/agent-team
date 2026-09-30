@@ -88,6 +88,9 @@ def parser():
     for verb in ("inspect", "resume", "close", "refresh"):
         item = commands.add_parser(verb)
         item.add_argument("run_id")
+    continuation = commands.add_parser("continue", help="Explicitly continue a stopped run without resetting its history")
+    continuation.add_argument("run_id")
+    continuation.add_argument("--operations", nargs="+", choices=STOP_POINTS, required=True)
     handoff = commands.add_parser("handoff", help="Show the latest revision-limit handoff and decisions")
     handoff.add_argument("run_id")
     handoff.add_argument("--json", action="store_true")
@@ -243,6 +246,8 @@ def dispatch(args, store):
                 print("No runs. Approve a registered project's issue with: agent-team approve PROJECT NUMBER")
     elif args.command == "inspect":
         emit(store.get(args.run_id))
+    elif args.command == "continue":
+        emit(team.continue_run(args.run_id, args.operations))
     elif args.command == "resume":
         emit(team.resume(args.run_id))
     elif args.command == "close":
@@ -285,7 +290,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     store = Store(args.home)
     try:
-        if args.command in {"resume", "close", "decide", "adopt", "refresh"}:
+        if args.command in {"continue", "resume", "close", "decide", "adopt", "refresh"}:
             with store.repository_lock(store.get(args.run_id)["project"]):
                 code = dispatch(args, store)
         elif args.command == "discover":

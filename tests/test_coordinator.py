@@ -149,6 +149,107 @@ class WorkflowTests(unittest.TestCase):
             result = self.team.tick("demo")
         return result
 
+    def test_explicit_continuation_preserves_evidence_and_stops_again(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        sha = run["validated_sha"]
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        resumed = self.team.continue_run(run["id"], ["publish"])
+        self.assertEqual(resumed["validated_sha"], sha)
+        self.team.continue_run(run["id"], ["publish"])
+        self.assertEqual(len(self.store.get(run["id"])["continuations"]), 1)
+        result = self.team.tick("demo", 1)
+        self.assertEqual(result["stage"], "stopped")
+        self.assertEqual(result["next_stage"], "review")
+        self.assertEqual(len(self.agents.calls), 1)
+        self.assertEqual(self.github.creates, 1)
+
+    def test_continuation_invalidates_configuration_evidence(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        self.store.update_project("demo", tests=["true"])
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["publish"])
+        saved = self.store.get(run["id"])
+        self.assertIsNone(saved["validated_sha"])
+        self.assertEqual(saved["next_stage"], "validate")
+        self.assertEqual(len(saved["evidence_invalidations"]), 1)
+        self.assertEqual(self.github.creates, 0)
+        self.team.continue_run(run["id"], ["validate"])
+        self.assertEqual(self.team.tick("demo", 1)["stage"], "stopped")
+
+    def test_continuation_detects_dirty_dependency_pin(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        (self.store.workspace(run) / "requirements.lock").write_text("changed pin")
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["publish"])
+        saved = self.store.get(run["id"])
+        self.assertIsNone(saved["validated_sha"])
+        self.assertEqual(saved["next_stage"], "validate")
+        self.assertEqual(self.github.creates, 0)
+
+    def test_continuation_detects_unpublished_base_drift(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        source = self.root / "source"
+        (source / "base.txt").write_text("new base")
+        git(source, "add", ".")
+        git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Base update")
+        git(source, "push", str(self.remote), "main")
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["publish"])
+        saved = self.store.get(run["id"])
+        self.assertEqual(saved["stage"], "stale")
+        self.assertIsNone(saved["validated_sha"])
+        self.assertEqual(self.github.creates, 0)
+
+    def test_continuation_cannot_reset_exhausted_budget(self):
+        self.store.update_project("demo", max_revisions=0, tests=["exit 1"])
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "handoff")
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["implement", "validate"])
+        saved = self.store.get(run["id"])
+        self.assertEqual(saved["rejected_shas"], run["rejected_shas"])
+        self.assertEqual(saved["revision_limit"], 0)
+
+    def test_continuation_refuses_scope_change_and_skipped_prerequisite(self):
+        self.team.tick("demo", 1, "implement")
+        run = self.team.tick("demo", 1)
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["publish"])
+        self.github.items[0]["body"] = "Changed scope"
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["validate"])
+        self.assertEqual(self.store.get(run["id"])["stage"], "stopped")
+        self.assertEqual(self.github.creates, 0)
+
+    def test_continuation_keeps_rejected_commit_and_round(self):
+        self.agents.reject = True
+        self.team.tick("demo", 1, "review")
+        for _ in range(4):
+            run = self.team.tick("demo", 1)
+        rejected = list(run["rejected_shas"])
+        round_number = run["round"]
+        result = self.team.continue_run(run["id"], ["implement", "validate", "publish", "review"])
+        self.assertEqual(result["round"], round_number)
+        self.assertEqual(result["rejected_shas"], rejected)
+        for _ in range(4):
+            result = self.team.tick("demo", 1)
+        self.assertEqual(result["stage"], "stopped")
+        self.assertNotEqual(result["sha"], rejected[-1])
+        self.assertEqual(result["next_stage"], "ci")
+
     def test_partial_stop_survives_restart_and_untargeted_ticks(self):
         self.team.tick("demo", 1, "validate")
         self.team.tick("demo", 1)
