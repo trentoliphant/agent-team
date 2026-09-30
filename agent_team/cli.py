@@ -9,7 +9,7 @@ import time
 
 from . import __version__
 from .agents import Agents, subscription_status
-from .coordinator import Coordinator
+from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, Coordinator
 from .github import GitHub
 from .process import TeamError, execute
 from .state import Store, default_home
@@ -85,6 +85,18 @@ def parser():
     for verb in ("inspect", "resume", "close", "refresh"):
         item = commands.add_parser(verb)
         item.add_argument("run_id")
+    handoff = commands.add_parser("handoff", help="Show the latest revision-limit handoff and decisions")
+    handoff.add_argument("run_id")
+    handoff.add_argument("--json", action="store_true")
+    decide = commands.add_parser("decide", help="Record an operator decision for a handoff run")
+    decide.add_argument("run_id")
+    decide.add_argument("action", choices=list(ACTIONS))
+    decide.add_argument("--revisions", type=int, help=f"Finite extension for extend (1-{MAX_EXTENSION})")
+    decide.add_argument("--note", default="", help="Published with the decision")
+    adopt = commands.add_parser("adopt", help="Adopt a directly repaired PR head for new validation and review")
+    adopt.add_argument("run_id")
+    adopt.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), required=True,
+                       help="Who contributed to the repair; repeatable")
     discover = commands.add_parser("discover", help="Read-only investigation; opens at most three unready issues")
     discover.add_argument("project")
     discover.add_argument("--agent", choices=["codex", "claude"], default="claude")
@@ -202,7 +214,8 @@ def dispatch(args, store):
                 value = team.tick(args.project, args.issue)
             emit({k: value[k] for k in ("id", "project", "stage", "error", "pr") if k in value})
             if not args.watch or (args.issue is not None and value["stage"] in {
-                    "ready", "stale", "blocked", "waiting", "paused", "closed", "merged", "idle"}):
+                    "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
+                    "idle"}):
                 break
             time.sleep(args.interval)
     elif args.command == "status":
@@ -230,6 +243,25 @@ def dispatch(args, store):
         emit({"id": run["id"], "stage": "closed", "note": "GitHub issue/PR and local checkout retained"})
     elif args.command == "refresh":
         emit(team.refresh(args.run_id))
+    elif args.command == "handoff":
+        run = store.get(args.run_id)
+        if not run.get("handoffs"):
+            raise TeamError("No handoff recorded for this run")
+        if args.json:
+            emit({k: run.get(k) for k in ("id", "stage", "handoffs", "revision_history", "decisions",
+                                          "adoptions", "contributors", "rejected_shas")})
+        else:
+            print(run["handoffs"][-1]["text"])
+            for decision in run.get("decisions", []):
+                print(f"\nDecision after revision {decision['round']}: {decision['action']}"
+                      + (f" ({decision['revisions']} more)" if decision["revisions"] else ""))
+            print(f"\nCurrent stage: {run['stage']}")
+    elif args.command == "decide":
+        run = team.decide(args.run_id, args.action, args.revisions, args.note)
+        emit({k: run.get(k) for k in ("id", "stage", "round", "extension", "decisions")})
+    elif args.command == "adopt":
+        run = team.adopt(args.run_id, args.contributor)
+        emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions")})
     elif args.command == "discover":
         emit(team.discover(args.project, args.agent, args.focus))
     return 0
@@ -240,7 +272,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     store = Store(args.home)
     try:
-        if (args.command in {"run", "status", "inspect", "doctor", "smoke", "init"} or
+        if (args.command in {"run", "status", "inspect", "handoff", "doctor", "smoke", "init"} or
                 (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"}) or
                 (args.command == "writing" and args.writing_command == "show") or
                 (args.command == "queue" and args.queue_command == "show")):

@@ -81,10 +81,38 @@ The candidate is committed locally and cloned into a fresh validation directory.
 Configured commands execute sequentially there, without ignored files or caches
 from the author checkout. Their results
 are recorded locally and summarized on GitHub; raw test logs stay local. Failed
-validation and review findings share the bounded revision budget. Exhausting that
-budget requires human attention. Explicit refresh starts new validation and review
-even if the old budget was exhausted; it does not silently authorize unlimited
-automatic revisions.
+validation and review findings share the bounded revision budget. Each rejection
+appends a revision-history entry: the round, rejected commit, validation results,
+feedback, reviewer metadata, and findings. Findings are labeled against earlier
+rounds. Only exact location and request matches count as repeated. A match on the
+same file alone is reported as uncertain. The commit joins `rejected_shas`, and
+validation and review refuse those commits.
+
+Exhausting the budget moves the run to `handoff`. A single SQLite write records
+the rejection, the handoff text, and its pending GitHub writes (the handoff comment
+and a failure status) in an `outbox`. Notification ticks publish the outbox with
+idempotent marked comments. A crash or GitHub failure therefore delays
+publication but never loses or duplicates it. A review verdict is saved with its
+commit before being published. If an interruption happens before the handoff,
+`resume` reuses that verdict instead of calling the reviewer again.
+
+Handoff and repair runs are recovery states. They stop new intake and refuse
+`resume` and `refresh`. `decide` records one of four operator decisions, with an
+optional note, and queues its comment the same way:
+
+- `extend`: 1-3 more revisions, stored as a cumulative `extension`.
+- `repair`: move to `repair`.
+- `rescope`: close locally.
+- `stop`: close locally.
+
+`adopt` accepts a repaired PR head only in `repair`. The head must not be a
+rejected commit. The run's contributing families are the author's family, the
+declared contributors, and any `Agent-Family` trailers between base and head.
+If the reviewer's family is among them, adoption is refused. Review also
+enforces this check. Adoption reuses refresh integration, then requires new
+validation and review under the same bound. Explicit refresh of a stale run starts
+new validation and review; it does not silently authorize unlimited automatic
+revisions.
 
 Candidate SHA and tree are checked again before publication. Git configuration,
 excludes, and local attributes are fingerprinted; changes stop orchestration
@@ -116,7 +144,7 @@ Projects store `queue_order` in their existing SQLite configuration. Queue edits
 use the coordinator lock. Inspection reads open issues and matching approvals
 without publishing changes. Eligible listed issues precede unlisted issues by
 creation time (issue number breaks ties). Explicit selection does not rewrite
-the queue. Existing active runs take priority; blocked and quota-waiting runs
+the queue. Existing active runs take priority; blocked, quota-waiting, handoff, and repair runs
 prevent new assignments. Targeted ticks reject conflicting work and limit
 reconciliation, notifications, and execution to the selected issue. Interrupted
 stages still require recovery. Completed runs retain their unique issue claim.

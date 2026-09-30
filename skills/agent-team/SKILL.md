@@ -167,9 +167,20 @@ recovery unless already explicitly granted; do not loop recovery commands.
 | --- | --- |
 | Stop new stages | `agent-team project pause example` takes effect between stages; it does not interrupt an active call. |
 | Continue a paused project | `agent-team project resume example` allows scheduling again; it does not repair blocked runs. |
-| Resolved blocked run or deliberate quota retry | `agent-team resume RUN_ID` retries the recorded stage and resets quota attempts. Respect automatic cooldowns and bounded retries; exhaustion requires human attention. |
+| Resolved blocked run or deliberate quota retry | `agent-team resume RUN_ID` retries the recorded stage and resets quota attempts. Respect automatic cooldowns and bounded retries; exhaustion requires human attention. A recorded review verdict for the same commit is reused, not rerun. |
 | Stale PR head or base | `agent-team refresh RUN_ID` adopts the current head, integrates the registered base, preserves previous work, and requires fresh validation and review. `resume` cannot reuse stale evidence. |
 | Abandon local orchestration | `agent-team close RUN_ID` preserves work and leaves the GitHub issue and PR open; it can publish a status notification. |
+| Revision limit reached (`handoff`) | `agent-team handoff RUN_ID` shows the handoff, then record the operator's choice. `agent-team decide RUN_ID extend --revisions N` authorizes N (1-3) more revisions. `decide RUN_ID repair` hands off for direct repair. `decide RUN_ID rescope` or `decide RUN_ID stop` stops the run. Add `--note TEXT` to publish a note. `resume` and `refresh` are refused. |
+| Direct repair pushed (`repair`) | `agent-team adopt RUN_ID --contributor human` (repeat for each of `openai`, `anthropic`, `human` that contributed) adopts the new PR head for new validation and independent review. |
+
+At a handoff, report the run, PR, candidate commit, validation, and each
+remaining finding with its `repeated`, `uncertain`, `new`, or `first` label. Do
+not relabel uncertain findings. Present the four decisions and let the operator
+choose. Never pick one on their behalf or choose a larger extension than they
+authorized. For `adopt`, declare every contributor truthfully, including your own
+model family if you edited the branch. Adoption is refused if the reviewer's
+family contributed. For `rescope`, draft a new linked issue for explicit
+approval; do not edit the original issue.
 
 Refresh conflicts stop without overwriting previous work; report them for human
 resolution. After interrupted publication, reconcile the recorded branch, PR,

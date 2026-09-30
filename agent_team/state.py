@@ -14,6 +14,8 @@ from .process import TeamError
 
 ACTIVE = {"prepare", "implement", "validate", "publish", "review", "ci"}
 TERMINAL = {"merged", "closed"}
+# Runs waiting for an operator: they stop new assignments and never advance on their own.
+RECOVERY = {"blocked", "quota_wait", "handoff", "repair"}
 
 
 def issue_fingerprint(issue):
