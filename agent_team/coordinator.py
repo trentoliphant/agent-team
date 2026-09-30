@@ -663,7 +663,8 @@ class Coordinator:
                             evidence_invalidations=run.get("evidence_invalidations", []) +
                             [{"at": time.time(), "before": previous, "after": context}],
                             next_stage="implement" if run.get("needs_revision") and not run.get("contribution_history") else "validate")
-            raise TeamError("Candidate or configuration changed; evidence invalidated. Inspect and select the recorded next stage")
+            if operations[0] not in {"discovery", "issue_prepare", "implement", "revision", "validate"}:
+                raise TeamError("Candidate or configuration changed; evidence invalidated. Inspect and select the recorded next stage")
         # Fetch only after metadata/scope checks. Base drift cannot reuse evidence.
         cwd = self.store.workspace(run)
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git",
@@ -1090,7 +1091,12 @@ class Coordinator:
             "push", f"https://github.com/{project['repo']}.git", f"HEAD:refs/heads/{run['branch']}")
         self.store.save(run, published_sha=sha, pending_push_sha=None)
         pr = self.github.create_pr(project, run, pr_body(run))
-        self.store.save(run, pr=pr["number"], stage=self.successor(run, "publish", "review"))
+        self.store.save(run, pr=pr["number"])
+        writes = {}
+        if (run.get("reviewed_sha") == sha and run.get("review_sha") == sha
+                and run.get("review_record") and run["review_record"]["report"]["verdict"] == "pass"):
+            writes = self.queue_writes(run, self.review_write(run, run["review_record"]))
+        self.store.save(run, stage=self.successor(run, "publish", "review"), **writes)
         self.github.status(project["repo"], sha, "pending", "Awaiting independent cross-family review")
 
     def independent_review(self, project, run):
@@ -1138,11 +1144,15 @@ class Coordinator:
             self.store.save(run, review_record=record, review_sha=run["sha"])
         self.record_review(project, run, record)
 
+    def review_write(self, run, record):
+        return {"type": "comment", "number": run["pr"] if run.get("published_sha") == run["sha"] else None,
+                "marker": f"{run['id']}-review-{run['round']}-{run['sha']}",
+                "body": review_comment(run["sha"], record), "heading": f"Independent review of `{run['sha']}`"}
+
     def record_review(self, project, run, record):
         # The outcome is saved with its GitHub writes queued, so a failed write cannot hide a
         # rejection or a handoff; `flush` publishes them afterwards and retries on later ticks.
-        comment = {"type": "comment", "number": run["pr"] if run.get("published_sha") == run["sha"] else None, "marker": f"{run['id']}-review-{run['round']}-{run['sha']}",
-                   "body": review_comment(run["sha"], record), "heading": f"Independent review of `{run['sha']}`"}
+        comment = self.review_write(run, record)
         if record["report"]["verdict"] != "pass":
             status = {"type": "status", "sha": run["sha"], "state": "failure",
                       "description": "Independent reviewer requested changes"}
@@ -1201,6 +1211,11 @@ class Coordinator:
             return
         if not self.reconcile(project, run):
             return
+        # Reconcile the marked review before readiness, including reviews performed
+        # locally without a GitHub grant. A failed write must leave the PR draft.
+        comment = self.review_write(run, run["review_record"])
+        self.github.comment(project["repo"], run["pr"], comment["marker"], comment["body"],
+                            heading=comment["heading"])
         self.github.status(project["repo"], run["sha"], "success", "Cross-family review and configured tests passed; human merge only")
         if self.github.pr(project["repo"], run["pr"]).get("draft"):
             self.github.mark_ready(project["repo"], run["pr"])

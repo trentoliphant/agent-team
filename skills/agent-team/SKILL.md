@@ -231,7 +231,8 @@ review, and CI reuse a tracked run's compatible evidence. Without such evidence,
 select validation first. Existing-PR adoption from outside Agent Team is #10;
 do not create a replacement PR or author pass to work around that limitation.
 After a compatible local review, `publish ci` publishes and checks readiness
-without repeating review. Inspect each continuation's grants and effects to
+without repeating review. Publication posts the stored review on the PR;
+readiness requires its comment write to succeed. Inspect each continuation's grants and effects to
 report what that segment authorized.
 For CI inspection without readiness, select `checks`. It reads once, saves pending,
 failure, or success with the exact revision and time, and stops without review or
@@ -247,7 +248,10 @@ exhaustion requires `decide`. An extension or adoption returns selected work to
 an explicit boundary. Reselect operations without resetting its budget/history.
 Changed candidate, base, scope, configuration, or dependency pins invalidate
 affected evidence. Local handoff edits require contributor declarations, including
-your family if you contributed. The reviewer's family is refused. Do not reroll
+your family if you contributed. The reviewer's family is refused.
+A valid declaration with validation or an earlier rebuilding
+entry continues in one command after invalidating old evidence. Publication,
+review, checks, and readiness still refuse invalidated prerequisites. Do not reroll
 rejected evidence. Unpublished base drift can be integrated with
 `refresh RUN_ID --grant edit`; declare contributors if its committed HEAD changed.
 It preserves prior work and returns to stopped validation. Conflicts require

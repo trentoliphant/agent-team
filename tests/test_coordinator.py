@@ -320,6 +320,17 @@ class WorkflowTests(unittest.TestCase):
         run = self.selected_ticks(run, 1)
         self.assertEqual(run["stage"], "ci")
         self.assertEqual(self.github.creates, 1)
+        marker = f"{run['id']}-review-{run['round']}-{sha}"
+        review_body = self.github.comments[(run["pr"], marker)]
+        self.assertIn(run["review_record"]["report"]["summary"], review_body)
+        self.assertIn(sha, review_body)
+        mark_ready = self.github.mark_ready
+
+        def require_review(repo, number):
+            self.assertEqual(self.github.comments[(number, marker)], review_body)
+            mark_ready(repo, number)
+
+        self.github.mark_ready = require_review
         self.assertEqual(self.agents.calls, calls)
         self.store.db.close()
         self.store = Store(self.root / "state")
@@ -327,9 +338,50 @@ class WorkflowTests(unittest.TestCase):
         run = self.selected_ticks(run, 1)
         self.assertEqual(run["stage"], "ready")
         self.assertFalse(self.github.pull["draft"])
+        self.assertEqual(self.github.comments[(run["pr"], marker)], review_body)
         self.assertEqual(self.agents.calls, calls)
         self.assertEqual(run["performed_operations"], ["prepare", "validate", "review", "publish", "ci"])
         self.assertIn("implement", run["omitted_operations"])
+
+    def test_readiness_review_comment_failure_keeps_pr_draft(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "review"], [], task="Review before publishing with failed comment",
+                               ref=sha, contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        run = self.team.select("demo", ["publish", "ci"], ["push", "github", "readiness"], run_id=run["id"])
+        run = self.selected_ticks(run, 1)
+        marker = f"{run['id']}-review-{run['round']}-{sha}"
+        comment = self.github.comment
+
+        def fail_review(repo, number, selected_marker, body, heading=None):
+            if selected_marker == marker:
+                raise TeamError("Review comment unavailable")
+            return comment(repo, number, selected_marker, body, heading)
+
+        self.github.comment = fail_review
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "blocked")
+        self.assertTrue(self.github.pull["draft"])
+        self.assertNotIn((sha, "success"), self.github.statuses)
+        self.github.comment = comment
+        self.team.resume(run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "ready")
+        self.assertIn((run["pr"], marker), self.github.comments)
+        self.assertEqual([role for _, role in self.agents.calls], ["review"])
+
+    def test_declared_changes_still_refuse_publication_until_validation(self):
+        run = self.team.select("demo", ["implement", "validate"], ["edit"], task="Validate changed work before push")
+        run = self.selected_ticks(run, 3)
+        (self.store.workspace(run) / "human.txt").write_text("human addition\n")
+        with self.assertRaisesRegex(TeamError, "evidence invalidated"):
+            self.team.select("demo", ["publish"], ["push", "github"], run_id=run["id"], contributors=["human"])
+        saved = self.store.get(run["id"])
+        self.assertEqual(saved["stage"], "stopped")
+        self.assertIsNone(saved["validated_sha"])
+        self.assertEqual(saved["contribution_history"][-1]["declared"], ["human"])
+        self.assertEqual(len(saved["evidence_invalidations"]), 1)
+        self.assertEqual(self.github.creates, 0)
 
     def test_publication_readiness_sequence_refuses_missing_review_before_writes(self):
         sha = self.existing_feature()
@@ -394,9 +446,9 @@ class WorkflowTests(unittest.TestCase):
             self.team.continue_run(run["id"], ["validate"])
         with self.assertRaises(TeamError):
             self.team.continue_run(run["id"], ["validate"], [FAMILIES[run["reviewer"]]])
-        with self.assertRaises(TeamError):  # records declaration and invalidates old context
-            self.team.continue_run(run["id"], ["validate"], ["human"])
-        run = self.team.continue_run(run["id"], ["validate"])
+        run = self.team.continue_run(run["id"], ["validate"], ["human"])
+        self.assertEqual(run["stage"], "validate")
+        self.assertEqual(len(run["evidence_invalidations"]), 1)
         run = self.team.tick("demo", 1)
         self.assertEqual(run["stage"], "stopped")
         self.assertIn("human", run["contributors"])
@@ -512,8 +564,8 @@ class WorkflowTests(unittest.TestCase):
         round_number = run["round"]
         rejected = run["rejected_shas"][:]
         (self.store.workspace(run) / "feature.txt").write_text("human repair\n")
-        with self.assertRaises(TeamError):
-            self.team.select("demo", ["validate", "review"], [], run_id=run["id"], contributors=["human"])
+        run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"], contributors=["human"])
+        self.assertEqual(run["stage"], "validate")
         saved = self.store.get(run["id"])
         self.assertEqual(saved["contribution_history"][-1]["declared"], ["human"])
         self.assertIsNone(saved["validated_sha"])
@@ -521,7 +573,6 @@ class WorkflowTests(unittest.TestCase):
         self.store.db.close()
         self.store = Store(self.root / "state")
         self.team = Coordinator(self.store, self.github, self.agents)
-        run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"])
         run = self.selected_ticks(run, 2)
         self.assertEqual(run["stage"], "stopped")
         self.assertEqual(run["round"], round_number)

@@ -584,6 +584,9 @@ outside those requests, unperformed operations, continuation segments, input rev
 review, and output stages. Each continuation records its grants and effects;
 the current effect plan describes the selected segment. Publication follows the
 selected successor and reuses compatible local review without another review call.
+Publication posts that stored review on the PR with its original comment marker.
+Readiness reconciles the review comment before marking the PR ready; a failed
+comment write leaves it draft.
 Any validation or review rejection stops a selection
 before fixes. Revision exhaustion still requires `decide`; selecting another
 entry does not reset rounds, limits, or rejected commits. A task with the same
@@ -604,7 +607,10 @@ contributors before re-entry. The reviewer's family is refused. Human edits are
 committed with a human contributor trailer rather than attributed to the assigned
 author family. A declared human repair can re-enter at validation and review
 without another author pass, under the same revision budget. Candidate and configuration drift are checked again before
-publication, review, and readiness. Changed remote head/base commits invalidate
+publication, review, and readiness. Valid contributor declarations and a sequence
+starting at validation or an earlier rebuilding stage invalidate old evidence
+and continue in one selection. Evidence-consuming entry points still refuse
+changed inputs until their prerequisites are rebuilt. Changed remote head/base commits invalidate
 readiness. External PR-head adoption remains subject to #10 and existing #7
 repair rules; it is never inferred from trailers alone.
 
