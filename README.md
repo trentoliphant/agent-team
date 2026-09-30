@@ -187,12 +187,18 @@ agent-team project configure example --max-quota-retries 3
 - Pause takes effect between stages; it does not interrupt an in-flight call.
   You can request pause while a worker is running. Configuration changes require
   an idle worker lock; pause first if a watch loop is active.
-- `resume` retries the recorded stage after you inspect a blocked run. Quota
+- `resume` retries the recorded stage after you inspect a blocked run. It does not
+  apply after the revision limit; see below. Quota
   waits resume automatically after their cooldown, up to three consecutive
   attempts by default. Exhaustion blocks until you explicitly resume.
 - `refresh` explicitly adopts the current PR head, merges the current registered
   base into a new checkout, preserves the previous author checkout, and requires
   new tests and review. Conflicts stop without overwriting previous work.
+  If a review verdict was saved but the process stopped before the rejection was
+  recorded, `refresh` (and `adopt`) records that rejection first and stops. The
+  run then revises within the limit or hands off; the rejected commit is never
+  reviewed again. `refresh` refuses closed and merged runs, so it cannot reopen
+  a run after `close`.
 - `close` stops local orchestration only. It preserves work and leaves the
   GitHub issue and PR open for your decision.
 - One issue has one run. Closed runs are not silently re-created. Track a new
@@ -201,7 +207,7 @@ agent-team project configure example --max-quota-retries 3
   Once assigned, the snapshot is immutable: restore it to resume, or close the
   run and create a new linked issue for changed scope.
 
-An unresolved blocked/quota run stops new assignments for that project. Ready
+An unresolved blocked, quota, handoff, or repair run stops new assignments for that project. Ready
 and stale PRs do not stop new assignments. A changed PR head/base becomes stale
 and requires `refresh`; `resume` cannot reuse its old evidence.
 Explicit selection overrides the saved order for one invocation:
@@ -229,8 +235,8 @@ approved ready issues oldest-first. Clearing the order restores oldest-first.
 Explicit selection requires an open issue with current approval and the ready
 label. Invalid selections fail without choosing another issue or changing the
 saved order. An eligible existing run continues without duplication; completed
-runs cannot restart. Another issue's active work or blocked/quota recovery
-prevents targeted execution. Saved ordering applies to new assignments and never
+runs cannot restart. Another issue's active work or recovery (blocked, quota,
+handoff, or repair) prevents targeted execution. Saved ordering applies to new assignments and never
 preempts an active run or bypasses recovery.
 
 Targeted watch advances only the selected issue and stops at readiness, pause,
@@ -249,6 +255,68 @@ agent-team project configure example --codex-model YOUR_MODEL --claude-model YOU
 
 Without explicit models, the adapters use the CLIs' defaults. An empty observed
 model list means the CLI did not expose the actual model; it is not guessed.
+
+### After the revision limit
+
+Failed validation and rejected reviews share the `--max-revisions` budget. When
+it runs out, the run moves to `handoff` and waits. Nothing retries on its own,
+and `resume` and `refresh` are refused. Before any GitHub write, the coordinator
+saves the rejected review, feedback, revision history, and handoff, with the
+review comment and statuses queued. A failed GitHub write cannot block the
+handoff; queued writes are retried later. It then posts a handoff
+comment on the PR (or on the issue if no PR exists). The comment lists the run,
+issue, PR, candidate commit, validation results, and every remaining finding.
+It also includes the history and links to evidence. Each finding is labeled
+`repeated` (same location and request as an earlier round), `uncertain` (an earlier
+round flagged the same file with different wording), `new`, or `first`. If
+validation fails after a review rejection, no review has checked that rejection's
+findings. The handoff lists them in full with status uncertain, and an extension
+passes them to the author along with the validation failure.
+
+```sh
+agent-team handoff RUN_ID                       # show the handoff (read-only; --json for the record)
+agent-team decide RUN_ID extend --revisions 1   # finite extension, 1-3 more revisions
+agent-team decide RUN_ID repair                 # hand off for direct repair (PR branch or local checkout)
+agent-team adopt RUN_ID --contributor human     # adopt the repaired commit; repeatable
+agent-team decide RUN_ID rescope                # stop; changed scope needs a new linked issue
+agent-team decide RUN_ID stop                   # stop; issue, PR, and work are kept
+```
+
+`--note TEXT` adds an operator note to the published decision. Each decision is
+saved in the run and posted as a PR (or issue) comment. History is never reset.
+A rejected commit can never be validated or reviewed again, so every extension
+or repair must add a new commit. `extend --revisions N` always allows exactly N
+more revisions after the handoff round, even after an adoption. The limit is
+stored on the run at the first handoff, so changing the project's
+`max_revisions` later does not widen or shrink it. When an extension
+is used up, the run returns to `handoff` for a new decision.
+
+For direct repair, push commits to the run's branch, then run `adopt`. List every
+contributor with `--contributor openai|anthropic|human`. `Agent-Family` trailers
+in the new commits are added too. Adoption is refused while the PR head is still
+a rejected commit. It is refused if the head does not build on the last published
+candidate, such as a force-push that rewrites history. It is also refused if the reviewer's family contributed,
+because no independent agent review is then possible. In that case, review it
+yourself, or rescope or stop. An adopted head merges the current base, preserves
+the previous checkout, and needs new validation and exact-commit review. It stays
+in the same run, PR, and history. A rejection after adoption returns to `handoff`.
+If the PR head changes outside the coordinator after an extension or an adoption,
+the run goes `stale`. `refresh` then refuses the new head, even without
+`Agent-Family` trailers; run `adopt` and declare its contributors. Decisions and
+the extension are kept. If that head cannot be adopted, `decide RUN_ID rescope`
+or `decide RUN_ID stop` records the decision and closes the run locally.
+
+If validation used up the limit before anything was published, there is no PR
+branch. `decide RUN_ID repair` then creates a local repair checkout at the
+rejected commit; `agent-team handoff RUN_ID` shows its path. Commit repairs there
+on top of that commit, then run `adopt` as above. Uncommitted changes and
+rewritten history are refused. Adoption merges the current base into the
+repair; on a conflict, the repair checkout is kept so you can merge the base
+there and adopt again. The adopted commit is validated before anything
+is pushed, then published as a draft PR and independently reviewed as that exact
+commit.
+`rescope` does not edit the issue. It stops this run; open a linked issue with the
+new scope and `approve` it.
 
 ## Writing standards
 

@@ -70,7 +70,8 @@ class FakeAgents:
     def __init__(self):
         self.calls = []
         self.prompts = {}
-        self.reject = False
+        self.reject = False  # True or a count of consecutive rejections
+        self.findings = []  # per-rejection findings; the default finding is used when exhausted
         self.quota = False
         self.summary = "Added feature"
 
@@ -91,10 +92,11 @@ class FakeAgents:
             style = prompt.split("Writing standard for each status comment", 1)[1].split("Never omit", 1)[0]
             report = {"message": "Drafted: " + " ".join(style.splitlines()[1:])}
         else:
+            default = [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}]
+            findings = (self.findings.pop(0) if self.findings else default) if self.reject else []
             report = {"verdict": "changes_requested" if self.reject else "pass", "summary": self.summary,
-                      "findings": [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
-                                    "request": "Fix"}] if self.reject else []}
-            self.reject = False
+                      "findings": findings}
+            self.reject = max(int(self.reject) - 1, 0)
         return {"agent": agent, "family": FAMILIES[agent], "cli_version": "test", "requested_model": "test",
                 "observed_models": ["test"], "report": report}
 
@@ -126,6 +128,8 @@ class WorkflowTests(unittest.TestCase):
             if "push" in args:
                 index = args.index("push")
                 args[index + 1] = str(self.remote)
+            if "fetch" in args:
+                args = [str(self.remote) if str(a).startswith("https://github.com/") else a for a in args]
             return git(cwd, *args)
 
         self.exec_patch = patch("agent_team.coordinator.clone_repository", side_effect=local_clone)
@@ -175,19 +179,794 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["round"], 1)
         self.assertEqual(self.github.creates, 1)
 
-    def test_revision_limit_blocks(self):
+    def test_revision_limit_hands_off(self):
         self.project["max_revisions"] = 0
         self.store.save_project(self.project)
         self.agents.reject = True
         run = self.tick(5)
-        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(run["stage"], "handoff")
         self.assertIn("Revision limit", run["error"])
+
+    def exhaust(self):
+        """Two rejected reviews with max_revisions=1 reach the handoff on the existing PR."""
+        self.project["max_revisions"] = 1
+        self.store.save_project(self.project)
+        self.agents.reject = 2
+        self.agents.findings = [
+            [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}],
+            [{"severity": "high", "location": "feature.txt:1", "evidence": "Still", "request": " fix"},
+             {"severity": "low", "location": "feature.txt:4", "evidence": "Style", "request": "Rename"},
+             {"severity": "medium", "location": "other.py:2", "evidence": "Regression", "request": "Test"}]]
+        run = self.tick(9)
+        self.assertEqual(run["stage"], "handoff")
+        return run
+
+    def push_repair(self, run, message="Human repair", text="repaired\n"):
+        work = self.root / f"repair-{time.time_ns()}"
+        execute(["git", "clone", "--branch", run["branch"], str(self.remote), str(work)])
+        (work / "feature.txt").write_text(text)
+        git(work, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-am", message)
+        git(work, "push", "origin", "HEAD")
+        return git(work, "rev-parse", "HEAD")
+
+    def command(self, *args):
+        from agent_team.cli import dispatch, parser
+        with patch("agent_team.cli.Coordinator", return_value=self.team), patch("agent_team.cli.GitHub"), \
+                patch("agent_team.cli.emit"):
+            return dispatch(parser().parse_args(list(args)), self.store)
+
+    def test_exhaustion_persists_evidence_and_publishes_handoff(self):
+        run = self.exhaust()
+        calls = len(self.agents.calls)
+        history = run["revision_history"]
+        self.assertEqual([e["round"] for e in history], [0, 1])
+        self.assertEqual(run["rejected_shas"], [history[0]["sha"], run["sha"]])
+        self.assertEqual(run["review_record"]["report"]["verdict"], "changes_requested")
+        self.assertIn("Regression", run["feedback"])
+        self.assertEqual([f["match"] for f in history[0]["findings"]], ["first"])
+        self.assertEqual([f["match"] for f in history[1]["findings"]], ["repeated", "uncertain", "new"])
+        body = self.github.comments[(7, f"{run['id']}-handoff-1")]
+        for text in (run["id"], "issue #1", "PR #7", f"Candidate commit `{run['sha']}`", "`test -f feature.txt` exit 0",
+                     "Evidence: Regression", "repeated: an earlier round", "uncertain: an earlier round",
+                     "new: no earlier finding", "Revision 0: review by `claude` (anthropic)", "Revision 1: review",
+                     "https://github.com/example/demo/pull/7", f"https://github.com/example/demo/commit/{run['sha']}",
+                     f"agent-team decide {run['id']} extend", "Only the maintainer decides"):
+            self.assertIn(text, body)
+        self.assertEqual(self.github.statuses[-1], (run["sha"], "failure"))
+        self.assertEqual(run["outbox"], [])
+        self.assertIn("operator decision", self.github.comments[(1, run["id"])])
+        # No silent retry, no resume, no refresh past the evaluation point, and no new intake.
+        self.github.items.append(dict(self.github.items[0], number=2, title="Next"))
+        self.assertEqual(self.tick(3)["stage"], "waiting")
+        self.assertEqual(len(self.agents.calls), calls)
+        with self.assertRaises(TeamError):
+            self.command("resume", run["id"])
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
+        self.assertEqual(len(self.store.runs()), 1)
+
+    def test_finite_extension_keeps_history_and_requires_new_evidence(self):
+        run = self.exhaust()
+        for bad in ((None,), (0,), (4,)):
+            with self.assertRaises(TeamError):
+                self.team.decide(run["id"], "extend", *bad)
+        with self.assertRaises(TeamError):
+            self.team.decide(run["id"], "stop", 1)
+        self.command("decide", run["id"], "extend", "--revisions", "1", "--note", "One more try")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["round"], run["extension"]), ("implement", 2, 1))
+        self.assertEqual(run["decisions"][0]["action"], "extend")
+        self.assertEqual(len(run["revision_history"]), 2)
+        self.assertIn("Regression", run["feedback"])
+        decision = self.github.comments[(7, f"{run['id']}-decision-1")]
+        self.assertIn("1 more revision(s); the limit is now 2", decision)
+        self.assertIn("Operator note: One more try", decision)
+        with self.assertRaises(TeamError):
+            self.team.decide(run["id"], "extend", 1)  # decisions apply only at a handoff
+        # Using up the extension hands off again instead of retrying.
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], len(run["revision_history"])), ("handoff", 3))
+        self.assertIn("Operator decision after revision 1: extend (1 more)",
+                      self.github.comments[(7, f"{run['id']}-handoff-2")])
+        self.team.decide(run["id"], "extend", 1)
+        self.assertEqual(self.tick(5)["stage"], "ready")
+
+    def test_config_change_before_extension_cannot_widen_it(self):
+        run = self.exhaust()
+        self.assertEqual(run["revision_limit"], 1)
+        self.project["max_revisions"] = 100
+        self.store.save_project(self.project)
+        self.team.decide(run["id"], "extend", 1)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["round"], run["revision_limit"], run["extension"]),
+                         ("implement", 2, 2, 1))
+        self.assertEqual(run["decisions"][0]["limit"], 2)
+        self.assertIn("the limit is now 2", self.github.comments[(7, f"{run['id']}-decision-1")])
+        # The one authorized revision is used up: a rejection hands off again.
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["round"], len(run["revision_history"])), ("handoff", 2, 3))
+
+    def test_config_change_after_extension_cannot_widen_it(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 1)
+        self.project["max_revisions"] = 100
+        self.store.save_project(self.project)
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["round"], run["revision_limit"]), ("handoff", 2, 2))
+        self.assertIn("revision 2/2", self.github.comments[(7, f"{run['id']}-handoff-2")])
+        # Lowering the configuration cannot shrink an authorized extension either.
+        self.team.decide(run["id"], "extend", 1)
+        self.project["max_revisions"] = 0
+        self.store.save_project(self.project)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["round"], run["revision_limit"], run["extension"]), (3, 3, 2))
+        self.assertEqual(self.tick(5)["stage"], "ready")
+
+    def test_no_change_extension_cannot_reroll_rejected_evidence(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 1)
+        with patch.object(self.agents, "run", return_value={"report": {"summary": "", "limitations": ""}}):
+            run = self.tick()
+        run = self.tick()
+        self.assertEqual(run["stage"], "blocked")
+        self.assertIn("no new commit", run["error"])
+
+    def test_stop_and_rescope_close_locally_and_keep_github_open(self):
+        for action in ("stop", "rescope"):
+            with self.subTest(action=action):
+                self.tearDown()
+                self.setUp()
+                run = self.exhaust()
+                self.team.decide(run["id"], action)
+                run = self.store.get(run["id"])
+                self.assertEqual(run["stage"], "closed")
+                self.assertEqual(self.github.pull["state"], "open")
+                self.assertIn(f"Agent Team decision: {action}", self.github.comments[(7, f"{run['id']}-decision-1")])
+                self.assertEqual(len(run["revision_history"]), 2)
+
+    def test_direct_repair_is_adopted_revalidated_and_independently_reviewed(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.assertEqual(self.store.get(run["id"])["stage"], "repair")
+        self.assertEqual(self.tick()["stage"], "waiting")
+        with self.assertRaises(TeamError):  # nothing new on the branch yet
+            self.team.adopt(run["id"], ["human"])
+        head = self.push_repair(run)
+        with self.assertRaises(TeamError):  # the reviewer's family cannot review its own repair
+            self.team.adopt(run["id"], ["anthropic"])
+        with self.assertRaises(TeamError):
+            self.team.decide(run["id"], "extend", 1)
+        self.command("adopt", run["id"], "--contributor", "human")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"]), ("validate", head, 2))
+        self.assertEqual(run["adoptions"][0]["families"], ["openai"])
+        self.assertIn("human", run["contributors"])
+        self.assertIn((head, "pending"), self.github.statuses)
+        self.assertIn("Declared contributors: human", self.github.comments[(7, f"{run['id']}-adopt-2")])
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual(run["stage"], "ready")
+        self.assertEqual(run["reviewed_sha"], head)
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def test_validation_exhaustion_after_review_rejection_keeps_unverified_findings(self):
+        self.project["max_revisions"] = 1
+        self.store.save_project(self.project)
+        self.agents.reject = 1
+        self.agents.findings = [[{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
+                                  "request": "Fix the bug"}]]
+        run = self.tick(5)
+        self.assertEqual((run["stage"], run["round"]), ("implement", 1))
+        self.project["tests"] = ["test -f feature.txt", "false"]
+        self.store.save_project(self.project)
+        for _ in range(5):
+            run = self.tick()
+            if run["stage"] == "handoff":
+                break
+        self.assertEqual(run["stage"], "handoff")
+        self.assertEqual([e["kind"] for e in run["revision_history"]], ["review", "validation"])
+        body = self.github.comments[(7, f"{run['id']}-handoff-1")]
+        for text in ("Remaining findings from validation (1)", "`false` exit 1",
+                     "Earlier review findings with unverified resolution (1)",
+                     f"Review of revision 0 rejected `{run['revision_history'][0]['sha']}`",
+                     "status uncertain", "Evidence: Bug", "Request: Fix the bug"):
+            self.assertIn(text, body)
+        self.team.decide(run["id"], "extend", 1)
+        feedback = self.store.get(run["id"])["feedback"]
+        self.assertIn("Validation failed", feedback)
+        self.assertIn("no later review verified", feedback)
+        self.assertIn("Fix the bug", feedback)
+
+    def test_handoff_after_review_lists_only_latest_review_findings(self):
+        run = self.exhaust()
+        self.assertNotIn("unverified resolution", self.github.comments[(7, f"{run['id']}-handoff-1")])
+
+    def test_force_pushed_repair_that_drops_rejected_history_is_refused(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        work2 = self.root / "extend"  # cloned before the rewrite, so it still has the rejected candidate
+        execute(["git", "clone", str(self.remote), str(work2)])
+        work = self.root / "rewrite"
+        execute(["git", "clone", "--branch", "main", str(self.remote), str(work)])
+        (work / "feature.txt").write_text("rewritten\n")
+        git(work, "add", "feature.txt")
+        git(work, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Rewritten repair")
+        git(work, "push", "--force", "origin", f"HEAD:{run['branch']}")
+        head = git(work, "rev-parse", "HEAD")
+        calls = len(self.agents.calls)
+        with self.assertRaises(TeamError) as caught:
+            self.team.adopt(run["id"], ["human"])
+        self.assertIn("without rewriting history", str(caught.exception))
+        after = self.store.get(run["id"])
+        self.assertEqual((after["stage"], after["sha"], after["published_sha"], after.get("adoptions", [])),
+                         ("repair", run["sha"], run["published_sha"], []))
+        self.assertEqual(git(self.store.workspace(after), "rev-parse", "HEAD"), run["sha"])
+        self.assertNotIn(head, [sha for sha, _ in self.github.statuses])
+        self.assertNotIn((7, f"{run['id']}-adopt-2"), self.github.comments)
+        self.assertEqual(self.agents.calls[calls:], [])
+        # A repair that extends the rejected candidate is still adoptable afterwards.
+        git(work2, "checkout", "-B", run["branch"], run["published_sha"])
+        (work2 / "feature.txt").write_text("repaired\n")
+        git(work2, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-am", "Repair")
+        git(work2, "push", "--force", "origin", f"HEAD:{run['branch']}")
+        self.team.adopt(run["id"], ["human"])
+        self.assertEqual(self.store.get(run["id"])["stage"], "validate")
+
+    def test_repair_trailers_reveal_reviewer_family(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run, "Repair\n\nAgent-Family: anthropic")
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["human"])
+        self.assertEqual(self.store.get(run["id"])["stage"], "repair")
+
+    def test_head_change_after_adoption_needs_new_adoption_and_independent_review(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run)
+        self.team.adopt(run["id"], ["human"])
+        calls = len(self.agents.calls)
+        self.push_repair(run, "Second repair\n\nAgent-Family: anthropic", "repaired again\n")
+        self.tick()
+        run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "stale")
+        with self.assertRaises(TeamError):  # refresh cannot take a new external head without declarations
+            self.team.refresh(run["id"])
+        with self.assertRaises(TeamError):  # trailers show the reviewer's family contributed
+            self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "stale")
+        self.assertNotIn("anthropic", run["contributors"])
+        self.assertEqual(len(run["adoptions"]), 1)
+        self.assertEqual(self.agents.calls[calls:], [])
+
+    def test_external_repair_after_extension_needs_declared_contributors(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 1)
+        calls = len(self.agents.calls)
+        # The reviewer's family repairs the branch without an Agent-Family trailer.
+        head = self.push_repair(run, "Repair by the reviewer's family")
+        self.assertEqual(self.tick()["stage"], "stale")
+        self.assertIn("agent-team adopt", self.store.get(run["id"])["error"])
+        with self.assertRaises(TeamError):  # refresh cannot take the head on missing trailers
+            self.team.refresh(run["id"])
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["anthropic"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["extension"], len(run["decisions"])), ("stale", 1, 1))
+        self.assertNotEqual(run["published_sha"], head)
+        self.assertEqual(self.agents.calls[calls:], [])
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"]), ("validate", head, 3))
+        self.assertEqual((run["extension"], len(run["decisions"]), len(run["adoptions"])), (1, 1, 1))
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", head))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def test_second_human_repair_after_adoption_is_adopted_again(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run)
+        self.team.adopt(run["id"], ["human"])
+        head = self.push_repair(run, "Second repair", "repaired again\n")
+        self.assertEqual(self.tick()["stage"], "stale")
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], len(run["adoptions"])), ("validate", head, 2))
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", head))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def test_extension_after_rejected_adoption_counts_from_handoff_round(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        self.push_repair(run)
+        self.team.adopt(run["id"], ["human"])
+        self.agents.reject = True
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["round"]), ("handoff", 2))  # adoption passed the limit of 1
+        self.team.decide(run["id"], "extend", 2)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["round"], run["extension"]), ("implement", 3, 3))
+        self.assertEqual([(d["action"], d["revisions"], d["limit"]) for d in run["decisions"]],
+                         [("repair", None, 1), ("extend", 2, 4)])
+        self.assertIn("2 more revision(s); the limit is now 4", self.github.comments[(7, f"{run['id']}-decision-2")])
+        # Both authorized revisions are usable: a rejection at round 3 revises instead of handing off.
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["round"]), ("implement", 4))
+        self.assertEqual(len(run["revision_history"]), 4)
+        self.assertEqual(self.tick(5)["stage"], "ready")
+
+    def test_stale_recovered_run_unadoptable_by_reviewer_family_can_stop_or_rescope(self):
+        for action in ("stop", "rescope"):
+            with self.subTest(action=action):
+                self.tearDown()
+                self.setUp()
+                run = self.exhaust()
+                self.team.decide(run["id"], "extend", 1)
+                self.push_repair(run, "Repair by the reviewer's family")
+                self.assertEqual(self.tick()["stage"], "stale")
+                calls = len(self.agents.calls)
+                with self.assertRaises(TeamError):
+                    self.team.adopt(run["id"], ["anthropic"])
+                for refused in (("extend", 1), ("repair",)):
+                    with self.assertRaises(TeamError):
+                        self.team.decide(run["id"], *refused)
+                real = self.github.comment
+                def fail_decision(repo, number, marker, *args, **kwargs):
+                    if "-decision-" in marker:
+                        raise TeamError("GitHub unavailable")
+                    return real(repo, number, marker, *args, **kwargs)
+                with patch.object(self.github, "comment", side_effect=fail_decision):
+                    with self.assertRaises(TeamError):
+                        self.command("decide", run["id"], action, "--note", "Reviewer family repaired it")
+                # The decision is durable and its comment stays queued even though publication failed.
+                run = self.store.get(run["id"])
+                self.assertEqual(run["stage"], "closed")
+                self.assertEqual([d["action"] for d in run["decisions"]], ["extend", action])
+                self.assertEqual(len(run["revision_history"]), 2)
+                self.assertEqual([w["marker"] for w in run["outbox"]], [f"{run['id']}-decision-2"])
+                self.tick()
+                run = self.store.get(run["id"])
+                self.assertEqual(run["outbox"], [])
+                body = self.github.comments[(7, f"{run['id']}-decision-2")]
+                self.assertIn(f"Agent Team decision: {action}", body)
+                self.assertIn("Operator note: Reviewer family repaired it", body)
+                self.assertEqual(self.github.pull["state"], "open")
+                self.assertEqual(self.agents.calls[calls:], [])
+
+    def test_interruption_right_after_handoff_save_keeps_decisions(self):
+        real = self.team.revise
+        def crash(project, run, *args, **kwargs):
+            real(project, run, *args, **kwargs)
+            if run["stage"] == "handoff":
+                raise KeyboardInterrupt()
+        with patch.object(self.team, "revise", side_effect=crash):
+            with self.assertRaises(KeyboardInterrupt):
+                self.exhaust()
+        run = self.store.runs()[0]
+        # Review comment, review status, handoff comment, handoff status.
+        self.assertEqual((run["stage"], run["in_flight"], len(run["outbox"])), ("handoff", False, 4))
+        # State left by an older coordinator that saved the handoff while still in flight.
+        self.store.save(run, in_flight=True)
+        calls = len(self.agents.calls)
+        self.assertEqual(self.tick()["stage"], "waiting")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["in_flight"], run["outbox"]), ("handoff", False, []))
+        self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+        self.assertEqual(len(self.agents.calls), calls)
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
+        self.team.decide(run["id"], "repair")
+        self.assertEqual(self.store.get(run["id"])["stage"], "repair")
+
+    def test_refresh_refuses_blocked_handoff(self):
+        run = self.exhaust()
+        self.store.save(run, stage="blocked", resume_stage="handoff")
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
+
+    def test_interrupted_handoff_publication_is_retried_without_agents(self):
+        real = self.github.comment
+        def fail_handoff(repo, number, marker, *args, **kwargs):
+            if "-handoff-" in marker:
+                raise TeamError("GitHub unavailable")
+            return real(repo, number, marker, *args, **kwargs)
+        with patch.object(self.github, "comment", side_effect=fail_handoff):
+            with self.assertRaises(TeamError):
+                self.exhaust()
+        run = self.store.runs()[0]
+        self.assertEqual(run["stage"], "handoff")
+        self.assertEqual(len(run["outbox"]), 2)
+        calls = len(self.agents.calls)
+        self.tick()
+        run = self.store.get(run["id"])
+        self.assertEqual(run["outbox"], [])
+        self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+        self.assertEqual(len(self.agents.calls), calls)
+
+    def test_failed_review_writes_at_exhaustion_still_record_handoff(self):
+        for failing in ("comment", "status"):
+            with self.subTest(failing=failing):
+                self.tearDown()
+                self.setUp()
+                real = getattr(self.github, failing)
+                seen = []
+                def fail(repo, target, *args, **kwargs):
+                    rejected = ("-review-1-" in args[0]) if failing == "comment" else (
+                        args[-1] == "Independent reviewer requested changes")
+                    if rejected:
+                        seen.append(target)
+                        if failing == "comment" or len(seen) > 1:  # the round-0 status succeeds
+                            raise TeamError("GitHub unavailable")
+                    return real(repo, target, *args, **kwargs)
+                with patch.object(self.github, failing, side_effect=fail):
+                    with self.assertRaises(TeamError):
+                        self.exhaust()
+                    run = self.store.runs()[0]
+                    # Recorded before any GitHub write: no resume needed, decisions available.
+                    self.assertEqual((run["stage"], run["in_flight"]), ("handoff", False))
+                    self.assertEqual([e["round"] for e in run["revision_history"]], [0, 1])
+                    self.assertIn("Regression", run["feedback"])
+                    self.assertIn(run["sha"], run["rejected_shas"])
+                    self.assertTrue(run["outbox"])
+                    self.assertEqual(len(run["handoffs"]), 1)
+                    with self.assertRaises(TeamError):  # decision is saved; its publication waits
+                        self.team.decide(run["id"], "repair")
+                run = self.store.get(run["id"])
+                self.assertEqual((run["stage"], run["decisions"][0]["action"]), ("repair", "repair"))
+                calls = len(self.agents.calls)
+                self.tick()
+                run = self.store.get(run["id"])
+                self.assertEqual(run["outbox"], [])
+                self.assertIn((7, f"{run['id']}-review-1-{run['sha']}"), self.github.comments)
+                self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+                self.assertIn((7, f"{run['id']}-decision-1"), self.github.comments)
+                self.assertIn((run["sha"], "failure"), self.github.statuses)
+                self.assertEqual(len(self.agents.calls), calls)
+
+    def test_interrupted_review_before_handoff_reuses_verdict(self):
+        self.project["max_revisions"] = 0
+        self.store.save_project(self.project)
+        self.agents.reject = True
+        self.tick(4)
+        with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick()
+        self.assertEqual(self.tick()["stage"], "waiting")
+        run = self.store.runs()[0]
+        self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "review"))
+        self.command("resume", run["id"])
+        calls = len(self.agents.calls)
+        run = self.tick()
+        self.assertEqual(run["stage"], "handoff")
+        self.assertEqual(len(self.agents.calls), calls)  # the persisted verdict is not rerolled
+
+    def test_refresh_after_interrupted_rejection_records_it_instead_of_rerolling(self):
+        for limit, stage, round_ in ((0, "handoff", 0), (1, "implement", 1)):
+            with self.subTest(limit=limit):
+                self.tearDown()
+                self.setUp()
+                self.project["max_revisions"] = limit
+                self.store.save_project(self.project)
+                self.agents.reject = True
+                self.tick(4)
+                with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.tick()
+                self.tick()
+                run = self.store.runs()[0]
+                pull = self.github.pr(None, 7)
+                sha, head, base = run["sha"], pull["head"]["sha"], pull["base"]["sha"]
+                self.assertEqual((run["stage"], run["resume_stage"], run["review_sha"]), ("blocked", "review", sha))
+                self.assertNotIn(sha, run.get("rejected_shas", []))
+                calls = len(self.agents.calls)
+                # Head and base are unchanged; refresh must not discard the verdict and review the same commit.
+                self.team.refresh(run["id"])
+                run = self.store.get(run["id"])
+                self.assertEqual((run["stage"], run["round"], run["sha"]), (stage, round_, sha))
+                self.assertIn(sha, run["rejected_shas"])
+                self.assertEqual([(e["round"], e["kind"], e["sha"]) for e in run["revision_history"]],
+                                 [(0, "review", sha)])
+                self.assertIn('"evidence": "Bug"', run["feedback"])
+                self.assertEqual(run["outbox"], [])
+                self.assertIn((7, f"{run['id']}-review-0-{sha}"), self.github.comments)
+                pull = self.github.pr(None, 7)
+                self.assertEqual((pull["head"]["sha"], pull["base"]["sha"]), (head, base))
+                if stage == "handoff":
+                    self.assertEqual(len(run["handoffs"]), 1)
+                    with self.assertRaises(TeamError):  # a decision is required now
+                        self.team.refresh(run["id"])
+                    self.assertEqual(self.tick()["stage"], "waiting")
+                else:
+                    self.assertTrue(run["needs_revision"])
+                    self.tick()  # the revision is authored, never a second review of the rejected commit
+                self.assertNotIn(("claude", "review"), self.agents.calls[calls:])
+
+    def test_refresh_after_interrupted_rejection_and_close_keeps_run_closed(self):
+        self.project["max_revisions"] = 1
+        self.store.save_project(self.project)
+        self.agents.reject = True
+        self.tick(4)
+        with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.tick()
+        self.tick()
+        run = self.store.runs()[0]
+        self.assertEqual((run["stage"], run["review_sha"]), ("blocked", run["sha"]))
+        self.command("close", run["id"])
+        calls = len(self.agents.calls)
+        with self.assertRaises(TeamError):
+            self.team.refresh(run["id"])
+        run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "closed")
+        self.assertNotIn(run["sha"], run.get("rejected_shas", []))
+        self.assertFalse(self.team.finalize_rejection(self.project, run))
+        self.tick(2)
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+        self.assertEqual(len(self.agents.calls), calls)
+
+    def test_interrupted_decision_publication_is_retried(self):
+        run = self.exhaust()
+        real = self.github.comment
+        def fail_decision(repo, number, marker, *args, **kwargs):
+            if "-decision-" in marker:
+                raise TeamError("GitHub unavailable")
+            return real(repo, number, marker, *args, **kwargs)
+        with patch.object(self.github, "comment", side_effect=fail_decision):
+            with self.assertRaises(TeamError):
+                self.team.decide(run["id"], "extend", 1)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], len(run["decisions"]), len(run["outbox"])), ("implement", 1, 1))
+        self.tick()
+        self.assertIn((7, f"{run['id']}-decision-1"), self.github.comments)
+        self.assertEqual(self.store.get(run["id"])["outbox"], [])
+
+    def test_handoff_cli_shows_record(self):
+        import contextlib
+        import io
+        run = self.exhaust()
+        with self.assertRaises(TeamError):
+            self.command("handoff", "missing")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.command("handoff", run["id"])
+        self.assertIn("revision limit reached", output.getvalue())
+        self.assertIn("Current stage: handoff", output.getvalue())
+
+    def test_classification_marks_uncertainty(self):
+        from agent_team.coordinator import classify
+        earlier = [{"location": "a.py:1", "request": "Fix X"}]
+        current = [{"location": "A.py:1", "request": "fix  x"}, {"location": "a.py:9", "request": "Other"},
+                   {"location": "b.py", "request": "Fix X"}]
+        self.assertEqual([f["match"] for f in classify(current, earlier)], ["repeated", "uncertain", "new"])
+        self.assertEqual([f["match"] for f in classify(current, [])], ["first"] * 3)
 
     def test_validation_failure_never_publishes(self):
         self.project.update(tests=["exit 1"], max_revisions=0)
         self.store.save_project(self.project)
         run = self.tick(3)
-        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(run["stage"], "handoff")
+        self.assertEqual(self.github.creates, 0)
+        handoff = self.github.comments[(1, f"{run['id']}-handoff-0")]  # no PR: the issue gets the handoff
+        for text in (run["sha"], "local only; never pushed", "`exit 1` exit 1", "no PR yet",
+                     "direct repair of the candidate in a local repair checkout"):
+            self.assertIn(text, handoff)
+
+    def test_interrupted_validation_failure_is_recorded_not_rerun(self):
+        for recover in ("resume", "refresh"):
+            for limit, stage, round_ in ((0, "handoff", 0), (1, "implement", 1)):
+                with self.subTest(recover=recover, limit=limit):
+                    self.tearDown()
+                    self.setUp()
+                    marker = self.root / "validation-runs"
+                    # Fails on its first run and passes on any rerun, like a nondeterministic command.
+                    self.project.update(tests=[f"echo run >> '{marker}'; test $(wc -l < '{marker}') -gt 1"],
+                                        max_revisions=limit)
+                    self.store.save_project(self.project)
+                    self.tick(2)
+                    with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.tick()
+                    self.tick()
+                    run = self.store.runs()[0]
+                    sha = run["sha"]
+                    self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "validate"))
+                    self.assertEqual(run["validation_failure"]["sha"], sha)
+                    self.assertNotIn(sha, run.get("rejected_shas", []))
+                    if recover == "resume":
+                        self.command("resume", run["id"])
+                        self.tick()
+                    else:
+                        self.team.refresh(run["id"])
+                    run = self.store.get(run["id"])
+                    self.assertEqual((run["stage"], run["round"]), (stage, round_))
+                    self.assertEqual(marker.read_text().count("run"), 1)  # validation was not rerun
+                    self.assertIn(sha, run["rejected_shas"])
+                    self.assertEqual([(e["round"], e["kind"], e["sha"], e["tests"][0]["exit_code"])
+                                      for e in run["revision_history"]], [(0, "validation", sha, 1)])
+                    self.assertEqual(run["tests"][0]["exit_code"], 1)
+                    self.assertIn("Validation failed", run["feedback"])
+                    self.assertEqual(self.github.creates, 0)
+                    if stage == "handoff":
+                        self.assertEqual(len(run["handoffs"]), 1)
+                        self.assertIn((1, f"{run['id']}-handoff-0"), self.github.comments)
+                        self.assertEqual(self.tick()["stage"], "waiting")
+                    else:
+                        self.assertTrue(run["needs_revision"])
+                        if recover == "refresh":
+                            self.assertIsNone(run.get("resume_stage"))
+                    self.assertEqual(marker.read_text().count("run"), 1)
+
+    def exhaust_unpublished(self):
+        """Validation rejects the only allowed revision, so the handoff has no PR or pushed commit."""
+        self.project.update(tests=["grep -q repaired feature.txt"], max_revisions=0)
+        self.store.save_project(self.project)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run.get("published_sha"), self.github.creates), ("handoff", None, 0))
+        return run
+
+    def commit_local(self, checkout, message="Human repair", text="repaired\n"):
+        (checkout / "feature.txt").write_text(text)
+        git(checkout, "add", "--all")
+        git(checkout, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", message)
+        return git(checkout, "rev-parse", "HEAD")
+
+    def test_unpublished_direct_repair_is_validated_before_publication_and_reviewed(self):
+        run = self.exhaust_unpublished()
+        rejected = run["sha"]
+        self.command("decide", run["id"], "repair", "--note", "I will fix it")
+        run = self.store.get(run["id"])
+        checkout = Path(run["repair_checkout"]["path"])
+        self.assertEqual((run["stage"], run["decisions"][0]["checkout"]), ("repair", str(checkout)))
+        self.assertEqual(git(checkout, "rev-parse", "HEAD"), rejected)
+        self.assertIn("unpublished candidate", self.github.comments[(1, f"{run['id']}-decision-1")])
+        self.assertEqual(self.tick()["stage"], "waiting")
+        with self.assertRaises(TeamError):  # still the rejected commit
+            self.team.adopt(run["id"], ["human"])
+        (checkout / "feature.txt").write_text("repaired\n")
+        with self.assertRaises(TeamError):  # only an exact commit is adopted
+            self.team.adopt(run["id"], ["human"])
+        head = self.commit_local(checkout)
+        with self.assertRaises(TeamError):  # the reviewer's family cannot review its own repair
+            self.team.adopt(run["id"], ["anthropic"])
+        self.command("adopt", run["id"], "--contributor", "human")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"], run["repair_checkout"]), ("validate", head, 1, None))
+        self.assertEqual((run["adoptions"][0]["families"], run["adoptions"][0]["local"]), (["openai"], True))
+        self.assertIn("human", run["contributors"])
+        self.assertEqual(len(run["revision_history"]), 1)
+        self.assertIn(rejected, run["rejected_shas"])
+        self.assertIn("Declared contributors: human", self.github.comments[(1, f"{run['id']}-adopt-1")])
+        # Nothing is pushed or published before validation.
+        self.assertEqual((self.github.creates, self.github.statuses), (0, []))
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"], run["published_sha"]), ("ready", head, head))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+        self.assertEqual(git(self.remote, "rev-parse", run["branch"]), head)
+        self.assertIn(f"Adopted direct repair `{head}`", self.github.pull["body"])
+        self.assertIn("declared contributors human", self.github.pull["body"])
+
+    def test_unpublished_repair_refuses_rewritten_history_and_reviewer_trailers(self):
+        run = self.exhaust_unpublished()
+        self.team.decide(run["id"], "repair")
+        checkout = Path(self.store.get(run["id"])["repair_checkout"]["path"])
+        git(checkout, "reset", "--hard", run["base_sha"])
+        self.commit_local(checkout, "Rewritten")
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["human"])
+        git(checkout, "reset", "--hard", run["sha"])
+        self.commit_local(checkout, "Repair\n\nAgent-Family: anthropic")
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("adoptions"), self.github.creates), ("repair", None, 0))
+        self.team.decide(run["id"], "stop")
+        self.assertEqual(self.store.get(run["id"])["stage"], "closed")
+
+    def test_interrupted_unpublished_repair_decision_and_adoption_recover(self):
+        run = self.exhaust_unpublished()
+        with patch.object(self.team, "queue_writes", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("decisions")), ("handoff", None))
+        self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        head = self.commit_local(Path(run["repair_checkout"]["path"]))
+        # Stop after the checkout swap, before the adoption is saved.
+        with patch("agent_team.coordinator.metadata", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("adoptions"), run["sha"]), ("repair", None, run["handoffs"][0]["candidate"]))
+        real = self.github.comment
+        def fail_adopt(repo, number, marker, *args, **kwargs):
+            if "-adopt-" in marker:
+                raise TeamError("GitHub unavailable")
+            return real(repo, number, marker, *args, **kwargs)
+        with patch.object(self.github, "comment", side_effect=fail_adopt):
+            with self.assertRaises(TeamError):
+                self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], len(run["adoptions"])), ("validate", head, 1))
+        self.assertEqual([w["marker"] for w in run["outbox"]], [f"{run['id']}-adopt-1"])
+        calls = len(self.agents.calls)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"], run["outbox"]), ("ready", head, []))
+        self.assertIn((1, f"{run['id']}-adopt-1"), self.github.comments)
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def advance_base(self, name="base.txt", text="base\n"):
+        work = self.root / f"base-{time.time_ns()}"
+        execute(["git", "clone", "--branch", "main", str(self.remote), str(work)])
+        (work / name).write_text(text)
+        git(work, "add", "--all")
+        git(work, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Base moved\n\nAgent-Family: anthropic")
+        git(work, "push", "origin", "HEAD")
+        return git(work, "rev-parse", "HEAD")
+
+    def test_repair_decision_checks_author_metadata_before_cloning(self):
+        run = self.exhaust_unpublished()
+        config = self.store.workspace(run) / ".git" / "config"
+        config.write_text(config.read_text() + "[core]\n\tfsmonitor = touch-owned\n")
+        with patch("agent_team.coordinator.execute") as clone:
+            with self.assertRaises(TeamError):
+                self.team.decide(run["id"], "repair")
+            clone.assert_not_called()
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("decisions"), run.get("repair_checkout")), ("handoff", None, None))
+        self.assertEqual(list(self.store.workspace(run).parent.glob("repair-*")), [])
+
+    def test_unpublished_repair_integrates_moved_base_before_validation(self):
+        run = self.exhaust_unpublished()
+        self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        head = self.commit_local(Path(run["repair_checkout"]["path"]))
+        # The base moves during the handoff; its trailers are not the repair's contributors.
+        base = self.advance_base()
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        sha = run["sha"]
+        self.assertNotEqual(sha, head)
+        self.assertEqual((run["stage"], run["base_sha"]), ("validate", base))
+        self.assertEqual({k: run["adoptions"][0][k] for k in ("head", "sha", "base_sha")},
+                         {"head": head, "sha": sha, "base_sha": base})
+        for parent in (head, base):
+            git(self.store.workspace(run), "merge-base", "--is-ancestor", parent, sha)
+        self.assertIn(f"merges current base `{base}`", self.github.comments[(1, f"{run['id']}-adopt-1")])
+        self.assertEqual(self.github.creates, 0)
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["validated_sha"], run["published_sha"], run["reviewed_sha"]),
+                         ("ready", sha, sha, sha))
+        self.assertEqual(git(self.remote, "rev-parse", run["branch"]), sha)
+
+    def test_unpublished_repair_conflicting_with_moved_base_keeps_repair_checkout(self):
+        run = self.exhaust_unpublished()
+        self.team.decide(run["id"], "repair")
+        run = self.store.get(run["id"])
+        checkout = Path(run["repair_checkout"]["path"])
+        head = self.commit_local(checkout)
+        self.advance_base("feature.txt", "conflicting\n")
+        with self.assertRaises(TeamError) as caught:
+            self.team.adopt(run["id"], ["human"])
+        self.assertIn("conflicts with current base", str(caught.exception))
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run.get("adoptions"), run["repair_checkout"]["path"]),
+                         ("repair", None, str(checkout)))
+        self.assertEqual((git(checkout, "rev-parse", "HEAD"), git(checkout, "status", "--porcelain")), (head, ""))
         self.assertEqual(self.github.creates, 0)
 
     def test_edit_after_validation_never_publishes(self):
@@ -309,7 +1088,7 @@ class WorkflowTests(unittest.TestCase):
         self.project.update(tests=["test -f hidden.txt"], max_revisions=0)
         self.store.save_project(self.project)
         run = self.tick()
-        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(run["stage"], "handoff")
         self.assertEqual(self.github.creates, 0)
 
     def test_git_config_tamper_stops_before_publication(self):
@@ -368,7 +1147,7 @@ class WorkflowTests(unittest.TestCase):
             real_status(repo, sha, state, description)
         with patch.object(self.github, "status", side_effect=require_remote_commit):
             run = self.tick()
-        self.assertEqual(run["stage"], "blocked")
+        self.assertEqual(run["stage"], "handoff")
         self.assertNotEqual(run["sha"], run["published_sha"])
         self.assertEqual(self.github.statuses[-1], (run["published_sha"], "failure"))
 

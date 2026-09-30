@@ -93,7 +93,7 @@ class QueueTests(unittest.TestCase):
         run = self.team.tick('demo', 2)
         with self.assertRaises(TeamError):
             self.team.tick('demo', 1)
-        for stage in ('blocked', 'quota_wait'):
+        for stage in ('blocked', 'quota_wait', 'handoff', 'repair'):
             self.store.save(run, stage=stage, retry_at=10**20)
             with self.assertRaises(TeamError):
                 self.team.tick('demo', 1)
@@ -151,7 +151,7 @@ class QueueTests(unittest.TestCase):
             other.db.close()
 
     def test_targeted_watch_stops_at_boundaries(self):
-        for stage in ('ready', 'blocked', 'stale', 'waiting', 'paused', 'closed', 'merged'):
+        for stage in ('ready', 'blocked', 'handoff', 'repair', 'stale', 'waiting', 'paused', 'closed', 'merged'):
             with self.subTest(stage=stage), patch('agent_team.cli.Coordinator') as team, \
                     patch('agent_team.cli.emit'), patch('agent_team.cli.time.sleep') as sleep:
                 team.return_value.tick.return_value = {'stage': stage}
