@@ -100,6 +100,11 @@ def contributing_families(run, extra=()):
     return {FAMILIES[run["author"]]} | {c for c in [*run.get("contributors", []), *extra] if c != "human"}
 
 
+def recovering(run):
+    """A run past a handoff: the operator decided (extend or repair) or a repair was adopted."""
+    return bool(run.get("decisions") or run.get("adoptions"))
+
+
 def handoff_comment(project, run, limit):
     """Plain template, no model: every finding and history entry is published in full."""
     repo, latest = project["repo"], run["revision_history"][-1]
@@ -439,8 +444,10 @@ class Coordinator:
             self.store.save(run, published_sha=expected, pending_push_sha=None)
         if pr["head"]["sha"] != expected:
             self.github.status(project["repo"], pr["head"]["sha"], "pending", "Changed outside coordinator; review invalidated")
+            fix = ("Declare its contributors with agent-team adopt RUN_ID --contributor ..." if recovering(run)
+                   else "Use refresh to adopt and revalidate.")
             self.store.save(run, stage="stale", notification_pending=True,
-                            error="PR head changed outside coordinator. Use refresh to adopt and revalidate.")
+                            error=f"PR head changed outside coordinator. {fix}")
             return False
         if pr["base"]["ref"] != project["base"] or pr["base"]["sha"] != run["base_sha"]:
             self.github.status(project["repo"], expected, "failure", "Base changed; integration and review need renewal")
@@ -517,8 +524,9 @@ class Coordinator:
             raise TeamError("Validation changed candidate files; inspect changes and rerun validation")
         self.store.save(run, tests=results, validated_tree=candidate_tree, validated_sha=sha, stage="publish")
 
-    def revise(self, project, run, feedback, findings, review=None):
+    def revise(self, project, run, feedback, findings, review=None, writes=()):
         """Record the rejection, then revise within the limit or hand off to the operator.
+        `writes` (the rejection's GitHub writes) are queued in the same save, never attempted first.
         Rejected evidence and history are never reset."""
         history = run.get("revision_history", [])
         entry = {"round": run["round"], "kind": "review" if review else "validation", "sha": run["sha"],
@@ -533,13 +541,14 @@ class Coordinator:
         limit = project["max_revisions"] + run.get("extension", 0)
         if run["round"] < limit:
             self.store.save(run, **changes, round=run["round"] + 1, stage="implement",
-                            review_record=None, needs_revision=True)
+                            review_record=None, needs_revision=True, **self.queue_writes(run, *writes))
             return
         # The limit is a deliberate evaluation point. One save records the rejection, the handoff,
         # and its pending GitHub writes, so an interruption cannot leave a half-recorded handoff.
         body = handoff_comment(project, dict(run, **changes), limit)
-        writes = [{"type": "comment", "number": run["pr"] or run["issue"],
-                   "marker": f"{run['id']}-handoff-{run['round']}", "body": body, "heading": "Agent Team handoff"}]
+        writes = list(writes) + [{"type": "comment", "number": run["pr"] or run["issue"],
+                                  "marker": f"{run['id']}-handoff-{run['round']}", "body": body,
+                                  "heading": "Agent Team handoff"}]
         if run.get("pr") and run.get("published_sha"):
             writes.append({"type": "status", "sha": run["published_sha"], "state": "failure",
                            "description": "Revision limit reached; operator decision needed"})
@@ -606,13 +615,17 @@ class Coordinator:
         if not (record and run.get("review_sha") == run["sha"]):
             record = self.independent_review(project, run)
             self.store.save(run, review_record=record, review_sha=run["sha"])
-        self.github.comment(project["repo"], run["pr"], f"{run['id']}-review-{run['round']}-{run['sha']}",
-                            review_comment(run["sha"], record), heading=f"Independent review of `{run['sha']}`")
+        # The outcome is saved with its GitHub writes queued, so a failed write cannot hide a
+        # rejection or a handoff; `flush` publishes them afterwards and retries on later ticks.
+        comment = {"type": "comment", "number": run["pr"], "marker": f"{run['id']}-review-{run['round']}-{run['sha']}",
+                   "body": review_comment(run["sha"], record), "heading": f"Independent review of `{run['sha']}`"}
         if record["report"]["verdict"] != "pass":
-            self.github.status(project["repo"], run["sha"], "failure", "Independent reviewer requested changes")
-            self.revise(project, run, report_text(record["report"]), record["report"]["findings"], record)
+            status = {"type": "status", "sha": run["sha"], "state": "failure",
+                      "description": "Independent reviewer requested changes"}
+            self.revise(project, run, report_text(record["report"]), record["report"]["findings"], record,
+                        writes=[comment, status])
         else:
-            self.store.save(run, reviewed_sha=run["sha"], stage="ci")
+            self.store.save(run, reviewed_sha=run["sha"], stage="ci", **self.queue_writes(run, comment))
 
     def ci(self, project, run):
         if run.get("reviewed_sha") != run["sha"] or not run.get("review_record"):
@@ -693,14 +706,14 @@ class Coordinator:
 
     def contributor_check(self, run, declared, adopting):
         """Refuse a PR head whose commits show the reviewer's family, via declarations, earlier
-        adoptions, or Agent-Family trailers. After an adopted repair, a changed head must be
-        adopted again with declared contributors; refresh cannot take it silently."""
+        adoptions, or Agent-Family trailers. Once a run has reached a handoff, an external head
+        must be adopted with declared contributors; refresh cannot take it on trailers alone."""
         def check(fresh, candidate, base_sha):
             if adopting and candidate in run.get("rejected_shas", []):
                 raise TeamError("PR head is still a rejected candidate; push a repair commit first (previous work retained)")
-            if not adopting and run.get("adoptions") and candidate != run.get("published_sha"):
-                raise TeamError("PR head changed after an adopted repair; declare its contributors with "
-                                "agent-team adopt RUN_ID --contributor ... (previous work retained)")
+            if not adopting and recovering(run) and candidate != run.get("published_sha"):
+                raise TeamError("PR head changed during recovery after the revision limit; declare its contributors "
+                                "with agent-team adopt RUN_ID --contributor ... (previous work retained)")
             trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{base_sha}..{candidate}")
             found = {line.strip().casefold() for line in trailers.splitlines() if line.strip()}
             families = contributing_families(run, declared) | found
@@ -764,12 +777,13 @@ class Coordinator:
         """Adopt an externally repaired PR head as a new candidate. The operator declares who
         contributed; Agent-Family commit trailers add to that. The reviewer's family must not
         appear, and the candidate needs new validation and review within the revision limit.
-        A recovered run whose head changed again (stale) is adopted the same way."""
+        A recovered run (extended or already adopted) whose head changed (stale) is adopted the
+        same way; its decisions and extension are kept."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
-        if not (run["stage"] == "repair" or (run["stage"] == "stale" and run.get("adoptions"))):
+        if not (run["stage"] == "repair" or (run["stage"] == "stale" and recovering(run))):
             raise TeamError("Adopt applies only to runs handed off for direct repair, "
-                            "or to recovered runs whose PR head changed again")
+                            "or to recovered runs whose PR head changed")
         declared = sorted(set(contributors or []))
         if not declared or not set(declared) <= set(CONTRIBUTORS):
             raise TeamError(f"Declare at least one contributor: {', '.join(CONTRIBUTORS)}")

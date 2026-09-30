@@ -89,12 +89,14 @@ same file alone is reported as uncertain. The commit joins `rejected_shas`, and
 validation and review refuse those commits.
 
 Exhausting the budget moves the run to `handoff`. A single SQLite write records
-the rejection, the handoff text, and its pending GitHub writes (the handoff comment
-and a failure status) in an `outbox`. Notification ticks publish the outbox with
-idempotent marked comments. A crash or GitHub failure therefore delays
-publication but never loses or duplicates it. A review verdict is saved with its
-commit before being published. If an interruption happens before the handoff,
-`resume` reuses that verdict instead of calling the reviewer again. The handoff
+the rejection, the handoff text, and its pending GitHub writes (the review
+comment, failure statuses, and handoff comment) in an `outbox`. Every review
+outcome is saved this way before any GitHub write is attempted. Notification
+ticks publish the outbox with idempotent marked comments. A crash or GitHub
+failure therefore delays publication but never loses or duplicates it, and
+never keeps a rejected run from reaching `handoff`. A review verdict is saved
+with its commit before its outcome is recorded. If an interruption happens
+between them, `resume` reuses that verdict instead of calling the reviewer again. The handoff
 save also clears the in-flight marker, and crash reconciliation keeps a run in
 `handoff` or `repair` rather than blocking it, so decisions stay available.
 
@@ -107,9 +109,11 @@ optional note, and queues its comment the same way:
 - `rescope`: close locally.
 - `stop`: close locally.
 
-`adopt` accepts a repaired PR head in `repair`, or in `stale` after an earlier
-adoption. After an adoption, `refresh` refuses a changed head, so every later
-external head goes through `adopt` with declared contributors. The head must not be a
+`adopt` accepts a repaired PR head in `repair`, or in `stale` once the run has
+a recorded decision or adoption (for example, after an extension). In those runs,
+`refresh` refuses a changed head, so every external head goes through `adopt` with
+declared contributors; trailers alone never suffice. Decisions and the extension
+are kept. The head must not be a
 rejected commit. The run's contributing families are the author's family, the
 declared contributors, and any `Agent-Family` trailers between base and head.
 If the reviewer's family is among them, adoption is refused. Review also

@@ -255,8 +255,10 @@ model list means the CLI did not expose the actual model; it is not guessed.
 
 Failed validation and rejected reviews share the `--max-revisions` budget. When
 it runs out, the run moves to `handoff` and waits. Nothing retries on its own,
-and `resume` and `refresh` are refused. Before stopping, the coordinator saves the
-rejected review, feedback, and a revision history. It then posts a handoff
+and `resume` and `refresh` are refused. Before any GitHub write, the coordinator
+saves the rejected review, feedback, revision history, and handoff, with the
+review comment and statuses queued. A failed GitHub write cannot block the
+handoff; queued writes are retried later. It then posts a handoff
 comment on the PR (or on the issue if no PR exists). The comment lists the run,
 issue, PR, candidate commit, validation results, and every remaining finding.
 It also includes the history and links to evidence. Each finding is labeled
@@ -286,8 +288,10 @@ because no independent agent review is then possible. In that case, review it
 yourself, or rescope or stop. An adopted head merges the current base, preserves
 the previous checkout, and needs new validation and exact-commit review. It stays
 in the same run, PR, and history. A rejection after adoption returns to `handoff`.
-If the PR head changes again after adoption, the run goes `stale`. `refresh` then
-refuses it; run `adopt` again and declare the new contributors.
+If the PR head changes outside the coordinator after an extension or an adoption,
+the run goes `stale`. `refresh` then refuses the new head, even without
+`Agent-Family` trailers; run `adopt` and declare its contributors. Decisions and
+the extension are kept.
 `rescope` does not edit the issue. It stops this run; open a linked issue with the
 new scope and `approve` it.
 

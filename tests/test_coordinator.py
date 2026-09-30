@@ -346,6 +346,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(run["adoptions"]), 1)
         self.assertEqual(self.agents.calls[calls:], [])
 
+    def test_external_repair_after_extension_needs_declared_contributors(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 1)
+        calls = len(self.agents.calls)
+        # The reviewer's family repairs the branch without an Agent-Family trailer.
+        head = self.push_repair(run, "Repair by the reviewer's family")
+        self.assertEqual(self.tick()["stage"], "stale")
+        self.assertIn("agent-team adopt", self.store.get(run["id"])["error"])
+        with self.assertRaises(TeamError):  # refresh cannot take the head on missing trailers
+            self.team.refresh(run["id"])
+        with self.assertRaises(TeamError):
+            self.team.adopt(run["id"], ["anthropic"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["extension"], len(run["decisions"])), ("stale", 1, 1))
+        self.assertNotEqual(run["published_sha"], head)
+        self.assertEqual(self.agents.calls[calls:], [])
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"]), ("validate", head, 3))
+        self.assertEqual((run["extension"], len(run["decisions"]), len(run["adoptions"])), (1, 1, 1))
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", head))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
     def test_second_human_repair_after_adoption_is_adopted_again(self):
         run = self.exhaust()
         self.team.decide(run["id"], "repair")
@@ -371,7 +395,8 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.exhaust()
         run = self.store.runs()[0]
-        self.assertEqual((run["stage"], run["in_flight"], len(run["outbox"])), ("handoff", False, 2))
+        # Review comment, review status, handoff comment, handoff status.
+        self.assertEqual((run["stage"], run["in_flight"], len(run["outbox"])), ("handoff", False, 4))
         # State left by an older coordinator that saved the handoff while still in flight.
         self.store.save(run, in_flight=True)
         calls = len(self.agents.calls)
@@ -410,17 +435,52 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
         self.assertEqual(len(self.agents.calls), calls)
 
+    def test_failed_review_writes_at_exhaustion_still_record_handoff(self):
+        for failing in ("comment", "status"):
+            with self.subTest(failing=failing):
+                self.tearDown()
+                self.setUp()
+                real = getattr(self.github, failing)
+                seen = []
+                def fail(repo, target, *args, **kwargs):
+                    rejected = ("-review-1-" in args[0]) if failing == "comment" else (
+                        args[-1] == "Independent reviewer requested changes")
+                    if rejected:
+                        seen.append(target)
+                        if failing == "comment" or len(seen) > 1:  # the round-0 status succeeds
+                            raise TeamError("GitHub unavailable")
+                    return real(repo, target, *args, **kwargs)
+                with patch.object(self.github, failing, side_effect=fail):
+                    with self.assertRaises(TeamError):
+                        self.exhaust()
+                    run = self.store.runs()[0]
+                    # Recorded before any GitHub write: no resume needed, decisions available.
+                    self.assertEqual((run["stage"], run["in_flight"]), ("handoff", False))
+                    self.assertEqual([e["round"] for e in run["revision_history"]], [0, 1])
+                    self.assertIn("Regression", run["feedback"])
+                    self.assertIn(run["sha"], run["rejected_shas"])
+                    self.assertTrue(run["outbox"])
+                    self.assertEqual(len(run["handoffs"]), 1)
+                    with self.assertRaises(TeamError):  # decision is saved; its publication waits
+                        self.team.decide(run["id"], "repair")
+                run = self.store.get(run["id"])
+                self.assertEqual((run["stage"], run["decisions"][0]["action"]), ("repair", "repair"))
+                calls = len(self.agents.calls)
+                self.tick()
+                run = self.store.get(run["id"])
+                self.assertEqual(run["outbox"], [])
+                self.assertIn((7, f"{run['id']}-review-1-{run['sha']}"), self.github.comments)
+                self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+                self.assertIn((7, f"{run['id']}-decision-1"), self.github.comments)
+                self.assertIn((run["sha"], "failure"), self.github.statuses)
+                self.assertEqual(len(self.agents.calls), calls)
+
     def test_interrupted_review_before_handoff_reuses_verdict(self):
         self.project["max_revisions"] = 0
         self.store.save_project(self.project)
         self.agents.reject = True
-        real = self.github.comment
-        def interrupt(repo, number, marker, *args, **kwargs):
-            if "-review-" in marker:
-                raise KeyboardInterrupt()
-            return real(repo, number, marker, *args, **kwargs)
         self.tick(4)
-        with patch.object(self.github, "comment", side_effect=interrupt):
+        with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
             with self.assertRaises(KeyboardInterrupt):
                 self.tick()
         self.assertEqual(self.tick()["stage"], "waiting")
