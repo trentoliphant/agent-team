@@ -131,7 +131,9 @@ a recorded decision or adoption (for example, after an extension). In those runs
 `refresh` refuses a changed head, so every external head goes through `adopt` with
 declared contributors; trailers alone never suffice. Decisions and the extension
 are kept. The head must not be a
-rejected commit. The run's contributing families are the author's family, the
+rejected commit, and it must descend from the last published candidate
+(`merge-base --is-ancestor`). A force-pushed head that drops that history is
+refused before the checkout swap, and the run stays in its recovery stage. The run's contributing families are the author's family, the
 declared contributors, and any `Agent-Family` trailers between base and head.
 If the reviewer's family is among them, adoption is refused. Review also
 enforces this check. Adoption reuses refresh integration, then requires new

@@ -351,6 +351,71 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["reviewed_sha"], head)
         self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
 
+    def test_validation_exhaustion_after_review_rejection_keeps_unverified_findings(self):
+        self.project["max_revisions"] = 1
+        self.store.save_project(self.project)
+        self.agents.reject = 1
+        self.agents.findings = [[{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
+                                  "request": "Fix the bug"}]]
+        run = self.tick(5)
+        self.assertEqual((run["stage"], run["round"]), ("implement", 1))
+        self.project["tests"] = ["test -f feature.txt", "false"]
+        self.store.save_project(self.project)
+        for _ in range(5):
+            run = self.tick()
+            if run["stage"] == "handoff":
+                break
+        self.assertEqual(run["stage"], "handoff")
+        self.assertEqual([e["kind"] for e in run["revision_history"]], ["review", "validation"])
+        body = self.github.comments[(7, f"{run['id']}-handoff-1")]
+        for text in ("Remaining findings from validation (1)", "`false` exit 1",
+                     "Earlier review findings with unverified resolution (1)",
+                     f"Review of revision 0 rejected `{run['revision_history'][0]['sha']}`",
+                     "status uncertain", "Evidence: Bug", "Request: Fix the bug"):
+            self.assertIn(text, body)
+        self.team.decide(run["id"], "extend", 1)
+        feedback = self.store.get(run["id"])["feedback"]
+        self.assertIn("Validation failed", feedback)
+        self.assertIn("no later review verified", feedback)
+        self.assertIn("Fix the bug", feedback)
+
+    def test_handoff_after_review_lists_only_latest_review_findings(self):
+        run = self.exhaust()
+        self.assertNotIn("unverified resolution", self.github.comments[(7, f"{run['id']}-handoff-1")])
+
+    def test_force_pushed_repair_that_drops_rejected_history_is_refused(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "repair")
+        work2 = self.root / "extend"  # cloned before the rewrite, so it still has the rejected candidate
+        execute(["git", "clone", str(self.remote), str(work2)])
+        work = self.root / "rewrite"
+        execute(["git", "clone", "--branch", "main", str(self.remote), str(work)])
+        (work / "feature.txt").write_text("rewritten\n")
+        git(work, "add", "feature.txt")
+        git(work, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "Rewritten repair")
+        git(work, "push", "--force", "origin", f"HEAD:{run['branch']}")
+        head = git(work, "rev-parse", "HEAD")
+        calls = len(self.agents.calls)
+        with self.assertRaises(TeamError) as caught:
+            self.team.adopt(run["id"], ["human"])
+        self.assertIn("without rewriting history", str(caught.exception))
+        after = self.store.get(run["id"])
+        self.assertEqual((after["stage"], after["sha"], after["published_sha"], after.get("adoptions", [])),
+                         ("repair", run["sha"], run["published_sha"], []))
+        self.assertEqual(git(self.store.workspace(after), "rev-parse", "HEAD"), run["sha"])
+        self.assertNotIn(head, [sha for sha, _ in self.github.statuses])
+        self.assertNotIn((7, f"{run['id']}-adopt-2"), self.github.comments)
+        self.assertEqual(self.agents.calls[calls:], [])
+        # A repair that extends the rejected candidate is still adoptable afterwards.
+        git(work2, "checkout", "-B", run["branch"], run["published_sha"])
+        (work2 / "feature.txt").write_text("repaired\n")
+        git(work2, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-am", "Repair")
+        git(work2, "push", "--force", "origin", f"HEAD:{run['branch']}")
+        self.team.adopt(run["id"], ["human"])
+        self.assertEqual(self.store.get(run["id"])["stage"], "validate")
+
     def test_repair_trailers_reveal_reviewer_family(self):
         run = self.exhaust()
         self.team.decide(run["id"], "repair")

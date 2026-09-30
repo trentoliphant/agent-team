@@ -268,7 +268,10 @@ comment on the PR (or on the issue if no PR exists). The comment lists the run,
 issue, PR, candidate commit, validation results, and every remaining finding.
 It also includes the history and links to evidence. Each finding is labeled
 `repeated` (same location and request as an earlier round), `uncertain` (an earlier
-round flagged the same file with different wording), `new`, or `first`.
+round flagged the same file with different wording), `new`, or `first`. If
+validation fails after a review rejection, no review has checked that rejection's
+findings. The handoff lists them in full with status uncertain, and an extension
+passes them to the author along with the validation failure.
 
 ```sh
 agent-team handoff RUN_ID                       # show the handoff (read-only; --json for the record)
@@ -291,7 +294,8 @@ is used up, the run returns to `handoff` for a new decision.
 For direct repair, push commits to the run's branch, then run `adopt`. List every
 contributor with `--contributor openai|anthropic|human`. `Agent-Family` trailers
 in the new commits are added too. Adoption is refused while the PR head is still
-a rejected commit. It is also refused if the reviewer's family contributed,
+a rejected commit. It is refused if the head does not build on the last published
+candidate, such as a force-push that rewrites history. It is also refused if the reviewer's family contributed,
 because no independent agent review is then possible. In that case, review it
 yourself, or rescope or stop. An adopted head merges the current base, preserves
 the previous checkout, and needs new validation and exact-commit review. It stays

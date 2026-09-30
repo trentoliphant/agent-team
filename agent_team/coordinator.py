@@ -121,6 +121,14 @@ def revision_limit(project, run):
     return project["max_revisions"] + run.get("extension", 0)
 
 
+def unverified_review(history):
+    """The latest review rejection when a later validation rejection superseded it. No later review
+    checked its findings, so their resolution is unknown; they are never treated as resolved."""
+    if not history or history[-1]["kind"] == "review":
+        return None
+    return next((e for e in reversed(history) if e["kind"] == "review"), None)
+
+
 def handoff_comment(project, run, limit):
     """Plain template, no model: every finding and history entry is published in full."""
     repo, latest = project["repo"], run["revision_history"][-1]
@@ -134,6 +142,15 @@ def handoff_comment(project, run, limit):
     for number, finding in enumerate(latest["findings"], 1):
         lines += ["", f"**{number}. {finding['severity']}: {finding['location']}** ({MATCHES[finding['match']]})", "",
                   f"Evidence: {finding['evidence']}", "", f"Request: {finding['request']}"]
+    earlier = unverified_review(run["revision_history"])
+    if earlier:
+        lines += ["", f"**Earlier review findings with unverified resolution ({len(earlier['findings'])})**", "",
+                  f"Review of revision {earlier['round']} rejected `{earlier['sha']}`. No later review checked "
+                  "these findings, so their status is uncertain; they are not treated as resolved."]
+        for number, finding in enumerate(earlier["findings"], 1):
+            lines += ["", f"**{number}. {finding['severity']}: {finding['location']}** (status uncertain; "
+                          f"{MATCHES[finding['match']]})", "",
+                      f"Evidence: {finding['evidence']}", "", f"Request: {finding['request']}"]
     lines += ["", "**Revision history**", ""]
     for entry in run["revision_history"]:
         counts = {m: sum(f["match"] == m for f in entry["findings"]) for m in MATCHES}
@@ -756,6 +773,14 @@ class Coordinator:
             if not adopting and recovering(run) and candidate != run.get("published_sha"):
                 raise TeamError("PR head changed during recovery after the revision limit; declare its contributors "
                                 "with agent-team adopt RUN_ID --contributor ... (previous work retained)")
+            if adopting and run.get("published_sha"):
+                # Like local adoption, a remote repair must extend the last published candidate; a
+                # force-pushed head that drops it (or whose history no longer contains it) is refused.
+                try:
+                    git(fresh, "merge-base", "--is-ancestor", run["published_sha"], candidate)
+                except TeamError:
+                    raise TeamError("The repair must build on published candidate "
+                                    f"{run['published_sha']} without rewriting history (previous work retained)") from None
             trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{base_sha}..{candidate}")
             found = {line.strip().casefold() for line in trailers.splitlines() if line.strip()}
             families = contributing_families(run, declared) | found
@@ -821,11 +846,17 @@ class Coordinator:
             decision["checkout"] = repair_checkout["path"]
         changes = dict(decisions=run.get("decisions", []) + [decision], error=None, in_flight=False)
         if action == "extend":
-            # Continue exactly as a revision within the limit would; the feedback is the persisted rejection.
+            # Continue exactly as a revision within the limit would; the feedback is the persisted rejection,
+            # plus any earlier review rejection that no later review verified.
             # The run-specific limit is authoritative; `extension` records the cumulative authorized amount.
+            feedback = run["revision_history"][-1]["feedback"]
+            earlier = unverified_review(run["revision_history"])
+            if earlier:
+                feedback += ("\n\nEarlier review findings (revision " + str(earlier["round"]) +
+                             "); no later review verified they were fixed:\n" + earlier["feedback"])
             changes.update(revision_limit=limit, extension=run.get("extension", 0) + limit - previous,
                            round=run["round"] + 1,
-                           feedback=run["revision_history"][-1]["feedback"], stage="implement",
+                           feedback=feedback, stage="implement",
                            review_record=None, needs_revision=True)
         elif action == "repair":
             changes.update(stage="repair", repair_checkout=repair_checkout,
