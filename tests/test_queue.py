@@ -45,6 +45,24 @@ class QueueTests(unittest.TestCase):
         self.store.db.close()
         self.temp.cleanup()
 
+    def test_partial_selection_and_tracked_watch_arguments(self):
+        args = parser().parse_args(["select", "demo", "--task", "Scoped task", "--operations",
+                                    "implement", "validate", "--grant", "edit", "--plan"])
+        self.assertEqual(args.operations, ["implement", "validate"])
+        self.assertEqual(args.grant, ["edit"])
+        self.assertTrue(args.plan)
+        args = parser().parse_args(["select", "demo", "--run", "tracked", "--operations", "checks"])
+        self.assertEqual(args.operations, ["checks"])
+        self.assertEqual(args.grant, [])
+        args = parser().parse_args(["run", "demo", "--run", "tracked", "--watch"])
+        self.assertEqual(args.run_id, "tracked")
+        self.assertTrue(args.watch)
+        args = parser().parse_args(["continue", "tracked", "--operations", "validate",
+                                    "--contributor", "human"])
+        self.assertEqual(args.contributor, ["human"])
+        args = parser().parse_args(["refresh", "tracked", "--grant", "edit", "--contributor", "human"])
+        self.assertEqual(args.grant, "edit")
+
     def test_persistence_precedence_and_clear(self):
         self.store.set_queue('demo', [3, 2])
         other = Store(self.temp.name)

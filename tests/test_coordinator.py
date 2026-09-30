@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import tempfile
@@ -149,6 +150,378 @@ class WorkflowTests(unittest.TestCase):
             result = self.team.tick("demo")
         return result
 
+    def existing_feature(self):
+        source = self.root / "source"
+        (source / "feature.txt").write_text("external feature\n")
+        git(source, "add", ".")
+        git(source, "-c", "user.name=Human", "-c", "user.email=human@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "External work")
+        git(source, "push", str(self.remote), "HEAD:refs/heads/external")
+        return git(source, "rev-parse", "HEAD")
+
+    def selected_ticks(self, run, count):
+        for _ in range(count):
+            run = self.team.tick("demo", run_id=run["id"])
+        return run
+
+    def test_scoped_implementation_has_no_issue_or_github_writes(self):
+        run = self.team.select("demo", ["implement"], ["edit"], task="Add feature.txt; preserve existing files")
+        self.assertIsNone(run["issue"])
+        self.assertEqual(self.agents.calls, [])
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertNotIn("tests", run)
+        self.assertEqual(self.github.comments, {})
+        self.assertEqual(self.github.statuses, [])
+        self.assertEqual(self.github.creates, 0)
+        self.assertEqual(run["performed_operations"], ["prepare", "implement"])
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        self.assertEqual(self.selected_ticks(run, 3)["stage"], "stopped")
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def test_existing_commit_validation_only_preserves_exact_input(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate"], [], task="Validate existing feature", ref=sha,
+                               contributors=["human"])
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["input_revision"], sha)
+        self.assertEqual(run["validated_sha"], sha)
+        self.assertEqual(self.agents.calls, [])
+        self.assertEqual(self.github.comments, {})
+        self.assertEqual(self.github.statuses, [])
+        self.assertEqual(self.github.creates, 0)
+        self.assertIn("implement", run["omitted_operations"])
+
+    def test_existing_branch_publication_then_review_then_readiness(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate"], [], task="Publish existing feature", ref="external",
+                               contributors=["human"])
+        run = self.selected_ticks(run, 2)
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["publish"], [], run_id=run["id"])
+        self.assertEqual(self.store.get(run["id"])["grants"], [])
+        run = self.team.select("demo", ["publish"], ["push", "github"], run_id=run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(self.github.creates, 1)
+        self.assertEqual(run["sha"], sha)
+        self.assertEqual(self.agents.calls, [])
+        self.assertNotIn("validate", run["omitted_operations"])
+        run = self.team.select("demo", ["review"], [], run_id=run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(len(self.agents.calls), 1)
+        self.assertTrue(self.github.pull["draft"])
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["ci"], [], run_id=run["id"])
+        run = self.team.select("demo", ["ci"], ["readiness"], run_id=run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "ready")
+        self.assertFalse(self.github.pull["draft"])
+        self.assertEqual(self.github.creates, 1)
+
+    def test_local_review_does_not_require_or_create_pr(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "review"], [], task="Review existing feature", ref=sha,
+                               contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["reviewed_sha"], sha)
+        self.assertEqual(self.github.creates, 0)
+        self.assertEqual(self.github.comments, {})
+        self.assertEqual(self.github.statuses, [])
+        self.assertNotIn("publish", run["performed_operations"])
+
+    def test_discovery_and_issue_preparation_stop_without_source_edits(self):
+        run = self.team.select("demo", ["discovery"], [], task="Investigate onboarding gaps")
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "issue_prepare")
+        self.assertEqual(self.github.created, [])
+        self.assertFalse((self.store.workspace(run) / "feature.txt").exists())
+        run = self.team.select("demo", ["issue_prepare"], [], run_id=run["id"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["prepared_issues"][0]["title"], "Found gap")
+        self.assertEqual(self.github.created, [])
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def test_independent_entry_refuses_missing_scope_grants_and_prerequisites(self):
+        for operations, grants, options in (
+                (["implement"], [], {"task": "Missing edit grant"}),
+                (["validate"], [], {"task": "Missing revision"}),
+                (["publish"], ["push", "github"], {"task": "Missing validation"}),
+                (["review"], [], {"task": "Missing validation"}),
+                (["checks"], [], {"task": "Missing tracked PR"}),
+                (["ci"], ["github", "readiness"], {"task": "Missing PR and review"}),
+                (["revision"], ["edit"], {"task": "Missing rejection history"}),
+                (["implement"], ["edit"], {})):
+            with self.subTest(operations=operations), self.assertRaises(TeamError):
+                self.team.select("demo", operations, grants, **options)
+        self.assertEqual(self.store.runs(), [])
+        self.assertEqual(self.agents.calls, [])
+        self.assertEqual(self.github.comments, {})
+
+    def test_selected_scope_cannot_be_recreated_to_reset_history(self):
+        run = self.team.select("demo", ["issue_prepare"], [], task="Prepare a durable task")
+        self.selected_ticks(run, 2)
+        self.store.save(run, stage="closed")
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["implement"], ["edit"], task="Prepare a durable task")
+        self.assertEqual(len(self.store.runs()), 1)
+
+    def test_selected_revision_then_local_review_preserves_budget(self):
+        self.agents.reject = True
+        run = self.team.select("demo", ["implement", "validate", "review"], ["edit"], task="Add feature.txt")
+        run = self.selected_ticks(run, 4)
+        self.assertEqual(run["stage"], "stopped")
+        rejected = run["rejected_shas"][:]
+        round_number = run["round"]
+        run = self.team.select("demo", ["revision", "validate", "review"], [], run_id=run["id"])
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["round"], round_number)
+        self.assertEqual(run["rejected_shas"], rejected)
+        self.assertNotEqual(run["sha"], rejected[-1])
+        self.assertEqual(run["reviewed_sha"], run["sha"])
+        self.assertEqual(self.github.creates, 0)
+
+    def test_selected_watch_detects_configuration_drift_before_publication(self):
+        run = self.team.select("demo", ["implement", "validate", "publish"], ["edit", "push", "github"],
+                               task="Add feature.txt with publication")
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["stage"], "publish")
+        self.store.update_project("demo", tests=["true"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertIsNone(run["validated_sha"])
+        self.assertEqual(self.github.creates, 0)
+
+    def test_reviewed_local_candidate_can_select_publication_then_readiness(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "review"], [],
+                               task="Validate and review existing feature before publication",
+                               ref=sha, contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["reviewed_sha"], sha)
+        calls = list(self.agents.calls)
+        run = self.team.select("demo", ["publish", "ci"], ["push", "github", "readiness"],
+                               run_id=run["id"])
+        self.assertIn("push and draft PR creation/update", run["effect_plan"])
+        self.assertIn("CI polling and PR readiness", run["effect_plan"])
+        self.assertNotIn("subscription independent review; GitHub evidence only with github grant",
+                         run["effect_plan"])
+        segment = run["continuations"][-1]
+        self.assertEqual(segment["grants"], ["github", "push", "readiness"])
+        self.assertEqual(segment["effects"], run["effect_plan"])
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "ci")
+        self.assertEqual(self.github.creates, 1)
+        self.assertEqual(self.agents.calls, calls)
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(run["stage"], "ready")
+        self.assertFalse(self.github.pull["draft"])
+        self.assertEqual(self.agents.calls, calls)
+        self.assertEqual(run["performed_operations"], ["prepare", "validate", "review", "publish", "ci"])
+        self.assertIn("implement", run["omitted_operations"])
+
+    def test_publication_readiness_sequence_refuses_missing_review_before_writes(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate"], [], task="Validate existing candidate",
+                               ref=sha, contributors=["human"])
+        run = self.selected_ticks(run, 2)
+        with self.assertRaisesRegex(TeamError, "compatible passing review"):
+            self.team.select("demo", ["publish", "ci"], ["push", "github", "readiness"],
+                             run_id=run["id"])
+        saved = self.store.get(run["id"])
+        self.assertEqual(saved["stage"], "stopped")
+        self.assertEqual(saved["grants"], [])
+        self.assertEqual(self.github.creates, 0)
+        self.assertEqual(self.github.comments, {})
+        self.assertEqual(self.github.statuses, [])
+
+    def test_ci_snapshot_does_not_review_write_or_change_readiness(self):
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "publish", "checks"], ["push", "github"],
+                               task="Publish existing work and inspect CI without review or readiness",
+                               ref=sha, contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["stage"], "checks")
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        statuses = list(self.github.statuses)
+        comments = dict(self.github.comments)
+        for state in ("pending", "failure", "success"):
+            self.github.check_state = state
+            if state != "pending":
+                run = self.team.select("demo", ["checks"], [], run_id=run["id"])
+            run = self.selected_ticks(run, 1)
+            self.assertEqual(run["stage"], "stopped")
+            record = run["ci_checks"][-1]
+            self.assertEqual(record["state"], state)
+            self.assertEqual(record["sha"], sha)
+            self.assertEqual(record["base"], run["base_sha"])
+            self.assertFalse(record["readiness_changed"])
+            self.assertTrue(self.github.pull["draft"])
+            self.assertEqual(self.github.statuses, statuses)
+            self.assertEqual(self.github.comments, comments)
+            self.assertEqual(self.agents.calls, [])
+            self.assertEqual(self.selected_ticks(run, 2)["stage"], "stopped")
+        self.assertNotIn("reviewed_sha", run)
+        self.assertIn("review", run["unperformed_operations"])
+        self.assertIn("ci", run["unperformed_operations"])
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["ci"], ["readiness"], run_id=run["id"])
+
+    def test_dirty_handoff_requires_contributors_and_preserves_attribution(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        cwd = self.store.workspace(run)
+        (cwd / "human.txt").write_text("human work")
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["publish"])
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["validate"])
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["validate"], [FAMILIES[run["reviewer"]]])
+        with self.assertRaises(TeamError):  # records declaration and invalidates old context
+            self.team.continue_run(run["id"], ["validate"], ["human"])
+        run = self.team.continue_run(run["id"], ["validate"])
+        run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertIn("human", run["contributors"])
+        message = git(cwd, "log", "-1", "--format=%B")
+        self.assertIn("Contributor: human", message)
+        self.assertNotIn("Agent-Family:", message)
+        self.assertEqual(self.github.creates, 0)
+
+    def test_ci_stop_point_rejection_stops_before_revision(self):
+        self.agents.reject = True
+        self.team.tick("demo", 1, "ci")
+        for _ in range(4):
+            run = self.team.tick("demo", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "implement")
+        self.assertNotIn("ci", run["performed_operations"])
+        self.team.tick("demo", 1)
+        self.assertEqual(len(self.agents.calls), 2)
+        self.assertTrue(self.github.pull["draft"])
+
+    def test_dirty_same_path_handoff_detects_content_change(self):
+        self.team.tick("demo", 1, "implement")
+        run = self.team.tick("demo", 1)
+        cwd = self.store.workspace(run)
+        old_status = git(cwd, "status", "--porcelain")
+        (cwd / "feature.txt").write_text("external replacement\n")
+        self.assertEqual(git(cwd, "status", "--porcelain"), old_status)
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["validate"])
+        self.assertTrue(self.store.get(run["id"])["pending_contribution"])
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def test_issue_selection_keeps_approval_but_omits_unauthorized_writes(self):
+        self.github.items[0]["approved"] = False
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["implement"], ["edit"], issue_number=1)
+        self.assertEqual(self.store.runs(), [])
+        self.github.items[0]["approved"] = True
+        run = self.team.select("demo", ["implement"], ["edit"], issue_number=1)
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(self.github.comments, {})
+        self.github.items[0]["body"] = "Different scope"
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["validate"], [], run_id=run["id"])
+        self.assertEqual(self.store.get(run["id"])["stage"], "stopped")
+
+    def test_selected_exhaustion_extension_does_not_expand_old_selection(self):
+        self.store.update_project("demo", max_revisions=0, tests=["exit 1"])
+        run = self.team.select("demo", ["implement", "validate"], ["edit"], task="Add bounded feature.txt")
+        run = self.selected_ticks(run, 3)
+        self.assertEqual(run["stage"], "handoff")
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["revision", "validate"], [], run_id=run["id"])
+        run = self.team.decide(run["id"], "extend", 1)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "revision")
+        self.selected_ticks(run, 2)
+        self.assertEqual(len(self.agents.calls), 1)
+        self.assertEqual(run["revision_limit"], 1)
+        self.assertEqual(self.github.comments, {})
+
+    def test_unpublished_refresh_swap_reconciles_after_restart(self):
+        self.team.tick("demo", 1, "validate")
+        self.team.tick("demo", 1)
+        run = self.team.tick("demo", 1)
+        self.store.save(run, stage="stale")
+        with patch.object(self.team, "finish_local_integration", side_effect=TeamError("Interrupted before swap")):
+            with self.assertRaises(TeamError):
+                self.team.refresh(run["id"])
+        saved = self.store.get(run["id"])
+        pending = saved["pending_integration"]
+        # Simulate interruption after the original checkout was preserved.
+        self.store.workspace(saved).rename(Path(pending["preserved"]))
+        self.store.db.close()
+        self.store = Store(self.root / "state")
+        self.team = Coordinator(self.store, self.github, self.agents)
+        run = self.team.refresh(saved["id"])
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["next_stage"], "validate")
+        self.assertIsNone(run["pending_integration"])
+        self.assertTrue(Path(pending["preserved"]).exists())
+        self.assertEqual(self.github.creates, 0)
+
+    def test_legacy_registry_migration_keeps_issue_history_and_allows_tasks(self):
+        legacy = self.root / "legacy"
+        legacy.mkdir()
+        record = self.store.create(self.project, self.github.items[0])
+        record.update(revision_limit=1, rejected_shas=["a" * 40], round=1)
+        db = sqlite3.connect(legacy / "state.sqlite3")
+        db.execute("CREATE TABLE runs(id TEXT PRIMARY KEY, project TEXT NOT NULL, "
+                   "issue INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project, issue))")
+        db.execute("INSERT INTO runs VALUES (?, ?, ?, ?)",
+                   (record["id"], "demo", 1, json.dumps(record)))
+        db.commit()
+        db.close()
+        store = Store(legacy)
+        try:
+            self.assertEqual(store.get(record["id"]), record)
+            project = store.register("demo", "example/demo", "main", ["true"])
+            for scope in ("First task", "Second task"):
+                task = store.create(project, {"number": None, "title": scope, "body": scope})
+                self.assertIsNone(task["issue"])
+            self.assertEqual(len(store.runs()), 3)
+        finally:
+            store.db.close()
+
+    def test_declared_human_repair_can_validate_and_review_without_author_pass(self):
+        self.agents.reject = True
+        run = self.team.select("demo", ["implement", "validate", "review"], ["edit"], task="Add human-repairable feature")
+        run = self.selected_ticks(run, 4)
+        self.assertEqual(run["stage"], "stopped")
+        round_number = run["round"]
+        rejected = run["rejected_shas"][:]
+        (self.store.workspace(run) / "feature.txt").write_text("human repair\n")
+        with self.assertRaises(TeamError):
+            self.team.select("demo", ["validate", "review"], [], run_id=run["id"], contributors=["human"])
+        run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"])
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(run["round"], round_number)
+        self.assertEqual(run["rejected_shas"], rejected)
+        self.assertNotEqual(run["sha"], rejected[-1])
+        self.assertEqual([role for _, role in self.agents.calls], ["implement", "review", "review"])
+        self.assertEqual(run["reviewed_sha"], run["sha"])
+        self.assertEqual(self.github.creates, 0)
+
     def test_explicit_continuation_preserves_evidence_and_stops_again(self):
         self.team.tick("demo", 1, "validate")
         self.team.tick("demo", 1)
@@ -210,6 +583,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved["stage"], "stale")
         self.assertIsNone(saved["validated_sha"])
         self.assertEqual(self.github.creates, 0)
+        refreshed = self.team.refresh(run["id"])
+        self.assertEqual(refreshed["stage"], "stopped")
+        self.assertEqual(refreshed["next_stage"], "validate")
+        self.assertIsNone(refreshed["review_record"])
+        self.assertEqual(self.github.creates, 0)
+        self.team.continue_run(run["id"], ["validate"])
+        validated = self.team.tick("demo", 1)
+        self.assertEqual(validated["stage"], "stopped")
+        self.assertEqual(validated["validated_sha"], validated["sha"])
+        self.assertTrue((self.store.workspace(validated) / "base.txt").exists())
 
     def test_continuation_cannot_reset_exhausted_budget(self):
         self.store.update_project("demo", max_revisions=0, tests=["exit 1"])

@@ -12,7 +12,7 @@ import uuid
 
 from .process import TeamError, QuotaError
 
-ACTIVE = {"prepare", "implement", "validate", "publish", "review", "ci"}
+ACTIVE = {"discovery", "issue_prepare", "revision", "prepare", "implement", "validate", "publish", "review", "checks", "ci"}
 TERMINAL = {"merged", "closed"}
 # Runs waiting for an operator: they stop new assignments and never advance on their own.
 RECOVERY = {"blocked", "quota_wait", "handoff", "repair", "stopped"}
@@ -49,11 +49,22 @@ class Store:
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project TEXT NOT NULL,
-                issue INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project, issue));
+                issue INTEGER, data TEXT NOT NULL, UNIQUE(project, issue));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, run TEXT,
                 at REAL NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        # Older registries required a GitHub issue for every run. NULL identifies
+        # an explicitly scoped local task, never a fabricated GitHub issue.
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            columns = self.db.execute("PRAGMA table_info(runs)").fetchall()
+            if next(c for c in columns if c["name"] == "issue")["notnull"]:
+                self.db.execute("ALTER TABLE runs RENAME TO issue_runs")
+                self.db.execute("CREATE TABLE runs(id TEXT PRIMARY KEY, project TEXT NOT NULL, "
+                                "issue INTEGER, data TEXT NOT NULL, UNIQUE(project, issue))")
+                self.db.execute("INSERT INTO runs SELECT * FROM issue_runs")
+                self.db.execute("DROP TABLE issue_runs")
         self.db.commit()
 
     @contextmanager
@@ -226,8 +237,12 @@ class Store:
     def create(self, project, issue, plan=None):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            if any(r["issue"] == issue["number"] for r in self.repository_runs(project["name"])):
+            if issue["number"] is not None and any(r["issue"] == issue["number"] for r in self.repository_runs(project["name"])):
                 raise TeamError("Issue already has a run in this repository")
+            if issue["number"] is None and any(r["issue"] is None and
+                    r["issue_digest"] == issue_fingerprint(issue)
+                    for r in self.repository_runs(project["name"])):
+                raise TeamError("This task scope already has a run; continue its history instead")
             key = "author_rotation"
             row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
             index = int(row[0]) if row else 0
@@ -240,7 +255,7 @@ class Store:
             run.update(issue_digest=issue_fingerprint(issue), quota_attempts=0, needs_revision=False)
             if plan:
                 run.update(plan)
-            run["branch"] = f"agent-team/{run['issue']}-{run['id']}"
+            run["branch"] = f"agent-team/{run['issue'] if run['issue'] is not None else 'task'}-{run['id']}"
             self.db.execute("INSERT INTO runs VALUES (?,?,?,?)",
                             (run["id"], run["project"], run["issue"], json.dumps(run)))
             self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(index + 1)))

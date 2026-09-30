@@ -223,3 +223,41 @@ the queue. Existing active runs take priority; blocked, quota-waiting, handoff, 
 prevent new assignments. Targeted ticks reject conflicting work and limit
 reconciliation, notifications, and execution to the selected issue. Interrupted
 stages still require recovery. Completed runs retain their unique repository-wide issue claim.
+
+## Partial selections
+
+`select` persists immutable task or approved-issue scope, ordered operations,
+separate effect grants, and the endpoint before execution. Task runs store a NULL
+issue and use the same rotation, repository locks, isolated clones, stage journal,
+quota handling, and revision history as issue runs. The registry migration that
+permits NULL issues is transactional. Stop all workers before upgrading.
+
+Discovery records a read-only proposal report; issue preparation records local
+issue drafts. Validation can enter from a remote branch or commit without an
+author pass. Publication, review, and readiness consume compatible tracked
+validation/review evidence. Review can run locally without a PR. It writes GitHub
+evidence only for a published candidate and with the content grant. Existing PR
+adoption from outside the coordinator remains companion #10.
+
+Selections record cumulative requested/performed/unperformed operations and each
+continuation segment. Completed endpoints and rejections stop before successor
+work. Selected extension/adoption returns to a stop boundary. Failed evidence,
+contributor declarations, and revision limits survive re-entry. Identical task
+scope cannot be recreated to discard history, and rejected input commits cannot
+be imported into new runs. Local handoff edits require declared contributors;
+human edits are never labeled as work by the assigned model family.
+
+Candidate fingerprints include working content, tracked trees and pins, exact
+HEAD/base, immutable scope, and execution configuration. Evidence-consuming stages
+check these again. Unpublished refresh merges in a fresh clone, journals the
+checkout swap, preserves previous work, and explicitly returns to validation.
+A later refresh reconciles a journaled swap without repeating integration.
+Separate effect grants gate local edits, push, GitHub content/status writes, and
+readiness. Legacy queue execution retains its established authorization contract.
+
+The `checks` operation records one GitHub CI snapshot for the tracked published
+candidate. It does not require or manufacture a review verdict and does not
+change readiness. The separate `ci` operation retains exact validation, independent
+review, and readiness prerequisites. Publication follows the selected successor,
+so an already reviewed local candidate can enter `publish ci` without a new review.
+Continuation segments retain their grants and effects alongside their revisions.

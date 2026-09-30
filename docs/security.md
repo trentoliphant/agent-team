@@ -69,3 +69,18 @@ Local prompts, logs, and checkouts may contain repository data. The coordinator
 uses a private file-creation mask and keeps raw logs out of GitHub comments. Review
 generated summaries before enabling automation on sensitive projects. State and
 artifacts must never be committed to this public repository.
+
+## Explicit partial authorization
+
+Selected workflows store immutable scoped-task input or the existing approved
+issue fingerprint. `select` shows the chosen effects before execution. Local
+edits, branch pushes, GitHub content/status writes, and readiness have separate
+grants. Grants persist across compatible tracked continuation; they do not add
+operations or extend the stop point. Local-only work queues no GitHub writes.
+Review and readiness require compatible exact-commit validation, and readiness
+also requires independent passing review of the current PR candidate.
+
+External local changes require contributor declarations before re-entry. The
+reviewer's family must not have contributed. Rejected commits and revision limits
+remain attached to the run; another entry point cannot reroll them. Existing PR
+adoption is a separate companion feature. No partial operation permits merging.

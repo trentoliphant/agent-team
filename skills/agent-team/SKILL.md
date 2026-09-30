@@ -192,22 +192,68 @@ shortcut. If the cause remains unresolved, report it and stop.
 
 ## Selected portions of work
 
-For an approved issue, honor a request to stop after implementation or validation:
-`agent-team run example --issue 123 --stop-after implement --watch` or
-`agent-team run example --issue 123 --stop-after validate --watch`.
-Other endpoints are `publish`, `review`, and `ci`. Explain that each command starts
-at preparation, consumes subscriptions, and writes issue status comments; publish
-also pushes and creates a draft PR. The saved endpoint cannot be expanded by
-later ticks. Report `stopped` as partial completion, including unperformed checks.
-The CI endpoint waits through pending polls and finishes in `ready`. Stopped
-runs with PRs still detect changed head/base commits and closed or merged PRs.
-Do not use `resume` to continue it. Use `agent-team continue RUN_ID --operations
-validate` (or a contiguous sequence beginning at the recorded `next_stage`) for
-explicit continuation, then `agent-team run example --issue 123 --watch`. Explain
-the effects of each selected stage before execution and honor existing operator
-authorization. Publication pushes and writes GitHub content; review writes
-evidence; CI can change readiness. Continuation preserves rejected commits and
-revision budgets and refuses incompatible evidence. Handoff still requires
-`decide`. Independent entry with existing work is not yet supported; report that limitation rather than
-creating an issue or authorizing extra stages. Do not replace a partial request
-with the full queue workflow. Honor authorization already given for these effects.
+Recognize requests for discovery, issue drafts, implementation without publication,
+validation only, publication of existing work, review only, revision followed by
+review, and CI/readiness. Use `select`; a single tick of the full queue does not
+establish a stop boundary. Do not replace a partial request with a full workflow.
+
+Identify explicit scope and acceptance criteria, the existing issue or revision,
+and any tracked run first. Explain the selected operations and effects. Honor
+existing operator authorization; ask only for missing scope or effects. Grants
+are separate: `edit` for local edits and candidate commits, `push` for branch
+publication, `github` for content/status writes, and `readiness` for PR readiness.
+They permit effects but never select additional operations. Use `--plan` to
+preview. `select` saves the plan without executing it.
+
+```sh
+agent-team select example --task 'Add a CSV exporter; preserve JSON output and test both formats' \
+  --operations implement validate --grant edit
+agent-team select example --task 'Validate the existing CSV exporter' \
+  --ref csv-export --contributor human --operations validate
+agent-team select example --run RUN_ID --operations publish --grant push --grant github
+agent-team select example --run RUN_ID --operations review
+agent-team select example --run RUN_ID --operations revision validate review --grant edit
+agent-team select example --run RUN_ID --operations ci --grant readiness
+agent-team select example --run RUN_ID --operations checks
+agent-team select example --run RUN_ID --operations publish ci --grant push --grant github --grant readiness
+agent-team select example --task 'Investigate onboarding gaps and prepare issue drafts' \
+  --operations discovery issue_prepare
+agent-team run example --run RUN_ID --watch
+agent-team inspect RUN_ID
+```
+
+These are alternative selections. Run the returned ID after saving each plan.
+`--issue 123` can replace task scope for approved issues; its existing fingerprint
+and ready label remain required. Tasks never require synthetic issues. Existing
+branches/commits require every contributor to be declared. Choose one operation
+or an ordered sequence; local review may omit publication. Individual publication,
+review, and CI reuse a tracked run's compatible evidence. Without such evidence,
+select validation first. Existing-PR adoption from outside Agent Team is #10;
+do not create a replacement PR or author pass to work around that limitation.
+After a compatible local review, `publish ci` publishes and checks readiness
+without repeating review. Inspect each continuation's grants and effects to
+report what that segment authorized.
+For CI inspection without readiness, select `checks`. It reads once, saves pending,
+failure, or success with the exact revision and time, and stops without review or
+readiness changes. A passing snapshot cannot replace validation or independent
+review. Existing issue-progress grants still apply.
+`issue_prepare` produces local drafts for human triage, without creating or
+approving an issue. The separate legacy `discover` command publishes unready issues.
+
+Report the run ID, exact candidate/base revisions, selected and performed stages,
+validation/review evidence, and omitted checks. `stopped` does not mean whole
+workflow success. All rejections stop selected work before fixes; revision
+exhaustion requires `decide`. An extension or adoption returns selected work to
+an explicit boundary. Reselect operations without resetting its budget/history.
+Changed candidate, base, scope, configuration, or dependency pins invalidate
+affected evidence. Local handoff edits require contributor declarations, including
+your family if you contributed. The reviewer's family is refused. Do not reroll
+rejected evidence. Unpublished base drift can be integrated with
+`refresh RUN_ID --grant edit`; declare contributors if its committed HEAD changed.
+It preserves prior work and returns to stopped validation. Conflicts require
+human resolution. An interrupted swap is reconciled by explicit refresh.
+
+The legacy `run --issue 123 --stop-after validate --watch` still starts from
+implementation and retains issue progress writes. Its saved boundary cannot be
+expanded by watch or resume. `continue` retains contiguous legacy continuation;
+use `select --run` for separate grants and individually selected stages.
