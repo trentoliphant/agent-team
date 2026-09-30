@@ -524,6 +524,10 @@ class Coordinator:
         self.store.save(run, author_record=record, stage="validate")
 
     def validate(self, project, run):
+        # A failure persisted for this exact commit is recorded after an interruption, never rerun.
+        if self.pending_validation_failure(run):
+            self.record_validation_failure(project, run)
+            return
         author = self.store.workspace(run)
         git(author, "add", "--all")
         if git(author, "status", "--porcelain"):
@@ -553,14 +557,28 @@ class Coordinator:
             assert_metadata(author, run["git_metadata"])
             results.append({"command": command, "exit_code": result.returncode})
             if result.returncode:
-                self.store.save(run, tests=results)
-                self.revise(project, run, "Validation failed:\n" + command + "\n" + output[-12000:],
-                            validation_findings(results))
+                # The failure is bound to this commit before the rejection is recorded.
+                self.store.save(run, tests=results, validation_failure={
+                    "sha": sha, "tests": results,
+                    "feedback": "Validation failed:\n" + command + "\n" + output[-12000:]})
+                self.record_validation_failure(project, run)
                 return
         git(cwd, "add", "--all")
         if git(cwd, "write-tree") != candidate_tree:
             raise TeamError("Validation changed candidate files; inspect changes and rerun validation")
         self.store.save(run, tests=results, validated_tree=candidate_tree, validated_sha=sha, stage="publish")
+
+    @staticmethod
+    def pending_validation_failure(run):
+        failure = run.get("validation_failure")
+        return bool(failure and failure["sha"] == run.get("sha")
+                    and failure["sha"] not in run.get("rejected_shas", []))
+
+    def record_validation_failure(self, project, run):
+        failure = run["validation_failure"]
+        if run.get("tests") != failure["tests"]:
+            self.store.save(run, tests=failure["tests"])
+        self.revise(project, run, failure["feedback"], validation_findings(failure["tests"]))
 
     def revise(self, project, run, feedback, findings, review=None, writes=()):
         """Record the rejection, then revise within the limit or hand off to the operator.
@@ -670,17 +688,20 @@ class Coordinator:
             self.store.save(run, reviewed_sha=run["sha"], stage="ci", **self.queue_writes(run, comment))
 
     def finalize_rejection(self, project, run):
-        """Record a rejection whose verdict was persisted but not yet recorded (the process stopped
-        between the two saves). Recovery transitions call this first so they cannot discard the
-        verdict and review the same commit again. Returns True if a rejection was recorded.
-        A closed or merged run is terminal; recording a rejection would reactivate it."""
+        """Record a rejection whose verdict or failed validation was persisted but not yet recorded
+        (the process stopped between the two saves). Recovery transitions call this first so they
+        cannot discard the evidence and review or validate the same commit again. Returns True if a
+        rejection was recorded. A closed or merged run is terminal; recording a rejection would reactivate it."""
         if run["stage"] in {"closed", "merged"}:
             return False
         record = run.get("review_record")
-        if not (record and run.get("review_sha") == run["sha"] and record["report"]["verdict"] != "pass"
+        if self.pending_validation_failure(run):
+            self.record_validation_failure(project, run)
+        elif (record and run.get("review_sha") == run["sha"] and record["report"]["verdict"] != "pass"
                 and run["sha"] not in run.get("rejected_shas", [])):
+            self.record_review(project, run, record)
+        else:
             return False
-        self.record_review(project, run, record)
         if run["stage"] == "implement":
             self.store.save(run, resume_stage=None, error=None)
         self.notify(project, run)

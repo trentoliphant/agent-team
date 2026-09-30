@@ -762,6 +762,51 @@ class WorkflowTests(unittest.TestCase):
                      "direct repair of the candidate in a local repair checkout"):
             self.assertIn(text, handoff)
 
+    def test_interrupted_validation_failure_is_recorded_not_rerun(self):
+        for recover in ("resume", "refresh"):
+            for limit, stage, round_ in ((0, "handoff", 0), (1, "implement", 1)):
+                with self.subTest(recover=recover, limit=limit):
+                    self.tearDown()
+                    self.setUp()
+                    marker = self.root / "validation-runs"
+                    # Fails on its first run and passes on any rerun, like a nondeterministic command.
+                    self.project.update(tests=[f"echo run >> '{marker}'; test $(wc -l < '{marker}') -gt 1"],
+                                        max_revisions=limit)
+                    self.store.save_project(self.project)
+                    self.tick(2)
+                    with patch.object(self.team, "revise", side_effect=KeyboardInterrupt()):
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.tick()
+                    self.tick()
+                    run = self.store.runs()[0]
+                    sha = run["sha"]
+                    self.assertEqual((run["stage"], run["resume_stage"]), ("blocked", "validate"))
+                    self.assertEqual(run["validation_failure"]["sha"], sha)
+                    self.assertNotIn(sha, run.get("rejected_shas", []))
+                    if recover == "resume":
+                        self.command("resume", run["id"])
+                        self.tick()
+                    else:
+                        self.team.refresh(run["id"])
+                    run = self.store.get(run["id"])
+                    self.assertEqual((run["stage"], run["round"]), (stage, round_))
+                    self.assertEqual(marker.read_text().count("run"), 1)  # validation was not rerun
+                    self.assertIn(sha, run["rejected_shas"])
+                    self.assertEqual([(e["round"], e["kind"], e["sha"], e["tests"][0]["exit_code"])
+                                      for e in run["revision_history"]], [(0, "validation", sha, 1)])
+                    self.assertEqual(run["tests"][0]["exit_code"], 1)
+                    self.assertIn("Validation failed", run["feedback"])
+                    self.assertEqual(self.github.creates, 0)
+                    if stage == "handoff":
+                        self.assertEqual(len(run["handoffs"]), 1)
+                        self.assertIn((1, f"{run['id']}-handoff-0"), self.github.comments)
+                        self.assertEqual(self.tick()["stage"], "waiting")
+                    else:
+                        self.assertTrue(run["needs_revision"])
+                        if recover == "refresh":
+                            self.assertIsNone(run.get("resume_stage"))
+                    self.assertEqual(marker.read_text().count("run"), 1)
+
     def exhaust_unpublished(self):
         """Validation rejects the only allowed revision, so the handoff has no PR or pushed commit."""
         self.project.update(tests=["grep -q repaired feature.txt"], max_revisions=0)

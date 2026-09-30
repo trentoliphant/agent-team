@@ -97,8 +97,11 @@ failure therefore delays publication but never loses or duplicates it, and
 never keeps a rejected run from reaching `handoff`. A review verdict is saved
 with its commit before its outcome is recorded. If an interruption happens
 between them, `resume` reuses that verdict instead of calling the reviewer again.
+A failed validation is likewise saved with its commit, results, and output before
+the rejection is recorded, and `resume` records that saved failure instead of
+running validation again, so a nondeterministic command cannot replace it.
 `refresh` and `adopt` first record such a pending rejection and stop, so they
-cannot discard it and send the same commit to review again. The run then revises
+cannot discard it and send the same commit to review or validation again. The run then revises
 within the limit or hands off. Closed and merged runs are terminal: `refresh`
 refuses them and a pending rejection is never recorded on them, so a closed run
 cannot be reopened for more model work. The handoff
