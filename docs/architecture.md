@@ -322,9 +322,14 @@ Reconciliation also compares the head repository and branch, so a PR that switch
 heads at the same commit goes stale too. Each case, and `pr update`, retires
 validation and review to `evidence_invalidations` with the head and base they
 covered; `pr show` reports them as `historical_evidence`, with full review reports. Queued review comments and statuses carry
-the reviewed commit; before publishing them, including outbox retries, the
+the reviewed commit; before publishing each one, including outbox retries, the
 coordinator rechecks the PR's head, base, state, and head repository. If any
-changed, the writes move to `unpublished_evidence` and the run stops as `stale`.
+changed, the remaining writes move to `unpublished_evidence`, current evidence is
+retired, and the run stops as `stale`. Adopting a PR again after earlier runs
+ended keeps their budget: the new run inherits the highest round and the earlier
+revision limit, records them in `prior_runs`, and copies their `rejected_shas`. A
+findings revision spends the next round. Revision modes are refused once an
+earlier run reached its revision limit; review mode stays available.
 `pr update` journals the checkout swap and the evidence invalidation
 (`pending_pr_update`) before renaming directories. Rerunning `pr update` after an
 interruption finishes the swap from the journal. The previous checkout and any

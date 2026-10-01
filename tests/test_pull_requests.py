@@ -356,6 +356,54 @@ class PullRequestTests(unittest.TestCase):
             self.team.adopt_pr("demo", "9", "review", ["human"])
         self.assertEqual(len(self.store.runs()), 2)
 
+    def test_readoption_after_stopped_exhausted_run_keeps_budget(self):
+        self.store.update_project("demo", max_revisions=1)
+        self.open_pr()
+        self.agents.reject = True
+        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"])
+        for _ in range(10):
+            if run["stage"] == "handoff":
+                break
+            run = self.ticks(run, 1)
+        self.assertEqual((run["stage"], run["round"]), ("handoff", 1))
+        run = self.team.decide(run["id"], "stop")
+        self.assertEqual(run["stage"], "closed")
+        # An external commit changes the adoption inputs; the exhausted budget still applies.
+        external = self.push_external()
+        self.store.update_project("demo", max_revisions=5)
+        calls = list(self.agents.calls)
+        with self.assertRaisesRegex(TeamError, f"reached its revision limit in run {run['id']}"):
+            self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"])
+        with self.assertRaisesRegex(TeamError, "reached its revision limit"):
+            self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit"], findings=["Fix it"])
+        self.assertEqual(len(self.store.runs()), 1)
+        review = self.team.adopt_pr("demo", "7", "review", ["human"])
+        self.assertEqual((review["sha"], review["round"], review["revision_limit"]), (external, 1, 1))
+        self.assertEqual(review["prior_runs"][0]["id"], run["id"])
+        self.assertEqual(review["prior_runs"][0]["handoffs"], 1)
+        self.assertEqual(review["prior_runs"][0]["decisions"], ["stop"])
+        self.assertEqual(set(review["rejected_shas"]), set(run["rejected_shas"]))
+        self.assertEqual(self.agents.calls, calls)
+
+    def test_readoption_after_closed_run_continues_its_budget(self):
+        self.store.update_project("demo", max_revisions=2)
+        self.open_pr()
+        self.agents.reject = True
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        self.assertEqual((run["stage"], run["round"]), ("stopped", 1))
+        self.store.save(run, stage="closed")
+        self.push_external()
+        plan = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"], plan_only=True)
+        self.assertEqual(plan["revision_budget"], {"round": 1, "limit": 2, "prior_runs": [run["id"]]})
+        plan = self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit"], findings=["Fix it"],
+                                  plan_only=True)
+        self.assertEqual(plan["revision_budget"]["round"], 2)
+        self.store.save(run, round=2)
+        with self.assertRaisesRegex(TeamError, "no revision budget left"):
+            self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit"], findings=["Fix it"])
+        revised = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"])
+        self.assertEqual((revised["round"], revised["revision_limit"]), (2, 2))
+
     def test_closed_merged_and_incompatible_base_are_handled_before_mutation(self):
         self.open_pr()
         self.github.pulls[7]["state"] = "closed"
@@ -854,6 +902,32 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(run["outbox"], [])
         self.assertNotIn((7, f"{run['id']}-review-0-{head}"), self.github.comments)
         self.assertEqual(run["unpublished_evidence"][0]["evidence"], head)
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def test_movement_during_first_outbox_write_withholds_later_evidence(self):
+        head = self.open_pr()
+        self.agents.reject = True
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"]), 2)
+        self.assertEqual(run["stage"], "review")
+        real = self.github.comment
+
+        def moving(repo, number, marker, *args, **kwargs):
+            result = real(repo, number, marker, *args, **kwargs)
+            if "-review-" in marker:
+                self.push_external()
+            return result
+
+        with patch.object(self.github, "comment", side_effect=moving):
+            run = self.ticks(run, 1)
+        # The comment went out before the move; the status that followed it did not.
+        self.assertIn((7, f"{run['id']}-review-0-{head}"), self.github.comments)
+        self.assertNotIn((head, "failure"), self.github.statuses)
+        self.assertEqual(run["stage"], "stale")
+        self.assertIn("PR head moved", run["error"])
+        self.assertEqual(run["outbox"], [])
+        self.assertEqual([i["type"] for i in run["unpublished_evidence"]], ["status"])
+        self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
+        self.assertIn("PR head moved", run["evidence_invalidations"][-1]["reason"])
         self.assertEqual(len(self.agents.calls), 1)
 
     def interrupted_update(self, point):

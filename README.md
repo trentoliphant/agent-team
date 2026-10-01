@@ -780,9 +780,12 @@ moves earlier validation and review to `historical_evidence`. The base is never 
 adopted PR; if the head lacks the current base, `pr show` reports that. Pushes are
 plain fast-forward pushes; nothing is force-pushed. An interrupted push is
 reconciled from the recorded pending commit. Review comments and statuses are
-published only after the PR is checked again. If it moved during the review or
-before a failed write is retried, the evidence stays local (`pr show`) and the run
-stops as `stale`. If `pr update` is interrupted, run it again to finish.
+published only after the PR is checked again, before each write. If it moved
+during the review, between writes, or before a failed write is retried, the
+remaining evidence stays local (`pr show`) and the run stops as `stale`. If
+`pr update` is interrupted, run it again to finish. Adopting a PR again after an
+earlier run ended does not reset its revision budget. Once an earlier run reached
+the limit, only review mode is accepted.
 
 **Forks and permissions.** Fork PRs can be reviewed when GitHub exposes their
 head. Before pushing, Agent Team checks the actual head repository. It pushes only

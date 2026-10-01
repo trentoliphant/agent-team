@@ -466,11 +466,15 @@ class Coordinator:
     def flush(self, project, run):
         if not self.has_effect(run, "github"):
             return
-        if run.get("adopted_pr") and any(i.get("evidence") for i in run.get("outbox", [])):
-            self.withhold_moved_evidence(project, run)
         # Each write is idempotent (marked comment or same status), so a crash can only repeat it.
         while run.get("outbox"):
             item = run["outbox"][0]
+            if run.get("adopted_pr") and item.get("evidence"):
+                # Recheck before every evidence write: the PR can move while an earlier write is in progress.
+                change = self.adopted_pr_change(project, run, item["evidence"])
+                if change:
+                    self.adopted_pr_moved(run, *change)
+                    continue
             if item["type"] == "status":
                 self.github.status(project["repo"], item["sha"], item["state"], item["description"])
             else:
@@ -493,15 +497,6 @@ class Coordinator:
         if pr["base"]["ref"] != info["base_ref"] or pr["base"]["sha"] != run["base_sha"]:
             return "stale", f"PR base changed to {pr['base']['ref']} at {pr['base']['sha']}"
         return None
-
-    def withhold_moved_evidence(self, project, run):
-        """Before review evidence reaches an adopted PR, including outbox retries, confirm the PR still
-        has the reviewed head, base, state, and identity. If not, the evidence stays local and the run stops."""
-        evidence = [i for i in run["outbox"] if i.get("evidence")]
-        change = next(filter(None, (self.adopted_pr_change(project, run, sha)
-                                    for sha in dict.fromkeys(i["evidence"] for i in evidence))), None)
-        if change:
-            self.adopted_pr_moved(run, *change)
 
     def recheck_adopted(self, project, run):
         """After a review of an adopted PR, with or without publication grants, confirm the PR still has
@@ -2272,6 +2267,22 @@ class Coordinator:
             raise TeamError("PR head or base moved during adoption; retry")
         if any(found["head"] in r.get("rejected_shas", []) for r in runs):
             raise TeamError("PR head was rejected by an earlier run; continue that run and its budget")
+        # Earlier, finished runs for this PR keep their budget: readoption never resets it, even after an
+        # external commit changes the inputs. Review-only runs count too, since they can be continued into revision.
+        prior = [r for r in runs if r.get("pr") == number]
+        exhausted = [r for r in prior if r.get("handoffs") and
+                     r["handoffs"][-1]["round"] >= revision_limit(project, r)]
+        if mode != "review" and exhausted:
+            raise TeamError(f"PR #{number} reached its revision limit in run {exhausted[-1]['id']}; readoption "
+                            "does not reset the budget. Review mode is still available; further revision needs "
+                            "an operator repair outside Agent Team")
+        # Like a handoff, the earlier limit is kept, so later configuration changes cannot widen it.
+        inherited_limit = max((revision_limit(project, r) for r in prior), default=project["max_revisions"])
+        # A findings revision edits immediately, so after earlier runs it spends the next round.
+        inherited_round = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" and prior else 0)
+        if mode != "review" and inherited_round > inherited_limit:
+            raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
+                            "reset it. Review mode is still available")
         families = {c for c in declared if c in FAMILIES.values()} | set(found["trailer_families"])
         independence = assess_independence(declared, families, found["unresolved_trailers"])
         if mode != "review" and not independence["established"]:
@@ -2312,7 +2323,10 @@ class Coordinator:
                    "selected_effects": effects, "independence": independence,
                    "roles": {"reviser": roles[0], "reviewer": roles[1]} if roles else "assigned by rotation",
                    "push": access if mode != "review" else "never", "head": found["head"], "base": found["base"],
-                   "base_contained": found["base_contained"], "readiness": "never changed by adoption or review",
+                   "base_contained": found["base_contained"],
+                   "revision_budget": {"round": inherited_round, "limit": inherited_limit,
+                                       "prior_runs": [r["id"] for r in prior]},
+                   "readiness": "never changed by adoption or review",
                    "whole_workflow_certified": False}
         if plan_only:
             return summary
@@ -2331,7 +2345,14 @@ class Coordinator:
             requested_operations=["prepare"] + operations,
             omitted_operations=[op for op in ENTRY_POINTS if op not in operations],
             performed_operations=[], unperformed_operations=list(ENTRY_POINTS), input_ref=None,
-            contributors=sorted(set(declared) | families), revision_limit=project["max_revisions"],
+            contributors=sorted(set(declared) | families),
+            revision_limit=inherited_limit, round=inherited_round,
+            rejected_shas=list(dict.fromkeys(s for r in prior for s in r.get("rejected_shas", []))),
+            prior_runs=[{"id": r["id"], "stage": r["stage"], "round": r["round"],
+                         "limit": revision_limit(project, r), "handoffs": len(r.get("handoffs", [])),
+                         "decisions": [d["action"] for d in r.get("decisions", [])],
+                         "revision_history": [{k: e.get(k) for k in ("round", "kind", "sha")}
+                                              for e in r.get("revision_history", [])]} for r in prior],
             provenance={"kind": "pull_request", "pr": number, "scope": issue_fingerprint(issue), "declared": declared,
                         "trailer_families": found["trailer_families"],
                         "unresolved_trailers": found["unresolved_trailers"], "selected_revision": found["head"],
