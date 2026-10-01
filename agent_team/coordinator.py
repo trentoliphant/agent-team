@@ -1834,9 +1834,16 @@ class Coordinator:
         pr = self.github.pr(project["repo"], run["pr"])
         if pr["state"] != "open" or pr["base"]["ref"] != base_ref(project, run):
             raise TeamError("PR must be open and target the registered base")
+        info = run.get("adopted_pr")
+        if info:
+            # A changed head identity is a different input, even at the same commit; it is never adopted here.
+            head = pr["head"].get("repo") or {}
+            if (head.get("full_name") or "").casefold() != info["head_repo"].casefold() or \
+                    pr["head"]["ref"] != info["head_ref"]:
+                raise TeamError("PR head repository or branch changed; close this run and adopt the PR again "
+                                "(previous work retained)")
         cwd = self.store.workspace(run)
         fresh = self.store.run_root(run) / f"refresh-{time.time_ns()}"
-        info = run.get("adopted_pr")
         if info:
             # An adopted PR's head may live in a fork; read it through the base repository's pull ref.
             clone_repository(project["repo"], fresh, info["base_ref"], project["timeout"])
@@ -2278,8 +2285,9 @@ class Coordinator:
                             "an operator repair outside Agent Team")
         # Like a handoff, the earlier limit is kept, so later configuration changes cannot widen it.
         inherited_limit = max((revision_limit(project, r) for r in prior), default=project["max_revisions"])
-        # A findings revision edits immediately, so after earlier runs it spends the next round.
-        inherited_round = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" and prior else 0)
+        # A findings revision edits immediately, so it spends the next round before the budget check,
+        # exactly as revise mode does after its first review rejects the candidate.
+        inherited_round = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
         if mode != "review" and inherited_round > inherited_limit:
             raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
                             "reset it. Review mode is still available")

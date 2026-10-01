@@ -328,8 +328,12 @@ changed, the remaining writes move to `unpublished_evidence`, current evidence i
 retired, and the run stops as `stale`. Adopting a PR again after earlier runs
 ended keeps their budget: the new run inherits the highest round and the earlier
 revision limit, records them in `prior_runs`, and copies their `rejected_shas`. A
-findings revision spends the next round. Revision modes are refused once an
-earlier run reached its revision limit; review mode stays available.
+findings revision always spends the next round before the budget check, including
+on first adoption, so `max_revisions=0` refuses it and a limit of N allows N
+revisions, as in revise mode. Revision modes are refused once an
+earlier run reached its revision limit; review mode stays available. Adopting a
+direct repair refuses a changed head repository or branch, even at the same
+commit; the PR must be adopted again in a new run.
 `pr update` journals the checkout swap and the evidence invalidation
 (`pending_pr_update`) before renaming directories. Rerunning `pr update` after an
 interruption finishes the swap from the journal. The previous checkout and any

@@ -1009,6 +1009,54 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(self.remote_head(), run["sha"])
         self.assertTrue(self.github.pulls[7]["draft"])
 
+    def test_findings_mode_counts_its_first_edit_against_the_budget(self):
+        self.store.update_project("demo", max_revisions=0)
+        self.open_pr()
+        with self.assertRaisesRegex(TeamError, "no revision budget left"):
+            self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit"], findings=["Fix it"])
+        self.assertEqual((self.store.runs(), self.agents.calls), ([], []))
+        self.store.update_project("demo", max_revisions=1)
+        self.agents.reject = True
+        run = self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit"], findings=["Fix it"])
+        self.assertEqual((run["round"], run["revision_limit"]), (1, 1))
+        for _ in range(10):
+            if run["stage"] == "handoff":
+                break
+            run = self.ticks(run, 1)
+        # Like revise mode with the same limit, exactly one revision is made before the handoff.
+        self.assertEqual((run["stage"], run["round"]), ("handoff", 1))
+        self.assertEqual([call for call in self.agents.calls if call[1] == "implement"], [(run["author"], "implement")])
+
+    def repair_handoff(self):
+        self.store.update_project("demo", max_revisions=0)
+        self.open_pr()
+        self.agents.reject = True
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        return self.team.decide(run["id"], "repair")
+
+    def test_repair_adoption_refuses_changed_head_identity(self):
+        for change in ("repository", "branch"):
+            with self.subTest(change=change):
+                self.tearDown()
+                self.setUp()
+                run = self.repair_handoff()
+                before = git(self.store.workspace(run), "rev-parse", "HEAD")
+                if change == "repository":
+                    # Same commit, but the PR head now names another repository.
+                    self.github.pulls[7]["head_repo"] = "someone/demo"
+                else:
+                    # Same commit, pushed to another branch that the PR now uses.
+                    git(self.remote, "branch", "moved", "feature")
+                    self.github.pulls[7]["branch"] = "moved"
+                with self.assertRaisesRegex(TeamError, "head repository or branch changed"):
+                    self.team.adopt(run["id"], ["human"])
+                after = self.store.get(run["id"])
+                self.assertEqual(after["stage"], "repair")
+                self.assertFalse(after.get("adoptions"))
+                self.assertEqual(after["adopted_pr"], run["adopted_pr"])
+                self.assertEqual(git(self.store.workspace(after), "rev-parse", "HEAD"), before)
+                self.assertEqual(list(self.store.run_root(after).glob("refresh-*")), [])
+
     def test_evidence_is_invalidated_by_configuration_change(self):
         self.open_pr()
         run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
