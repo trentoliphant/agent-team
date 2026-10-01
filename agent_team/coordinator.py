@@ -2246,8 +2246,14 @@ class Coordinator:
             assert_metadata(cwd, run["git_metadata"])
             path = self.store.artifacts(run) / f"pr-{info['number']}-{sha[:12]}.patch"
             path.write_text(git(cwd, "format-patch", "--stdout", f"{published}..{sha}") + "\n")
+            access = run.get("push_access") or info["push_access"]
+            reason = run.get("local_handoff_reason")
+            if not reason and not access["allowed"]:
+                reason = access["reason"]
+            elif not reason and "push" not in (run.get("grants") or []):
+                reason = "the push grant was not given"
             handoff = {"commit": sha, "builds_on": published, "checkout": str(cwd), "patch": str(path),
-                       "reason": run.get("local_handoff_reason") or "publication to the PR branch was not selected",
+                       "reason": reason or "publication to the PR branch was not selected",
                        "replacement_pr": "not created"}
         checks = run.get("ci_checks", [])
         limitations = []
