@@ -99,12 +99,12 @@ class PullRequestTests(unittest.TestCase):
                                      "maintainer_can_modify": maintainer_can_modify}
         return git(self.source, "rev-parse", "HEAD")
 
-    def push_external(self, branch="feature", text="human follow-up\n"):
+    def push_external(self, branch="feature", text="human follow-up\n", message="External change"):
         git(self.source, "fetch", str(self.remote), branch)
         git(self.source, "checkout", "-B", branch, "FETCH_HEAD")
         (self.source / "external.txt").write_text(text)
         git(self.source, "add", ".")
-        git(self.source, *COMMIT, "commit", "-m", "External change")
+        git(self.source, *COMMIT, "commit", "-m", message)
         git(self.source, "push", str(self.remote), f"HEAD:refs/heads/{branch}")
         return git(self.source, "rev-parse", "HEAD")
 
@@ -593,6 +593,84 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["validated_sha"], run["reviewed_sha"]), ("stopped", run["sha"], run["sha"]))
         self.assertEqual(git(self.remote, "rev-parse", f"{run['sha']}^"), head)
         self.assertEqual(self.remote_head(), run["sha"])
+
+    def test_review_only_reviews_failing_head_and_stops(self):
+        head = self.open_pr()
+        self.store.update_project("demo", tests=["grep -q fixed feature.txt"])
+        run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
+        run = self.ticks(run, 2)
+        self.assertEqual(run["stage"], "review")
+        self.assertEqual(run["tests"][0]["exit_code"], 1)
+        self.assertEqual(self.agents.calls, [])
+        run = self.ticks(run, 1)
+        # Both the validation failure and the review are reported; the stop boundary holds.
+        self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
+        self.assertEqual(self.agents.calls, [(run["reviewer"], "review")])
+        entry = run["revision_history"][0]
+        self.assertEqual((entry["sha"], entry["kind"], entry["validation_failed"]), (head, "review", True))
+        self.assertIn((head, "failure", "Configured validation failed"), self.github.status_descriptions)
+        self.assertIn("exit 1", self.github.comments[(7, f"{run['id']}-review-0-{head}")])
+        run = self.ticks(run, 3)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual([role for _, role in self.agents.calls], ["review"])
+        self.assertEqual(self.remote_head(), head)
+        self.assertEqual(self.github.creates, 0)
+        self.assertTrue(self.github.pulls[7]["draft"])
+        report = self.team.pr_report(run["id"])
+        self.assertTrue(report["review"]["validation_failed"])
+        self.assertFalse(report["validation"]["passed_for_candidate"])
+        self.assertFalse(report["independent_review_success"])
+
+    def test_unresolved_trailers_in_external_repair_withhold_independence(self):
+        self.store.update_project("demo", max_revisions=0)
+        for number, value in ((7, "unknown"), (8, "gemini")):
+            with self.subTest(value=value):
+                branch = f"branch-{number}"
+                self.open_pr(number, branch)
+                self.agents.reject = True
+                run = self.ticks(self.team.adopt_pr("demo", str(number), "review", ["human"]), 3)
+                self.assertTrue(run["independence"]["established"])
+                self.assertEqual(run["stage"], "handoff")
+                run = self.team.decide(run["id"], "repair")
+                external = self.push_external(branch, message=f"Repair\n\nAgent-Family: {value}")
+                run = self.team.adopt(run["id"], ["human"])
+                self.assertEqual(run["sha"], external)
+                self.assertFalse(run["independence"]["established"])
+                self.assertIn(value, run["independence"]["reason"])
+                self.assertEqual(run["adopted_pr"]["unresolved_trailers"], [value])
+                self.assertEqual(run["adoptions"][-1]["unresolved_trailers"], [value])
+                self.assertNotIn(value, run["contributors"])
+                self.agents.reject = False
+                run = self.ticks(self.team.select("demo", ["validate", "review"], [], contributors=["human"],
+                                                  run_id=run["id"]), 2)
+                self.assertEqual(run["stage"], "stopped")
+                self.assertIsNone(run.get("reviewed_sha"))
+                self.assertEqual(run["review_withheld"]["sha"], external)
+                report = self.team.pr_report(run["id"])
+                self.assertFalse(report["independent_review_success"])
+                self.assertEqual(report["authorship"]["unresolved_trailers"], [value])
+                self.store.save(run, stage="closed")
+
+    def test_unresolved_trailers_in_local_continuation_withhold_independence(self):
+        head = self.open_pr()
+        run = self.ticks(self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"]), 3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
+        cwd = self.store.workspace(run)
+        (cwd / "local.txt").write_text("operator change\n")
+        git(cwd, "add", ".")
+        git(cwd, *COMMIT, "commit", "-m", "Local change\n\nAgent-Family: gemini")
+        local = git(cwd, "rev-parse", "HEAD")
+        run = self.team.select("demo", ["validate", "review"], [], contributors=["human"], run_id=run["id"])
+        self.assertFalse(run["independence"]["established"])
+        self.assertEqual(run["unresolved_trailers"], ["gemini"])
+        self.assertEqual(run["adopted_pr"]["unresolved_trailers"], ["gemini"])
+        self.assertIsNone(run["reviewed_sha"])
+        run = self.ticks(run, 2)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertIsNone(run.get("reviewed_sha"))
+        self.assertEqual(run["review_withheld"]["sha"], local)
+        self.assertEqual(self.remote_head(), head)
+        self.assertFalse(self.team.pr_report(run["id"])["independent_review_success"])
 
     def test_base_movement_before_comment_retry_keeps_evidence_local(self):
         head = self.open_pr()

@@ -704,7 +704,7 @@ contributors, `Agent-Family` trailers, and GitHub usernames in a durable run.
 
 | Command | Operations | Grants |
 | --- | --- | --- |
-| `pr review` | Validate and review the current head, then stop. No edits, pushes, base merges, or repair loop. | Optional `github` publishes the review comment and status. |
+| `pr review` | Validate and review the current head, even if validation fails, then stop. No edits, pushes, base merges, or repair loop. | Optional `github` publishes the review comment and status. |
 | `pr revise` | Validate and review the current head first, even if validation fails. On rejection or failed validation, revise the existing PR branch, revalidate, push, and review the exact new commit, within the revision budget. | `edit` required; `push` and `github` to push to the PR branch. |
 | `pr findings` | Revise the `--finding` items, validate, push, and review the exact result. | `edit` required; `push` and `github` to push to the PR branch. |
 
@@ -753,7 +753,10 @@ family contributed, the other family reviews and the same family revises. When
 `unknown` is declared, both families contributed, or a commit has an
 `Agent-Family` trailer other than `openai` or `anthropic`, independence cannot be
 established. `pr review` still reports findings but withholds the
-independent-review success verdict, and revision modes are refused.
+independent-review success verdict, and revision modes are refused. The same
+check is repeated for repairs adopted after a handoff (`adopt`) and for local
+changes declared on continuation: an unknown or unsupported trailer there is
+recorded and withholds independent-review success from then on.
 
 **Ownership.** A PR can be tracked by only one open run. Adopting it again, or
 adopting a PR that another run already tracks, is refused. The PR title,

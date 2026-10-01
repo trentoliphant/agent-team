@@ -365,7 +365,7 @@ def dispatch(args, store):
                                       "repair_checkout")})
     elif args.command == "adopt":
         run = team.adopt(args.run_id, args.contributor)
-        emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions")})
+        emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions", "independence")})
     elif args.command == "pr":
         if args.pr_command == "update":
             run = team.update_pr(args.run_id, args.contributor)

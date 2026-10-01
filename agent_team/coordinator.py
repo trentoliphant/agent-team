@@ -162,6 +162,17 @@ def withheld(run):
     return independence["reason"] if independence and not independence["established"] else None
 
 
+def adoption_provenance(run, declared, families, unresolved):
+    """How an adopted repair's authorship was recorded and whether its review can be independent."""
+    reason = withheld(run)
+    reviewer = f"`{run['reviewer']}` ({FAMILIES[run['reviewer']]})"
+    return (f"Declared contributors: {', '.join(declared)}. Contributing model families: "
+            f"{', '.join(sorted(families)) or 'none'}."
+            + (f" Unresolved Agent-Family trailers: {', '.join(unresolved)}." if unresolved else "")
+            + (f" Independent-review success withheld: {reason}; {reviewer} reports findings only." if reason
+               else f" Independent review: {reviewer}, which did not contribute."))
+
+
 def base_ref(project, run):
     """The branch the candidate targets: an adopted PR keeps its own base, never retargeted."""
     return (run.get("adopted_pr") or {}).get("base_ref") or project["base"]
@@ -867,10 +878,11 @@ class Coordinator:
                 raise TeamError("Changed work requires --contributor declarations before continuation")
             if previous and context["head"] != previous["head"]:
                 git(self.store.workspace(run), "merge-base", "--is-ancestor", previous["head"], context["head"])
-            families = self.contributor_check(run, contributors, adopting=not bool(context["dirty"]),
-                                              local_changes=bool(context["dirty"]))(
+            families, unresolved = self.contributor_check(run, contributors, adopting=not bool(context["dirty"]),
+                                                          local_changes=bool(context["dirty"]))(
                 self.store.workspace(run), context["head"], run["base_sha"])
-            self.store.save(run, contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
+            self.store.save(run, **self.reassess(run, contributors, families, unresolved),
+                            contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
                             pending_contribution=None,
                             commit_contributors=sorted(set(run.get("commit_contributors") or []) | set(contributors)),
                             contribution_history=run.get("contribution_history", []) +
@@ -1385,10 +1397,10 @@ class Coordinator:
 
     @staticmethod
     def review_first(run):
-        """Whether review-and-revise must still review the adopted PR's unedited head. Its first edit
-        follows that review, even when the head failed validation."""
+        """Whether a selected review must still review the adopted PR's unedited head, even when it
+        failed validation. Review-only then reports both and stops; review-and-revise edits only after."""
         info = run.get("adopted_pr")
-        return bool(info and info["mode"] == "revise" and run.get("pr_followup")
+        return bool(info and (info["mode"] == "review" or (info["mode"] == "revise" and run.get("pr_followup")))
                     and "review" in run.get("operations", []) and run.get("sha") == info["head_sha"]
                     and not any(e["sha"] == run.get("sha") for e in run.get("revision_history", [])))
 
@@ -1597,7 +1609,7 @@ class Coordinator:
     def review(self, project, run):
         if self.finalize_rejection(project, run):
             return
-        # Review-and-revise reviews the existing candidate before editing it, even when it failed validation.
+        # An adopted PR's existing head is reviewed even when it failed validation.
         attempted = self.review_first(run) and self.pending_validation_failure(run)
         self.compatible_validation(project, run, attempted)
         if run.get("selection") and not attempted and run.get("validated_sha") != run["sha"]:
@@ -1639,7 +1651,7 @@ class Coordinator:
         # The outcome is saved with its GitHub writes queued, so a failed write cannot hide a
         # rejection or a handoff; `flush` publishes them afterwards and retries on later ticks.
         comment = self.review_write(run, record)
-        # Set only when review-and-revise reviewed an existing candidate that failed validation.
+        # Set only when an adopted PR's existing head was reviewed after failing validation.
         failure = run["validation_failure"] if self.pending_validation_failure(run) else None
         if record["report"]["verdict"] != "pass" or failure:
             feedback, findings = report_text(record["report"]), list(record["report"]["findings"])
@@ -1834,13 +1846,31 @@ class Coordinator:
                     raise TeamError("The repair must build on published candidate "
                                     f"{run['published_sha']} without rewriting history (previous work retained)") from None
             trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{base_sha}..{candidate}")
-            found = {line.strip().casefold() for line in trailers.splitlines() if line.strip()}
-            families = contributing_families(run, declared) | found
+            found, unresolved = split_trailers(trailers)
+            families = contributing_families(run, declared) | set(found)
             if FAMILIES[run["reviewer"]] in families:
                 raise TeamError("Commit trailers show the reviewer's family contributed; no independent agent "
                                 "review is possible (previous work retained)")
-            return families
+            return families, unresolved
         return check
+
+    @staticmethod
+    def reassess(run, declared, families, unresolved):
+        """Recompute independence after a contribution, persisting unresolved trailers. Authorship that
+        cannot be established withholds independent-review success; a later change never restores it."""
+        info = run.get("adopted_pr")
+        unresolved = sorted(set(run.get("unresolved_trailers", [])) | set((info or {}).get("unresolved_trailers", []))
+                            | set(unresolved))
+        independence = assess_independence(set(run.get("contributors", [])) | set(declared),
+                                           contributing_families(run, declared) | set(families), unresolved)
+        if independence["established"] and withheld(run):
+            independence = run["independence"]
+        changes = {"unresolved_trailers": unresolved}
+        if run.get("independence") is not None or not independence["established"]:
+            changes["independence"] = independence
+        if info:
+            changes["adopted_pr"] = dict(info, unresolved_trailers=unresolved)
+        return changes
 
     def finish_local_integration(self, project, run):
         """Reconcile a journaled checkout swap without repeating the integration."""
@@ -1901,8 +1931,9 @@ class Coordinator:
             if previous and context["head"] != previous["head"]:
                 if not contributors or not set(contributors) <= set(CONTRIBUTORS):
                     raise TeamError("Local HEAD changed; refresh requires declared contributors")
-                families = self.contributor_check(run, contributors, adopting=True)(cwd, context["head"], run["base_sha"])
-                contributor_changes = dict(contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
+                families, unresolved = self.contributor_check(run, contributors, adopting=True)(
+                    cwd, context["head"], run["base_sha"])
+                contributor_changes = dict(**self.reassess(run, contributors, families, unresolved), contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
                     contribution_history=run.get("contribution_history", []) +
                     [{"at": time.time(), "context": context, "declared": list(contributors)}])
             # The run root, not the author root: suite runs keep companions beside the checkout there.
@@ -1923,8 +1954,9 @@ class Coordinator:
             return self.finish_local_integration(project, run)
         if run.get("selection") and not self.has_effect(run, "edit") and not authorize_edit:
             raise TeamError("Base integration requires --grant edit")
-        changes, families = self.integrate(project, run, self.contributor_check(run, [], adopting=False))
-        changes.update(contributors=sorted(set(run.get("contributors", [])) | families))
+        changes, (families, unresolved) = self.integrate(project, run, self.contributor_check(run, [], adopting=False))
+        changes.update(self.reassess(dict(run, **changes), [], families, unresolved),
+                       contributors=sorted(set(run.get("contributors", [])) | families))
         if run.get("selection") and authorize_edit:
             changes["grants"] = sorted(set(run["grants"]) | {"edit"})
         if run.get("selection"):
@@ -2023,16 +2055,16 @@ class Coordinator:
                             "is possible; review it yourself, or rescope or stop the run")
         if run["stage"] == "repair" and run.get("repair_checkout") and not run.get("published_sha"):
             return self.adopt_local(project, run, declared)
-        changes, families = self.integrate(project, run, self.contributor_check(run, declared, adopting=True))
+        changes, (families, unresolved) = self.integrate(project, run, self.contributor_check(run, declared, adopting=True))
+        changes.update(self.reassess(dict(run, **changes), declared, families, unresolved))
         adoption = {"head": changes["published_sha"], "sha": changes["sha"], "base_sha": changes["base_sha"],
-                    "declared": declared, "families": sorted(families), "round": changes["round"], "at": time.time()}
+                    "declared": declared, "families": sorted(families), "unresolved_trailers": unresolved,
+                    "round": changes["round"], "at": time.time()}
         limit = revision_limit(project, run)
         body = (f"**Agent Team: adopted direct repair**\n\nRun `{run['id']}` adopted PR head "
                 + (f"`{adoption['head']}` as-is; base `{adoption['base_sha']}` was not merged.\n\n" if run.get("adopted_pr")
                    else f"`{adoption['head']}` (candidate `{adoption['sha']}` after merging base `{adoption['base_sha']}`).\n\n") +
-                f"Declared contributors: {', '.join(declared)}. Contributing model families: "
-                f"{', '.join(adoption['families'])}. Independent review: `{run['reviewer']}` "
-                f"({FAMILIES[run['reviewer']]}), which did not contribute.\n\n"
+                adoption_provenance(dict(run, **changes), declared, families, unresolved) + "\n\n"
                 f"New validation and review are required (revision {adoption['round']}, limit {limit}); "
                 "a rejection at or past the limit returns to the operator. "
                 "Only the maintainer decides whether to merge.")
@@ -2084,8 +2116,8 @@ class Coordinator:
         # Base commits are not part of the repair, so their trailers are excluded.
         trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", candidate,
                        f"^{run['base_sha']}", f"^{base_sha}")
-        families = contributing_families(run, declared) | {
-            line.strip().casefold() for line in trailers.splitlines() if line.strip()}
+        found, unresolved = split_trailers(trailers)
+        families = contributing_families(run, declared) | set(found)
         if FAMILIES[run["reviewer"]] in families:
             raise TeamError("Commit trailers show the reviewer's family contributed; no independent agent "
                             "review is possible (previous work retained)")
@@ -2102,15 +2134,14 @@ class Coordinator:
         fresh.rename(cwd)
         round_ = run["round"] + 1
         adoption = {"head": candidate, "sha": sha, "base_sha": base_sha, "declared": declared,
-                    "families": sorted(families), "round": round_, "local": True, "at": time.time()}
+                    "families": sorted(families), "unresolved_trailers": unresolved, "round": round_,
+                    "local": True, "at": time.time()}
+        provenance = self.reassess(run, declared, families, unresolved)
         merged = (f" Candidate `{sha}` merges current base `{base_sha}`." if sha != candidate
                   else f" It is up to date with base `{base_sha}`.")
         body = (f"**Agent Team: adopted direct repair**\n\nRun `{run['id']}` adopted local repair commit "
                 f"`{candidate}`, which extends rejected candidate `{repair['candidate']}` and was never pushed."
-                f"{merged}\n\n"
-                f"Declared contributors: {', '.join(declared)}. Contributing model families: "
-                f"{', '.join(adoption['families'])}. Independent review: `{run['reviewer']}` "
-                f"({FAMILIES[run['reviewer']]}), which did not contribute.\n\n"
+                f"{merged}\n\n" + adoption_provenance(dict(run, **provenance), declared, families, unresolved) + "\n\n"
                 f"New validation is required before it is published as a draft PR, then independent review of "
                 f"that exact commit (revision {round_}, limit {revision_limit(project, run)}); a rejection at or "
                 "past the limit returns to the operator. Only the maintainer decides whether to merge.")
@@ -2119,7 +2150,7 @@ class Coordinator:
         self.store.save(run, sha=sha, base_sha=base_sha, reviewed_sha=None, review_record=None, validated_sha=None,
                         validated_tree=None, git_metadata=metadata(cwd), pending_push_sha=None,
                         needs_revision=False, stage="validate", in_flight=False, round=round_, error=None,
-                        repair_checkout=None,
+                        repair_checkout=None, **provenance,
                         contributors=sorted(set(run.get("contributors", [])) | families | set(declared)),
                         adoptions=run.get("adoptions", []) + [adoption], **self.queue_writes(run, write))
         if run.get("selection"):

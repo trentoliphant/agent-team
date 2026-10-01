@@ -301,8 +301,8 @@ agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
 ```
 
-These are alternatives. `pr review` validates and reviews the current head, then
-stops: no edits, pushes, base merges, or repair loop. Add `--grant github` only if
+These are alternatives. `pr review` validates and reviews the current head, even
+when its validation fails, then stops: no edits, pushes, base merges, or repair loop. Add `--grant github` only if
 the operator wants the review comment and status published; otherwise report the
 findings from `pr show`. `pr revise` reviews the existing head first, even when
 its validation fails, then fixes findings on the PR's own branch within the
@@ -317,8 +317,9 @@ Declare every contributor truthfully: `human`, `openai`, `anthropic`, or
 `unknown`, including your own family if you edited the branch. Never infer a model
 family from a GitHub username. With `unknown` or both families, independence
 cannot be established: review reports findings but withholds the
-independent-review success verdict, and revision is refused. Report that
-limitation; do not change the declarations to get past it.
+independent-review success verdict, and revision is refused. An unknown or
+unsupported `Agent-Family` trailer in a later repair or continuation also withholds
+it. Report that limitation; do not change the declarations to get past it.
 
 From `pr show`, report the PR, head and base commits, roles, validation, findings,
 the checks that ran and those omitted, and any local handoff. A standalone review
