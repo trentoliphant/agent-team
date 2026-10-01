@@ -846,6 +846,10 @@ class Coordinator:
         if "revision" in operations and not run.get("needs_revision"):
             raise TeamError("Revision requires recorded rejection feedback")
         project = self.store.project(run["project"])
+        if {"implement", "revision"} & set(operations):
+            refusal = self.adopted_revision_refusal(project, run)
+            if refusal:
+                raise TeamError(refusal)
         issue = self.github.issue(project["repo"], run["issue"]) if run["issue"] is not None else {
             "title": run["title"], "body": run["body"]}
         if (run["issue"] is not None and self.ineligible(project, issue)) or issue_fingerprint(issue) != run["issue_digest"]:
@@ -1285,7 +1289,27 @@ class Coordinator:
             raise TeamError("Revision requires feedback and remaining authorized budget")
         self.implement(project, run)
 
+    @staticmethod
+    def adopted_revision_refusal(project, run):
+        """Why an adopted PR may not be edited, if anything. Checked before every author operation,
+        including continuations and recovery, because adoption's own checks do not cover later paths."""
+        info = run.get("adopted_pr")
+        if not info:
+            return None
+        if withheld(run):
+            return (f"Independent review cannot be established ({withheld(run)}), so revision is refused. "
+                    "Review mode reports findings and withholds an independent-review success verdict")
+        if FAMILIES[run["reviewer"]] in contributing_families(run):
+            return "The assigned reviewer's family contributed; independent review is impossible, so revision is refused"
+        if info["base_ref"] != project["base"]:
+            return (f"PR targets {info['base_ref']}, not registered base {project['base']}. Revision is refused "
+                    "before any change; Agent Team never retargets PRs")
+        return None
+
     def implement(self, project, run):
+        refusal = self.adopted_revision_refusal(project, run)
+        if refusal:
+            raise TeamError(refusal)
         self.require_effect(run, "edit")
         cwd = self.store.workspace(run)
         before = git(cwd, "rev-parse", "HEAD")
@@ -1434,6 +1458,9 @@ class Coordinator:
         if review:
             entry["review"] = {k: review[k] for k in ("agent", "family", "cli_version",
                                                       "requested_model", "observed_models")}
+            # The reviewer's own report, kept apart from the combined rejection: a passing review of a
+            # commit that failed validation is still reported as a pass.
+            entry["review_report"] = review["report"]
         changes = dict(feedback=feedback, revision_history=history + [entry],
                        rejected_shas=list(dict.fromkeys(run.get("rejected_shas", []) + [run["sha"]])))
         limit = revision_limit(project, run)
@@ -1744,6 +1771,14 @@ class Coordinator:
             self.renew_pins(project, run)
             return
         state = self.github.ci(project["repo"], run["sha"])
+        # Readiness observations are exact-commit evidence like `checks`; a repeated pending poll is kept once.
+        observation = {"sha": run["sha"], "base": run["base_sha"], "operation": "ci", "state": state,
+                       "companions": run.get("validated_companions") or [], "readiness_changed": False}
+        last = (run.get("ci_checks") or [{}])[-1]
+        if {k: last.get(k) for k in observation} != observation:
+            self.store.save(run, ci_checks=run.get("ci_checks", []) + [dict(
+                observation, at=time.time(),
+                context=self.evidence_context(project, run) if run.get("selection") else None)])
         if state == "failure":
             raise TeamError("GitHub CI failed; inspect checks and resume after correction")
         if state == "pending":
@@ -1760,7 +1795,8 @@ class Coordinator:
             self.github.mark_ready(project["repo"], run["pr"])
         self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready",
                             self.status_text(project, run, "ready", ready_forms(run)))
-        self.store.save(run, stage="ready")
+        self.store.save(run, stage="ready", ci_checks=run["ci_checks"][:-1] + [dict(run["ci_checks"][-1],
+                                                                                       readiness_changed=True)])
 
     def discover(self, name, agent, focus):
         project = self.store.project(name)
@@ -2465,10 +2501,15 @@ class Coordinator:
         elif history and history[-1]["kind"] == "review" and not (
                 latest and latest["at"] > history[-1].get("at", 0)):
             entry = history[-1]
+            # The reviewer's report is returned as given; the candidate's combined rejection is separate.
+            report = entry.get("review_report") or {"verdict": "changes_requested", "summary": entry["feedback"],
+                                                    "findings": entry["findings"]}
             review = {"commit": entry["sha"], "base": entry.get("base"),
                       "current": current and entry["sha"] == sha and entry.get("base") == run["base_sha"],
-                      "verdict": "changes_requested", "reviewer": entry.get("review"),
-                      "findings": entry["findings"], "validation_failed": bool(entry.get("validation_failed"))}
+                      "verdict": report["verdict"], "summary": report["summary"], "reviewer": entry.get("review"),
+                      "findings": report["findings"], "candidate_verdict": "changes_requested",
+                      "candidate_findings": entry["findings"], "candidate_feedback": entry["feedback"],
+                      "validation_failed": bool(entry.get("validation_failed"))}
         elif latest:
             review = latest["review"]
         handoff = None
@@ -2486,7 +2527,13 @@ class Coordinator:
             handoff = {"commit": sha, "builds_on": published, "checkout": str(cwd), "patch": str(path),
                        "reason": reason or "publication to the PR branch was not selected",
                        "replacement_pr": "not created"}
-        checks = run.get("ci_checks", [])
+        # Observations from `checks` and readiness, each named with its head and base. Only those for the
+        # current candidate and base apply; the rest are historical.
+        checks = [{"operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
+                   "state": c["state"], "at": c.get("at"), "readiness_changed": c.get("readiness_changed", False),
+                   "current": current and c["sha"] == sha and c["base"] == run["base_sha"]}
+                  for c in run.get("ci_checks", [])]
+        latest_check = next((c for c in reversed(checks) if c["current"]), None)
         limitations = []
         if not current:
             limitations.append("The PR head or base changed after the recorded evidence was gathered; earlier "
@@ -2500,6 +2547,11 @@ class Coordinator:
             limitations.append(f"Independent-review success withheld: {withheld(run)}.")
         if not checks:
             limitations.append("GitHub CI checks were not checked.")
+        elif not latest_check:
+            limitations.append("GitHub CI checks were not checked for the current candidate and base; earlier "
+                               "observations are historical.")
+        elif latest_check["state"] != "success":
+            limitations.append(f"GitHub CI checks for the current candidate did not pass (state: {latest_check['state']}).")
         if run["stage"] != "ready":
             limitations.append("Readiness was not assessed; Agent Team did not change draft or readiness state.")
         if handoff:
@@ -2530,7 +2582,7 @@ class Coordinator:
                 "review": review,
                 "independent_review_success": bool(current and run.get("reviewed_sha") == sha and not withheld(run)),
                 "historical_evidence": historical,
-                "ci_checks": checks or "not checked",
+                "ci_checks": checks or "not checked", "current_ci": latest_check,
                 "push": run.get("push_access") or info["push_access"], "local_handoff": handoff,
                 "unpublished_evidence": unpublished,
                 "performed_operations": run.get("performed_operations", []),

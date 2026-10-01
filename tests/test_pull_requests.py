@@ -42,6 +42,11 @@ class PullGitHub(FakeGitHub):
     def push_access(self, project, pr):
         return GitHub.push_access(self, project, pr)
 
+    def mark_ready(self, repo, number):
+        if number not in self.pulls:
+            return super().mark_ready(repo, number)
+        self.pulls[number]["draft"] = False
+
 
 class PullRequestTests(unittest.TestCase):
     def setUp(self):
@@ -176,7 +181,23 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(self.github.creates, 0)
         report = self.team.pr_report(run["id"])
         self.assertEqual(report["review"]["verdict"], "changes_requested")
+        self.assertEqual(report["review"]["summary"], self.agents.summary)
         self.assertEqual(report["review"]["findings"][0]["location"], "feature.txt:1")
+
+    def test_local_rejection_report_keeps_full_review(self):
+        head = self.open_pr()
+        self.agents.reject = True
+        self.agents.summary = "Feature text is wrong"
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        self.assertEqual((run["stage"], run["review_record"]), ("stopped", None))
+        self.assertEqual(self.github.comments, {})
+        review = self.team.pr_report(run["id"])["review"]
+        self.assertEqual((review["commit"], review["current"]), (head, True))
+        self.assertEqual((review["verdict"], review["summary"]), ("changes_requested", "Feature text is wrong"))
+        self.assertEqual(review["findings"][0]["location"], "feature.txt:1")
+        self.assertEqual(review["reviewer"]["agent"], run["reviewer"])
+        self.assertEqual(review["candidate_verdict"], "changes_requested")
+        self.assertFalse(review["validation_failed"])
 
     def test_adoption_refuses_unauthorized_or_inconsistent_requests(self):
         self.open_pr()
@@ -353,6 +374,96 @@ class PullRequestTests(unittest.TestCase):
         run = self.ticks(run, 3)
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
         self.assertEqual(self.github.pulls[8]["base"], "release")
+
+    def test_revision_after_review_only_rejection_is_refused_before_editing(self):
+        git(self.remote, "branch", "release", "main")
+        cases = ((7, "feature", "main", ["human", "unknown"], "unknown contributors"),
+                 (8, "mixed", "main", ["openai", "anthropic"], "both model families"),
+                 (9, "release-fix", "release", ["human"], "never retargets"))
+        for number, branch, base, contributors, message in cases:
+            with self.subTest(number=number):
+                head = self.open_pr(number, branch, base=base)
+                self.agents.reject = True
+                run = self.ticks(self.team.adopt_pr("demo", str(number), "review", contributors), 3)
+                self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
+                calls = list(self.agents.calls)
+                with self.assertRaisesRegex(TeamError, message):
+                    self.team.select("demo", ["revision", "validate"], ["edit"], run_id=run["id"])
+                run = self.store.get(run["id"])
+                self.assertEqual(run["stage"], "stopped")
+                # Recovery into a revision stage is refused by the same check before any author call.
+                self.store.save(run, stage="revision", grants=["edit"], operations=["revision", "validate"],
+                                stop_after="validate")
+                try:
+                    self.ticks(run, 1)
+                except TeamError as error:
+                    self.assertRegex(str(error), message)
+                run = self.store.get(run["id"])
+                self.assertNotIn(run["stage"], {"validate", "review"})
+                self.assertEqual(self.agents.calls, calls)
+                self.assertNotIn("implement", [role for _, role in self.agents.calls])
+                self.assertEqual(git(self.store.workspace(run), "rev-parse", "HEAD"), head)
+                self.assertEqual(git(self.store.workspace(run), "status", "--porcelain"), "")
+                self.assertEqual(self.remote_head(branch), head)
+                self.store.save(run, stage="closed")
+
+    def readiness_run(self):
+        head = self.open_pr()
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"]), 3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
+        self.assertEqual(self.team.pr_report(run["id"])["ci_checks"], "not checked")
+        return head, self.team.select("demo", ["ci"], ["github", "readiness"], run_id=run["id"])
+
+    def test_readiness_records_successful_ci(self):
+        head, run = self.readiness_run()
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "ready")
+        self.assertFalse(self.github.pulls[7]["draft"])
+        report = self.team.pr_report(run["id"])
+        check = report["current_ci"]
+        self.assertEqual((check["operation"], check["head"], check["base"]), ("ci", head, run["base_sha"]))
+        self.assertEqual((check["state"], check["current"], check["readiness_changed"]), ("success", True, True))
+        self.assertEqual(report["ci_checks"], [check])
+        self.assertFalse(any("CI checks" in item for item in report["limitations"]))
+
+    def test_readiness_records_pending_and_failed_ci(self):
+        head, run = self.readiness_run()
+        self.github.check_state = "pending"
+        run = self.ticks(run, 3)
+        self.assertEqual(run["stage"], "ci")
+        self.assertTrue(self.github.pulls[7]["draft"])
+        report = self.team.pr_report(run["id"])
+        self.assertEqual(len(report["ci_checks"]), 1)
+        self.assertEqual((report["current_ci"]["state"], report["current_ci"]["readiness_changed"]), ("pending", False))
+        self.assertIn("GitHub CI checks for the current candidate did not pass (state: pending).", report["limitations"])
+        self.github.check_state = "failure"
+        try:
+            run = self.ticks(run, 1)
+        except TeamError:
+            run = self.store.get(run["id"])
+        self.assertNotEqual(run["stage"], "ready")
+        self.assertTrue(self.github.pulls[7]["draft"])
+        report = self.team.pr_report(run["id"])
+        self.assertEqual([c["state"] for c in report["ci_checks"]], ["pending", "failure"])
+        self.assertEqual(report["current_ci"]["head"], head)
+        self.assertIn("GitHub CI checks for the current candidate did not pass (state: failure).", report["limitations"])
+
+    def test_ci_observations_are_invalidated_by_movement(self):
+        head, run = self.readiness_run()
+        self.github.check_state = "pending"
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "ci")
+        self.advance_base()
+        try:
+            run = self.ticks(run, 1)
+        except TeamError:
+            run = self.store.get(run["id"])
+        self.assertEqual(run["stage"], "stale")
+        report = self.team.pr_report(run["id"])
+        self.assertIsNone(report["current_ci"])
+        self.assertEqual((report["ci_checks"][0]["head"], report["ci_checks"][0]["current"]), (head, False))
+        self.assertIn("GitHub CI checks were not checked for the current candidate and base; earlier "
+                      "observations are historical.", report["limitations"])
 
     def test_concurrent_head_change_requires_deliberate_update(self):
         self.open_pr()
@@ -668,6 +779,11 @@ class PullRequestTests(unittest.TestCase):
         self.assertTrue(self.github.pulls[7]["draft"])
         report = self.team.pr_report(run["id"])
         self.assertTrue(report["review"]["validation_failed"])
+        # The reviewer's own pass is reported as given; the candidate is rejected for failed validation.
+        self.assertEqual((report["review"]["verdict"], report["review"]["summary"]), ("pass", self.agents.summary))
+        self.assertEqual(report["review"]["findings"], [])
+        self.assertEqual(report["review"]["candidate_verdict"], "changes_requested")
+        self.assertEqual(report["review"]["candidate_findings"][0]["severity"], "validation")
         self.assertFalse(report["validation"]["passed_for_candidate"])
         self.assertFalse(report["independent_review_success"])
 

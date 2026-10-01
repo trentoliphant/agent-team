@@ -740,11 +740,16 @@ adopted the PR. A later `select --run` performs only the operations it names; a
 rejection after `--operations validate review` stops without editing or pushing.
 
 `pr show` reports the findings, validation results, review verdict, roles,
-authorship, push access, and which checks ran or were omitted. A standalone review
+authorship, push access, and which checks ran or were omitted. The review keeps
+the reviewer's own verdict, summary, and findings, even after a rejection or when
+a passing review is paired with failed validation; the combined rejection is
+reported separately (`candidate_verdict`). A standalone review
 never checks GitHub CI and is never a readiness verdict. No `pr` command reopens,
 retargets, changes draft state, marks ready, or merges a PR. Readiness stays a
 separate `select --run RUN_ID --operations ci --grant readiness`, which requires
-exact-commit independent review.
+exact-commit independent review. CI results seen by `checks` or readiness are
+listed in `ci_checks` with their head and base; only those for the current
+candidate and base count (`current_ci`).
 
 **Authorship.** Declare every contributor with `--contributor`: `human`, `openai`,
 `anthropic`, or `unknown`. GitHub usernames are recorded but never treated as a
@@ -787,6 +792,8 @@ access to the base. Otherwise the revision is validated and reviewed locally, an
 
 **State.** Closed and merged PRs are refused. Revision is refused for PRs that do
 not target the registered base; review-only is allowed and keeps the PR's own
-base. The revision budget, quota retries, and `handoff`/`decide`/`adopt` flow are
+base. Independence and base compatibility are checked again before every author
+edit, including a later `select --run ... --operations revision` and recovery, so
+a review-only run that could not be revised at adoption cannot be revised later. The revision budget, quota retries, and `handoff`/`decide`/`adopt` flow are
 the same as for other runs; an adopted repair is checked out as-is, without a
 base merge.
