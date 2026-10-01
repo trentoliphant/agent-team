@@ -764,11 +764,14 @@ description, labels, and history are left unchanged.
 
 **Movement.** The head and base are checked before every push, after every
 review (with or without `github`), and whenever evidence is reused. If either
-moved, the run stops as `stale` and nothing is pushed. Its validation and review
+moved, or the PR now uses another head repository or branch (even at the same
+commit), the run stops as `stale` and nothing is pushed. Its validation and review
 no longer count: `pr show` lists them under `historical_evidence` with the head
-and base they covered, and reports `current_evidence: false`. `pr update RUN_ID --contributor ...` adopts the new commits deliberately.
+and base they covered, including the full review (summary, findings, reviewer),
+and reports `current_evidence: false`. A changed head repository or branch needs
+a new adoption. `pr update RUN_ID --contributor ...` adopts new commits deliberately.
 It preserves the previous checkout, including any unpushed local revision, and
-invalidates earlier validation and review. The base is never merged into an
+moves earlier validation and review to `historical_evidence`. The base is never merged into an
 adopted PR; if the head lacks the current base, `pr show` reports that. Pushes are
 plain fast-forward pushes; nothing is force-pushed. An interrupted push is
 reconciled from the recorded pending commit. Review comments and statuses are

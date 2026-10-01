@@ -1118,6 +1118,19 @@ class Coordinator:
         if run.get("pending_push_sha") == pr["head"]["sha"]:
             expected = pr["head"]["sha"]
             self.store.save(run, published_sha=expected, pending_push_sha=None)
+        info = run.get("adopted_pr")
+        head = pr["head"].get("repo") or {}
+        if info and (head.get("full_name", "").casefold() != info["head_repo"].casefold()
+                     or pr["head"]["ref"] != info["head_ref"]):
+            # Same commit on another head is still a changed input; its evidence does not carry over.
+            if self.has_effect(run, "github"):
+                self.github.status(project["repo"], pr["head"]["sha"], "pending",
+                                   "PR head changed; review invalidated")
+            self.store.save(run, stage="stale", notification_pending=True,
+                            **self.retire_adopted_evidence(run, "PR head repository or branch changed"),
+                            error="PR head repository or branch changed outside coordinator. Close this run "
+                                  "and adopt the PR again.")
+            return False
         if pr["head"]["sha"] != expected:
             if self.has_effect(run, "github"):
                 self.github.status(project["repo"], pr["head"]["sha"], "pending", "Changed outside coordinator; review invalidated")
@@ -2381,14 +2394,12 @@ class Coordinator:
         # Supplied findings that no revision has addressed yet remain the requested scope.
         pending = bool(run.get("needs_revision")) and info["mode"] == "findings" and \
             "revision" not in run.get("performed_operations", [])
-        changes = dict(common, git_metadata=metadata(fresh), validated_sha=None, validated_tree=None,
-                       validated_context=None, reviewed_sha=None, review_sha=None, review_record=None,
-                       review_withheld=None, needs_revision=pending, stage="stopped",
+        # Earlier evidence is snapshotted to history, named with the head and base it was gathered for.
+        retired = self.retire_adopted_evidence(run, "Deliberate adoption of changed PR head or base")
+        retired["evidence_invalidations"][-1]["before"] = run.get("evidence_context")
+        changes = dict(common, git_metadata=metadata(fresh), **retired, needs_revision=pending, stage="stopped",
                        next_stage="revision" if pending else "validate",
-                       partial_result="Changed PR inputs adopted deliberately; select the next operation",
-                       evidence_invalidations=run.get("evidence_invalidations", []) + [{
-                           "at": time.time(), "before": run.get("evidence_context"),
-                           "reason": "Deliberate adoption of changed PR head or base"}])
+                       partial_result="Changed PR inputs adopted deliberately; select the next operation")
         # Journal the swap and the invalidation before any rename, so an interruption is finished, not repeated.
         self.store.save(run, pending_pr_update={"fresh": str(fresh), "preserved": str(preserved),
                                                 "metadata": changes["git_metadata"], "sha": found["head"],
@@ -2428,27 +2439,38 @@ class Coordinator:
         history = run.get("revision_history", [])
         # A stale run's PR moved after its evidence was gathered; that evidence is historical only.
         current = run["stage"] != "stale"
+
+        def reported(record, commit, base, is_current):
+            return {"commit": commit, "base": base, "current": is_current,
+                    "verdict": record["report"]["verdict"], "summary": record["report"]["summary"],
+                    "reviewer": {k: record.get(k) for k in ("agent", "family", "cli_version", "requested_model",
+                                                            "observed_models")},
+                    "findings": record["report"]["findings"]}
+
+        retired = [e for e in run.get("evidence_invalidations", []) if e.get("evidence")]
+        historical = [{"reason": e["reason"], "at": e["at"], "head": e["head"], "base": e["base"],
+                       "validated": e["evidence"].get("validated_sha"), "reviewed": e["evidence"].get("review_sha"),
+                       "verdict": (e["evidence"].get("review_record") or {}).get("report", {}).get("verdict"),
+                       "review": reported(e["evidence"]["review_record"], e["evidence"].get("review_sha"),
+                                          e["base"], False) if e["evidence"].get("review_record") else None,
+                       "independent_review_success": bool(e["evidence"].get("reviewed_sha")),
+                       "validation_failed": "validation_failure" in e["evidence"],
+                       "tests": e["evidence"].get("tests", [])}
+                      for e in retired]
+        # A review retired after the PR moved stays the latest report, marked as not current.
+        latest = next((h for h in reversed(historical) if h["review"]), None)
         review = None
         if run.get("review_record") and run.get("review_sha") == sha:
-            record = run["review_record"]
-            review = {"commit": sha, "base": run["base_sha"], "current": current,
-                      "verdict": record["report"]["verdict"], "summary": record["report"]["summary"],
-                      "reviewer": {k: record[k] for k in ("agent", "family", "cli_version", "requested_model",
-                                                          "observed_models")},
-                      "findings": record["report"]["findings"]}
-        elif history and history[-1]["kind"] == "review":
+            review = reported(run["review_record"], sha, run["base_sha"], current)
+        elif history and history[-1]["kind"] == "review" and not (
+                latest and latest["at"] > history[-1].get("at", 0)):
             entry = history[-1]
             review = {"commit": entry["sha"], "base": entry.get("base"),
                       "current": current and entry["sha"] == sha and entry.get("base") == run["base_sha"],
                       "verdict": "changes_requested", "reviewer": entry.get("review"),
                       "findings": entry["findings"], "validation_failed": bool(entry.get("validation_failed"))}
-        historical = [{"reason": e["reason"], "at": e["at"], "head": e["head"], "base": e["base"],
-                       "validated": e["evidence"].get("validated_sha"), "reviewed": e["evidence"].get("review_sha"),
-                       "verdict": (e["evidence"].get("review_record") or {}).get("report", {}).get("verdict"),
-                       "independent_review_success": bool(e["evidence"].get("reviewed_sha")),
-                       "validation_failed": "validation_failure" in e["evidence"],
-                       "tests": e["evidence"].get("tests", [])}
-                      for e in run.get("evidence_invalidations", []) if e.get("evidence")]
+        elif latest:
+            review = latest["review"]
         handoff = None
         cwd = self.store.workspace(run)
         if sha and published and sha != published and cwd.exists() and run.get("validated_sha") == sha:

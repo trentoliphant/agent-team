@@ -324,8 +324,10 @@ it. Report that limitation; do not change the declarations to get past it.
 From `pr show`, report the PR, head and base commits, roles, validation, findings,
 the checks that ran and those omitted, and any local handoff. A standalone review
 does not check CI and is not a readiness verdict. When the head or base moves, the
-run stops as `stale` and pushes nothing. Its earlier validation and review move
-to `historical_evidence` in `pr show`; never report them as current. Inspect the
+run stops as `stale` and pushes nothing. A changed head repository or branch
+does the same, even at the same commit, and needs a new adoption. Earlier
+validation and review, including full findings, move to `historical_evidence`
+in `pr show`; never report them as current. Inspect the
 change, then use `pr update`
 with the new contributors and reselect validation. Without push access (for
 example, a fork without maintainer edits), give the operator the local commit and

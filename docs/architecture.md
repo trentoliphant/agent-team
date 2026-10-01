@@ -317,9 +317,11 @@ Review then records `review_withheld` instead of `reviewed_sha`, so readiness
 stays unavailable. Agent-Family trailers other than `openai` and `anthropic` are
 recorded as `unresolved_trailers` and withhold independence the same way. Head or
 base movement stops the run as `stale`, whether found by reconciliation, before a
-push, or by the recheck after every adopted review (with or without `github`). It
-also retires validation and review to `evidence_invalidations` with the head and
-base they covered; `pr show` reports them as `historical_evidence`. Queued review comments and statuses carry
+push, or by the recheck after every adopted review (with or without `github`).
+Reconciliation also compares the head repository and branch, so a PR that switches
+heads at the same commit goes stale too. Each case, and `pr update`, retires
+validation and review to `evidence_invalidations` with the head and base they
+covered; `pr show` reports them as `historical_evidence`, with full review reports. Queued review comments and statuses carry
 the reviewed commit; before publishing them, including outbox retries, the
 coordinator rechecks the PR's head, base, state, and head repository. If any
 changed, the writes move to `unpublished_evidence` and the run stops as `stale`.

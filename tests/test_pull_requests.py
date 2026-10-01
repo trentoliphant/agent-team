@@ -523,6 +523,56 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual((historical["head"], historical["base"], historical["verdict"]), (head, base, "pass"))
         self.assertEqual((historical["validated"], historical["reviewed"]), (head, head))
         self.assertTrue(historical["independent_review_success"])
+        # The full review stays readable, named with the commits it was gathered for.
+        for review in (historical["review"], report["review"]):
+            self.assertEqual((review["commit"], review["base"], review["current"]), (head, base, False))
+            self.assertEqual(review["verdict"], "pass")
+            self.assertTrue(review["summary"])
+            self.assertIn("findings", review)
+            self.assertEqual(review["reviewer"]["agent"], run["reviewer"])
+
+    def test_deliberate_update_snapshots_review(self):
+        head = self.open_pr()
+        base = git(self.remote, "rev-parse", "main")
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
+        external = self.push_external()
+        # Update directly from the stopped run, before any tick notices the movement.
+        run = self.team.update_pr(run["id"], ["human"])
+        self.assertEqual(run["sha"], external)
+        self.assertIsNone(run["review_record"])
+        report = self.team.pr_report(run["id"])
+        historical = report["historical_evidence"][-1]
+        self.assertIn("Deliberate adoption", historical["reason"])
+        self.assertEqual((historical["head"], historical["base"], historical["reviewed"]), (head, base, head))
+        self.assertEqual(historical["review"]["verdict"], "pass")
+        self.assertEqual(historical["review"]["reviewer"]["agent"], run["reviewer"])
+        self.assertEqual((report["review"]["commit"], report["review"]["current"]), (head, False))
+        self.assertFalse(report["independent_review_success"])
+
+    def test_same_sha_head_identity_change_retires_evidence(self):
+        for number, change in ((7, {"branch": "other-branch"}), (8, {"head_repo": "someone/demo-fork"})):
+            with self.subTest(change=change):
+                branch = f"feature-{number}"
+                head = self.open_pr(number, branch)
+                run = self.ticks(self.team.adopt_pr("demo", str(number), "review", ["human"], grants=["github"]), 3)
+                self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
+                if "branch" in change:
+                    git(self.remote, "branch", change["branch"], head)
+                self.github.pulls[number].update(change)
+                run = self.ticks(run, 1)
+                self.assertEqual(run["stage"], "stale")
+                self.assertIn("head repository or branch changed", run["error"])
+                self.assertIsNone(run["reviewed_sha"])
+                self.assertIsNone(run["validated_sha"])
+                report = self.team.pr_report(run["id"])
+                self.assertFalse(report["independent_review_success"])
+                self.assertEqual(report["historical_evidence"][-1]["review"]["commit"], head)
+                self.assertIn((head, "pending", "PR head changed; review invalidated"),
+                              self.github.status_descriptions)
+                with self.assertRaisesRegex(TeamError, "adopt the PR again"):
+                    self.team.update_pr(run["id"], ["human"])
+                self.store.save(run, stage="closed")
 
     def test_movement_after_stopped_review_retires_evidence(self):
         head = self.open_pr()
