@@ -2259,7 +2259,7 @@ class Coordinator:
             author_record={"report": {"summary": f"Existing PR #{number}",
                                       "limitations": "Existing work; implementation was not performed by Agent Team"}},
             adopted_pr=info, independence=independence, pr=number, sha=found["head"],
-            published_sha=found["head"], base_sha=found["base"],
+            published_sha=found["head"], base_sha=found["base"], validated_sha=None, validated_tree=None,
             pr_followup=followup if mode != "review" else None,
             needs_revision=mode == "findings", feedback=feedback))
         changes = {"branch": f"agent-team/pr-{number}-{run['id']}"}
