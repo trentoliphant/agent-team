@@ -53,6 +53,17 @@ ready reconciliation compare the current pins with the recorded ones. A differen
 sets a pending status on an existing PR and returns the same commit to validation. Review comment markers include a pin digest, so an
 earlier review of that commit stays published.
 
+Partial selections apply the same checks. Declared companions and the manifest
+path are part of the candidate fingerprint's configuration (omitted when unset),
+and manifest pins are part of its tree. Continuation and every evidence-consuming
+selected stage compare pins before reusing validation or review. A difference
+moves the old verdict to `superseded_evidence`, records an evidence invalidation,
+and stops the run with `validate` as the next stage; the stage is not recorded as
+performed. A pending status is written only with the `github` grant. Operation
+history and `checks` snapshots record the pins in effect. Unpublished refresh
+builds its clone in the run root, so the author directory keeps only the
+basename checkout and its companions.
+
 After each validation command, and after review, each companion checkout must
 still be a real directory with its original Git configuration and HEAD at the pin.
 Its working tree, outside `.git`, must match the snapshot taken right after the
@@ -132,7 +143,7 @@ retain their one-attempt fallback when capacity is unavailable.
 This coordination boundary is one host and one shared local state directory.
 Independent directories, remote filesystems, GitHub repository aliases caused by
 renames, and mixed coordinator versions are outside the boundary. Stop all workers
-before migration or backup. Companion repository validation is independent work.
+before migration or backup.
 
 ## Review independence
 
@@ -268,7 +279,53 @@ Projects store `queue_order` in their existing SQLite configuration. Queue edits
 use the affected repository lock and shared administrative gate. Inspection reads open issues and matching approvals
 without publishing changes. Eligible listed issues precede unlisted issues by
 creation time (issue number breaks ties). Explicit selection does not rewrite
-the queue. Existing active runs take priority; blocked, quota-waiting, handoff, and repair runs
+the queue. Existing active runs take priority; blocked, quota-waiting, handoff, repair, and stopped runs
 prevent new assignments. Targeted ticks reject conflicting work and limit
 reconciliation, notifications, and execution to the selected issue. Interrupted
 stages still require recovery. Completed runs retain their unique repository-wide issue claim.
+
+## Partial selections
+
+`select` persists immutable task or approved-issue scope, ordered operations,
+separate effect grants, and the endpoint before execution. Task runs store a NULL
+issue and use the same rotation, repository locks, isolated clones, stage journal,
+quota handling, and revision history as issue runs. The registry migration that
+permits NULL issues is transactional. Stop all workers before upgrading.
+
+Discovery records a read-only proposal report; issue preparation records local
+issue drafts. Validation can enter from a remote branch or commit without an
+author pass. Publication, review, and readiness consume compatible tracked
+validation/review evidence. Review can run locally without a PR. It writes GitHub
+evidence only for a published candidate and with the content grant. Existing PR
+adoption from outside the coordinator remains companion #10.
+
+Selections record cumulative requested/performed/unperformed operations and each
+continuation segment. Completed endpoints and rejections stop before successor
+work. A stopped selection holds the repository, including other registrations,
+and blocks queue work and new selections across restarts. Explicit continuation
+reuses the run; `close RUN_ID` releases the repository while preserving work and
+history and leaving GitHub issues and PRs open. Closing is terminal, so the same
+issue or task scope cannot restart the run. Close finished partial work only when
+no continuation is planned.
+Selected extension/adoption returns to a stop boundary. Failed evidence,
+contributor declarations, and revision limits survive re-entry. Identical task
+scope cannot be recreated to discard history, and rejected input commits cannot
+be imported into new runs. Local handoff edits require declared contributors;
+human-only edits are never labeled as work by the assigned model family. When an
+author pass has left uncommitted work, its family attribution survives a human
+handoff until the candidate commit records both contributors.
+
+Candidate fingerprints include working content, tracked trees and pins, exact
+HEAD/base, immutable scope, and execution configuration. Evidence-consuming stages
+check these again. Unpublished refresh merges in a fresh clone, journals the
+checkout swap, preserves previous work, and explicitly returns to validation.
+A later refresh reconciles a journaled swap without repeating integration.
+Separate effect grants gate local edits, push, GitHub content/status writes, and
+readiness. Legacy queue execution retains its established authorization contract.
+
+The `checks` operation records one GitHub CI snapshot for the tracked published
+candidate. It does not require or manufacture a review verdict and does not
+change readiness. The separate `ci` operation retains exact validation, independent
+review, and readiness prerequisites. Publication follows the selected successor,
+so an already reviewed local candidate can enter `publish ci` without a new review.
+Continuation segments retain their grants and effects alongside their revisions.

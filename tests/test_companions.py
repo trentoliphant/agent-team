@@ -47,6 +47,8 @@ class CompanionTests(unittest.TestCase):
             args = list(args)
             if "push" in args:
                 args[args.index("push") + 1] = str(self.remote)
+            if "fetch" in args:
+                args = [str(self.remote) if str(a).startswith("https://github.com/") else a for a in args]
             return git(cwd, *args)
 
         def public_clone(repo, destination, timeout):
@@ -245,6 +247,88 @@ class CompanionTests(unittest.TestCase):
         self.assertTrue(any(self.lib_v1 in body for body in reviews))
         self.assertTrue(any(self.lib_v2 in body for body in reviews))
         self.assertIn(self.lib_v2, self.github.comments[(7, f"{run['id']}-ready")])
+
+    def selected(self, run, count):
+        for _ in range(count):
+            run = self.team.tick("demo", run_id=run["id"])
+        return run
+
+    def test_selected_partial_workflow_renews_evidence_after_pin_change(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        v1, v2 = ([{"repo": "example/lib", "rev": rev}] for rev in (self.lib_v1, self.lib_v2))
+        run = self.team.select("demo", ["implement", "validate", "review"], ["edit"], task="Add feature.txt")
+        run = self.selected(run, 4)
+        self.assertEqual(run["stage"], "stopped")
+        self.assertEqual(self.store.workspace(run), self.store.run_root(run) / "author" / "demo")
+        self.assertEqual((run["validated_companions"], run["review_record"]["companions"]), (v1, v1))
+        history = {h["operation"]: h["companions"] for h in run["operation_history"]}
+        self.assertEqual((history["validate"], history["review"]), (v1, v1))
+        self.assertEqual(run["evidence_context"]["configuration"]["companions"], v1)
+        sha = run["sha"]
+        self.project["companions"][0]["rev"] = self.lib_v2
+        self.store.save_project(self.project)
+        # Publication cannot rely on validation or review gathered with the old pin.
+        with self.assertRaisesRegex(TeamError, "Companion pins changed"):
+            self.team.select("demo", ["publish"], ["push", "github"], run_id=run["id"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "validate"))
+        self.assertIsNone(run["validated_sha"])
+        self.assertIsNone(run["review_record"])
+        self.assertNotIn("push", run["grants"])
+        [old] = run["superseded_evidence"]
+        self.assertEqual((old["kind"], old["sha"], old["companions"]), ("review", sha, v1))
+        self.assertEqual(run["evidence_invalidations"][-1]["reason"], "Companion pins changed")
+        self.assertEqual((self.github.creates, self.github.statuses, self.github.comments), (0, [], {}))
+        run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"])
+        run = self.selected(run, 2)
+        self.assertEqual((run["stage"], run["sha"], run["reviewed_sha"]), ("stopped", sha, sha))
+        self.assertEqual((run["validated_companions"], run["review_record"]["companions"]), (v2, v2))
+        self.assertIn(f"example/lib at {self.lib_v2}", self.agents.prompts["review"])
+        self.assertEqual([role for _, role in self.agents.calls], ["implement", "review", "review"])
+        run = self.team.select("demo", ["publish"], ["push", "github"], run_id=run["id"])
+        run = self.selected(run, 1)
+        self.assertEqual((run["stage"], self.github.creates), ("stopped", 1))
+        self.assertIn(self.lib_v2, self.github.pull["body"])
+        self.assertNotIn(self.lib_v1, self.github.pull["body"])
+        # The reused verdict is published under a marker bound to its pins.
+        marker = f"{run['id']}-review-{run['round']}-{sha}-{companions.digest(v2)}"
+        self.assertIn(f"`example/lib` at `{self.lib_v2}`", self.github.comments[(7, marker)])
+        self.assertEqual(len(self.agents.calls), 3)
+
+    def test_selected_stage_with_changed_pins_stops_without_recording_it(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        run = self.team.select("demo", ["implement", "validate"], ["edit"], task="Add feature.txt")
+        run = self.selected(run, 3)
+        self.assertEqual(run["stage"], "stopped")
+        run = self.team.select("demo", ["review"], [], run_id=run["id"])
+        self.project["companions"][0]["rev"] = self.lib_v2
+        self.store.save_project(self.project)
+        run = self.selected(run, 1)
+        self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "validate"))
+        self.assertIn("Companion pins changed", run["error"])
+        self.assertNotIn("review", run["performed_operations"])
+        self.assertIsNone(run["validated_sha"])
+        self.assertEqual([role for _, role in self.agents.calls], ["implement"])
+
+    def test_unpublished_refresh_keeps_companion_layout(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        run = self.team.select("demo", ["implement", "validate"], ["edit"], task="Add feature.txt")
+        run = self.selected(run, 3)
+        self.assertEqual(run["stage"], "stopped")
+        source = self.root / "demo-source"
+        base = commit(source, {"base.txt": "Updated base\n"}, "Update base")
+        git(source, "push", str(self.remote), "HEAD:main")
+        with self.assertRaisesRegex(TeamError, "Base changed"):
+            self.team.select("demo", ["validate"], [], run_id=run["id"])
+        run = self.team.refresh(run["id"], authorize_edit=True)
+        author = self.store.workspace(run)
+        self.assertEqual(author, self.store.run_root(run) / "author" / "demo")
+        self.assertEqual(sorted(p.name for p in author.parent.iterdir()), ["demo", "lib"])
+        self.assertEqual((run["stage"], run["next_stage"], run["base_sha"]), ("stopped", "validate", base))
+        run = self.team.select("demo", ["validate"], [], run_id=run["id"])
+        run = self.selected(run, 1)
+        self.assertEqual((run["stage"], run["validated_sha"]), ("stopped", run["sha"]))
+        self.assertEqual(run["validated_companions"], [{"repo": "example/lib", "rev": self.lib_v1}])
 
     def test_validation_cannot_change_companions(self):
         for name, command in (("contents", "echo changed > ../lib/lib.txt"),

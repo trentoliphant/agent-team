@@ -166,6 +166,7 @@ agent-team project add suite your-account/builder \
 - Validation results, review comments, the PR description, and the ready comment
   list the companion pins. If a pin changes, earlier validation and review no longer
   count. The same commit is validated and reviewed again with the new pins.
+  A partial selection stops instead; continue it from `validate`.
 - A missing pin, a missing manifest, an undeclared manifest entry, or an
   unpublished revision blocks the run.
 - Validation commands and reviewers must not change companions. A moved HEAD,
@@ -248,7 +249,7 @@ agent-team project configure example --max-quota-retries 3
   Once assigned, the snapshot is immutable: restore it to resume, or close the
   run and create a new linked issue for changed scope.
 
-An unresolved blocked, quota, handoff, or repair run stops new assignments for
+An unresolved blocked, quota, handoff, repair, or stopped run stops new assignments for
 that repository, including its other registrations. Ready
 and stale PRs do not stop new assignments. A changed PR head/base becomes stale
 and requires `refresh`; `resume` cannot reuse its old evidence.
@@ -278,7 +279,7 @@ Explicit selection requires an open issue with current approval and the ready
 label. Invalid selections fail without choosing another issue or changing the
 saved order. An eligible existing run continues without duplication; completed
 runs cannot restart. Another issue's active work or recovery (blocked, quota,
-handoff, or repair) prevents targeted execution. Saved ordering applies to new assignments and never
+handoff, repair, or stopped) prevents targeted execution. Saved ordering applies to new assignments and never
 preempts an active run or bypasses recovery.
 
 Targeted watch advances only the selected issue and stops at readiness, pause,
@@ -529,3 +530,163 @@ checks on Linux and macOS with Python 3.11 and 3.14.
 
 See [architecture and limitations](docs/architecture.md),
 [security](docs/security.md), and [contributing](CONTRIBUTING.md).
+
+## Selected portions of the workflow
+
+Use `select` to save the scope, operations, effect grants, and final operation.
+It prints the effects before saving and does not execute work. Add `--plan` to
+preview without saving. Run the returned ID with `run PROJECT --run RUN_ID --watch`.
+A single tick also works. Watch and later restarts retain the saved selection.
+
+Input is either an approved issue (`--issue NUMBER`) or explicit task scope and
+acceptance criteria (`--task TEXT`). Existing work also takes `--ref BRANCH_OR_SHA`
+and declarations for every contributor (`--contributor human|openai|anthropic`,
+repeatable). Revisions are fetched from the registered repository into an isolated
+checkout. The resolved commit and base are recorded. Tasks have no GitHub issue;
+no synthetic issue is created. Issue-backed runs still require the existing
+approval fingerprint and ready label. Task scope is immutable once selected.
+
+| Operation | Input | Effects | Prerequisites |
+| --- | --- | --- | --- |
+| `discovery` | Scoped task or approved issue, optional ref | Subscription investigation, local proposals | Trusted registered repository |
+| `issue_prepare` | Task, issue, or tracked discovery | Local issue drafts for human triage | Explicit scope; never approves an issue |
+| `implement` | Task, approved issue, or tracked run | Subscription author edits in isolated checkout | `edit` grant |
+| `revision` | Tracked rejected run | Subscription fixes using recorded feedback | `edit` grant, remaining revision budget |
+| `validate` | Existing branch/commit or tracked work | Fresh candidate clone, configured tests; local commit if needed | Declared external contributors; `edit` grant for dirty work |
+| `publish` | Tracked validated candidate | Push, draft PR creation/update, statuses | Compatible exact-commit validation; `push` and `github` grants |
+| `review` | Tracked validated candidate, with or without a PR | Fresh independent subscription review, local evidence; comments/statuses for a published candidate with `github` grant | Compatible validation, reviewer family absent from contributors |
+| `checks` | Tracked published PR | Read CI once; store exact revision, state, and time locally | Unchanged tracked PR head/base; no review or readiness grant needed |
+| `ci` | Tracked reviewed PR | CI reads, status/comment writes, readiness change | Exact passing validation and review, unchanged head/base, `github` and `readiness` grants |
+
+Select one operation or an ordered sequence. Publication can be omitted before
+local review. New branch/commit work can enter at validation; it does not need an
+implementation pass. Individual publication, review, and readiness operations
+reuse a tracked run's compatible evidence. They refuse missing prerequisites;
+select validation first when there is no recorded evidence. Adopting an existing
+PR from outside Agent Team is companion issue #10. No command merges PRs.
+
+Grants are separate: `edit` permits local source edits and candidate commits,
+`push` permits topic-branch publication, `github` permits GitHub content and
+statuses, and `readiness` permits marking a PR ready. Issue-backed selections with
+`github` also publish progress comments. A grant does not select additional
+operations. Granted effects persist on the tracked run. Continuation can add
+explicit grants without asking for those already granted. Issue preparation
+produces local drafts; the existing `discover` command still investigates and
+creates up to three unready issues in one explicitly requested operation.
+
+```sh
+# Implementation and validation without publication, using explicit task scope:
+agent-team select example --task 'Add a CSV exporter; preserve JSON output and test both formats' \
+  --operations implement validate --grant edit
+agent-team run example --run RUN_ID --watch
+
+# Validation only, starting from an existing branch:
+agent-team select example --task 'Validate the existing CSV exporter against the configured checks' \
+  --ref csv-export --contributor human --operations validate
+agent-team run example --run RUN_ID --watch
+
+# Publish that validated work, without another author pass or new issue:
+agent-team select example --run RUN_ID --operations publish --grant push --grant github
+agent-team run example --run RUN_ID --watch
+
+# Inspect CI without review, success status, or readiness changes:
+agent-team select example --run RUN_ID --operations checks
+agent-team run example --run RUN_ID --watch
+
+# Review only, reusing exact-commit validation; it can also run before publication:
+agent-team select example --run RUN_ID --operations review
+agent-team run example --run RUN_ID --watch
+
+# After rejection, revise and review locally without pushing fixes:
+agent-team select example --run RUN_ID --operations revision validate review --grant edit
+agent-team run example --run RUN_ID --watch
+
+# Publish the reviewed candidate, then run CI/readiness explicitly:
+agent-team select example --run RUN_ID --operations publish --grant push --grant github
+agent-team run example --run RUN_ID --watch
+agent-team select example --run RUN_ID --operations ci --grant readiness
+agent-team run example --run RUN_ID --watch
+
+# Or publish and check readiness together after a compatible local review:
+agent-team select example --run RUN_ID --operations publish ci \
+  --grant push --grant github --grant readiness
+agent-team run example --run RUN_ID --watch
+
+# Discovery and issue preparation, ending with drafts for a human:
+agent-team select example --task 'Investigate onboarding gaps and prepare evidence-backed issue drafts' \
+  --operations discovery issue_prepare
+agent-team run example --run RUN_ID --watch
+agent-team inspect RUN_ID
+```
+
+`stopped` means the selected work ended, not that the whole workflow passed.
+A stopped run holds the repository across restarts, including its other
+registrations. It blocks queue work and new selections until explicitly continued
+with `select --run RUN_ID` (or legacy `continue`) or closed with
+`agent-team close RUN_ID`. Close finished partial work when no continuation is
+planned. Closing preserves work and history, leaves GitHub issues and PRs open,
+and releases the repository for other runs. It is terminal: the same issue or
+task scope cannot be selected again to restart that run.
+`inspect` records cumulative requested and performed operations, omitted stages
+outside those requests, unperformed operations, continuation segments, input revisions, contributor declarations, validation,
+review, and output stages. Each continuation records its grants and effects;
+the current effect plan describes the selected segment. Publication follows the
+selected successor and reuses compatible local review without another review call.
+Publication posts that stored review on the PR with its original comment marker.
+Readiness reconciles the review comment before marking the PR ready; a failed
+comment write leaves it draft.
+Any validation or review rejection stops a selection
+before fixes. Revision exhaustion still requires `decide`; selecting another
+entry does not reset rounds, limits, or rejected commits. A task with the same
+scope cannot be recreated to discard its history. Rejected commits cannot be
+imported into a fresh run. An extension or adoption on a selected run returns to
+an explicit stop point; reselect the intended operations.
+
+`checks` records a single CI snapshot, including pending or failing results, and
+stops. Re-enter explicitly to obtain another snapshot. It never substitutes for
+validation or independent review and never marks a PR ready, even if readiness
+was granted earlier. Issue progress comments remain subject to any saved `github`
+grant. `ci` polls pending checks and changes readiness only with all prerequisites.
+
+Continuation fingerprints HEAD, tree, working files, scope, and execution
+configuration. Trees include tracked dependency pins. Changed evidence loses
+validation and review eligibility. Local edits or HEAD changes require declared
+contributors before re-entry. The reviewer's family is refused. Human edits are
+committed with a human contributor trailer rather than attributed to the assigned
+author family. A declared human repair can re-enter at validation and review
+without another author pass, under the same revision budget. Candidate and configuration drift are checked again before
+publication, review, and readiness. Valid contributor declarations and a sequence
+starting at validation or an earlier rebuilding stage invalidate old evidence
+and continue in one selection. Evidence-consuming entry points still refuse
+changed inputs until their prerequisites are rebuilt. Changed remote head/base commits invalidate
+readiness. External PR-head adoption remains subject to #10 and existing #7
+repair rules; it is never inferred from trailers alone.
+
+For unpublished base drift, use `agent-team refresh RUN_ID --grant edit`. It
+integrates the current base into a separate clone, preserves the old checkout,
+invalidates evidence, and returns to `stopped` with `next_stage=validate`. Declare
+contributors with `--contributor` if the local committed HEAD changed. Dirty
+work must be committed before integration. Conflicts keep the original checkout.
+The swap is journaled; another explicit refresh reconciles an interrupted swap
+without repeating the merge. Published refresh also returns selected work to
+an explicit validation boundary.
+
+The original queue workflow remains available. For an approved issue,
+`run example --issue 123 --stop-after validate --watch` retains its existing
+preparation, implementation, and issue-progress writes. Endpoints are
+`implement`, `validate`, `publish`, `review`, and `ci`. The CI endpoint goes through
+readiness only if preceding validation and review pass; **any rejection stops a
+run with a stop point**. `continue RUN_ID --operations validate` retains legacy
+contiguous continuation, accepts contributor declarations, and preserves the
+revision budget. Use `select --run` for individually selected operations and
+separate effect grants. `resume` recovers interrupted work within its saved
+selection; it does not extend an endpoint.
+
+Existing input refs must contain the current registered base. Selection checks
+this before claiming task scope and checks again during preparation. Integrate
+the base into the input branch before entry. Trailer-detected model families
+join declared contributors and determine the independent reviewer. Rejected
+commits and input from both model families are refused before scope is claimed.
+If the input becomes invalid after selection, preparation leaves no author
+checkout. Correct the input branch, inspect the blocked run, then explicitly
+resume it. Selection and preparation revisions remain recorded in provenance.
