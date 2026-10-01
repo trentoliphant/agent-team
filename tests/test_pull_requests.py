@@ -1,17 +1,17 @@
 """Adoption of existing pull requests. Local Git fixtures and fake providers only; no model or GitHub calls."""
 from pathlib import Path
 import re
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from agent_team.cli import parser
 from agent_team.coordinator import Coordinator, pull_number
 from agent_team.github import GitHub
-from agent_team.process import execute, git, TeamError
-from agent_team.state import Store
+from agent_team.process import git, TeamError
 
-from tests.test_coordinator import FakeAgents, FakeGitHub
+# A module import keeps discovery from running WorkflowTests here again.
+from tests import test_coordinator
+from tests.test_coordinator import FakeGitHub
 
 COMMIT = ["-c", "user.name=Human", "-c", "user.email=human@example.invalid", "-c", "commit.gpgsign=false"]
 
@@ -50,35 +50,17 @@ class PullGitHub(FakeGitHub):
 
 class PullRequestTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        # The workflow fixture, with pull requests and fetches of their refs/pull heads.
+        test_coordinator.WorkflowTests.setUp(self)
         self.source = self.root / "source"
-        self.source.mkdir()
-        execute(["git", "init", "-b", "main", str(self.source)])
-        (self.source / "README.md").write_text("Fixture\n")
-        git(self.source, "add", ".")
-        git(self.source, *COMMIT, "commit", "-m", "Initial")
-        self.remote = self.root / "remote.git"
-        execute(["git", "clone", "--bare", str(self.source), str(self.remote)])
-        self.store = Store(self.root / "state")
-        self.project = self.store.register("demo", "example/demo", "main", ["test -f feature.txt"])
         self.github = PullGitHub(self.remote)
-        self.agents = FakeAgents()
         self.team = Coordinator(self.store, self.github, self.agents)
-
-        def local_clone(repo, destination, base, timeout):
-            return execute(["git", "clone", "--branch", base, str(self.remote), str(destination)], timeout=timeout)
-
-        self.clone_patch = patch("agent_team.coordinator.clone_repository", side_effect=local_clone)
+        self.git_patch.stop()
         self.git_patch = patch("agent_team.coordinator.git", side_effect=self.local_git)
-        self.clone_patch.start()
         self.git_patch.start()
 
     def tearDown(self):
-        self.clone_patch.stop()
-        self.git_patch.stop()
-        self.store.db.close()
-        self.tmp.cleanup()
+        test_coordinator.WorkflowTests.tearDown(self)
 
     def local_git(self, cwd, *args):
         args = list(args)
@@ -91,35 +73,37 @@ class PullRequestTests(unittest.TestCase):
                     if (m := re.fullmatch(r"refs/pull/(\d+)/head", str(a))) else a for a in args]
         return git(cwd, *args)
 
-    def open_pr(self, number=7, branch="feature", head_repo="example/demo", base="main", message="Add feature",
-                user="octocat", maintainer_can_modify=False):
-        git(self.source, "checkout", "-B", branch, git(self.remote, "rev-parse", base))
-        (self.source / "feature.txt").write_text("external feature\n")
+    def commit(self, branch, start, name, text, message):
+        """Push a human commit on top of the remote's `start` branch to `branch`."""
+        git(self.source, "fetch", str(self.remote), start)
+        git(self.source, "checkout", "-B", branch, "FETCH_HEAD")
+        (self.source / name).write_text(text)
         git(self.source, "add", ".")
         git(self.source, *COMMIT, "commit", "-m", message)
         git(self.source, "push", str(self.remote), f"HEAD:refs/heads/{branch}")
+        return git(self.source, "rev-parse", "HEAD")
+
+    def open_pr(self, number=7, branch="feature", head_repo="example/demo", base="main", message="Add feature",
+                user="octocat", maintainer_can_modify=False):
         self.github.pulls[number] = {"title": "Existing feature", "body": "Human description", "state": "open",
                                      "merged": False, "draft": True, "user": user, "branch": branch,
                                      "head_repo": head_repo, "base": base,
                                      "maintainer_can_modify": maintainer_can_modify}
-        return git(self.source, "rev-parse", "HEAD")
+        return self.commit(branch, base, "feature.txt", "external feature\n", message)
 
-    def push_external(self, branch="feature", text="human follow-up\n", message="External change"):
-        git(self.source, "fetch", str(self.remote), branch)
-        git(self.source, "checkout", "-B", branch, "FETCH_HEAD")
-        (self.source / "external.txt").write_text(text)
-        git(self.source, "add", ".")
-        git(self.source, *COMMIT, "commit", "-m", message)
-        git(self.source, "push", str(self.remote), f"HEAD:refs/heads/{branch}")
-        return git(self.source, "rev-parse", "HEAD")
+    def push_external(self, branch="feature", message="External change"):
+        return self.commit(branch, branch, "external.txt", "human follow-up\n", message)
 
     def advance_base(self):
-        git(self.source, "checkout", "-B", "main", git(self.remote, "rev-parse", "main"))
-        (self.source / "base.txt").write_text("Updated base\n")
-        git(self.source, "add", ".")
-        git(self.source, *COMMIT, "commit", "-m", "Update base")
-        git(self.source, "push", str(self.remote), "HEAD:refs/heads/main")
-        return git(self.source, "rev-parse", "HEAD")
+        return self.commit("main", "main", "base.txt", "Updated base\n", "Update base")
+
+    def writable(self, mode="revise", **options):
+        """Adopt PR #7 with push access to its repository and every adoption grant."""
+        self.github.permissions["example/demo"] = True
+        return self.team.adopt_pr("demo", "7", mode, ["human"], grants=["edit", "push", "github"], **options)
+
+    def reviewed(self, number="7", count=3, contributors=("human",), **options):
+        return self.ticks(self.team.adopt_pr("demo", number, "review", list(contributors), **options), count)
 
     def ticks(self, run, count):
         for _ in range(count):
@@ -205,7 +189,7 @@ class PullRequestTests(unittest.TestCase):
         head = self.open_pr()
         self.agents.reject = True
         self.agents.summary = "Feature text is wrong"
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         self.assertEqual((run["stage"], run["review_record"]), ("stopped", None))
         self.assertEqual(self.github.comments, {})
         review = self.team.pr_report(run["id"])["review"]
@@ -237,9 +221,8 @@ class PullRequestTests(unittest.TestCase):
 
     def test_review_and_revise_pushes_fast_forward_to_existing_branch(self):
         head = self.open_pr()
-        self.github.permissions["example/demo"] = True
         self.agents.reject = 1
-        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit", "push", "github"])
+        run = self.writable()
         self.assertEqual(run["operations"], ["validate", "review"])
         self.assertEqual(run["pr_followup"], ["revision", "validate", "publish", "review"])
         run = self.ticks(run, 7)
@@ -413,7 +396,7 @@ class PullRequestTests(unittest.TestCase):
         self.store.update_project("demo", max_revisions=2)
         self.open_pr()
         self.agents.reject = True
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         self.assertEqual((run["stage"], run["round"]), ("stopped", 1))
         self.store.save(run, stage="closed")
         self.push_external()
@@ -456,7 +439,7 @@ class PullRequestTests(unittest.TestCase):
             with self.subTest(number=number):
                 head = self.open_pr(number, branch, base=base)
                 self.agents.reject = True
-                run = self.ticks(self.team.adopt_pr("demo", str(number), "review", contributors), 3)
+                run = self.reviewed(str(number), contributors=contributors)
                 self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
                 calls = list(self.agents.calls)
                 with self.assertRaisesRegex(TeamError, message):
@@ -481,7 +464,7 @@ class PullRequestTests(unittest.TestCase):
 
     def readiness_run(self):
         head = self.open_pr()
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"]), 3)
+        run = self.reviewed(grants=["github"])
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
         self.assertEqual(self.team.pr_report(run["id"])["ci_checks"], "not checked")
         return head, self.team.select("demo", ["ci"], ["github", "readiness"], run_id=run["id"])
@@ -563,8 +546,7 @@ class PullRequestTests(unittest.TestCase):
 
     def test_concurrent_head_change_requires_deliberate_update(self):
         self.open_pr()
-        run = self.team.adopt_pr("demo", "7", "review", ["human"])
-        run = self.ticks(run, 2)
+        run = self.reviewed(count=2)
         self.assertEqual(run["stage"], "review")
         external = self.push_external()
         run = self.ticks(run, 1)
@@ -590,7 +572,7 @@ class PullRequestTests(unittest.TestCase):
     def test_base_movement_after_stopped_review_retires_evidence_and_is_never_merged(self):
         head = self.open_pr()
         old = git(self.remote, "rev-parse", "main")
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         self.assertEqual(run["reviewed_sha"], head)
         self.assertTrue(self.team.pr_report(run["id"])["independent_review_success"])
         base = self.advance_base()
@@ -615,10 +597,8 @@ class PullRequestTests(unittest.TestCase):
 
     def test_head_moved_before_publication_is_never_overwritten(self):
         self.open_pr()
-        self.github.permissions["example/demo"] = True
         self.agents.reject = 1
-        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit", "push", "github"])
-        run = self.ticks(run, 5)
+        run = self.ticks(self.writable(), 5)
         self.assertEqual(run["stage"], "publish")
         local = run["sha"]
         external = self.push_external()
@@ -634,10 +614,8 @@ class PullRequestTests(unittest.TestCase):
 
     def test_interrupted_push_reconciles_without_force(self):
         self.open_pr()
-        self.github.permissions["example/demo"] = True
         self.agents.reject = 1
-        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit", "push", "github"])
-        run = self.ticks(run, 5)
+        run = self.ticks(self.writable(), 5)
         self.assertEqual(run["stage"], "publish")
 
         def lost_response(cwd, *args):
@@ -659,8 +637,7 @@ class PullRequestTests(unittest.TestCase):
 
     def test_interrupted_review_comment_is_retried_without_review_call(self):
         head = self.open_pr()
-        run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
-        run = self.ticks(run, 2)
+        run = self.reviewed(count=2, grants=["github"])
         real = self.github.comment
 
         def fail(repo, number, marker, *args, **kwargs):
@@ -681,8 +658,7 @@ class PullRequestTests(unittest.TestCase):
     def test_head_movement_during_review_keeps_evidence_local(self):
         head = self.open_pr()
         self.agents.reject = True
-        run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
-        run = self.ticks(run, 2)
+        run = self.reviewed(count=2, grants=["github"])
         self.assertEqual(run["stage"], "review")
         run = self.tick_moving_during_review(run)
         self.assertEqual(run["stage"], "stale")
@@ -705,7 +681,7 @@ class PullRequestTests(unittest.TestCase):
     def test_local_review_movement_retires_evidence(self):
         head = self.open_pr()
         base = git(self.remote, "rev-parse", "main")
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 2)
+        run = self.reviewed(count=2)
         self.assertEqual(run["stage"], "review")
         # Without a github grant nothing is queued for publication, yet the PR is still rechecked.
         run = self.tick_moving_during_review(run)
@@ -733,7 +709,7 @@ class PullRequestTests(unittest.TestCase):
     def test_deliberate_update_snapshots_review(self):
         head = self.open_pr()
         base = git(self.remote, "rev-parse", "main")
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
         external = self.push_external()
         # Update directly from the stopped run, before any tick notices the movement.
@@ -754,7 +730,7 @@ class PullRequestTests(unittest.TestCase):
             with self.subTest(change=change):
                 branch = f"feature-{number}"
                 head = self.open_pr(number, branch)
-                run = self.ticks(self.team.adopt_pr("demo", str(number), "review", ["human"], grants=["github"]), 3)
+                run = self.reviewed(str(number), grants=["github"])
                 self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
                 if "branch" in change:
                     git(self.remote, "branch", change["branch"], head)
@@ -774,9 +750,7 @@ class PullRequestTests(unittest.TestCase):
 
     def test_continuation_after_update_stops_on_rejection_without_revision(self):
         head = self.open_pr()
-        self.github.permissions["example/demo"] = True
-        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit", "push", "github"])
-        run = self.ticks(run, 3)
+        run = self.ticks(self.writable(), 3)
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
         external = self.push_external()
         run = self.ticks(run, 1)
@@ -850,7 +824,7 @@ class PullRequestTests(unittest.TestCase):
                 branch = f"branch-{number}"
                 self.open_pr(number, branch)
                 self.agents.reject = True
-                run = self.ticks(self.team.adopt_pr("demo", str(number), "review", ["human"]), 3)
+                run = self.reviewed(str(number))
                 self.assertTrue(run["independence"]["established"])
                 self.assertEqual(run["stage"], "handoff")
                 run = self.team.decide(run["id"], "repair")
@@ -896,8 +870,7 @@ class PullRequestTests(unittest.TestCase):
 
     def test_base_movement_before_comment_retry_keeps_evidence_local(self):
         head = self.open_pr()
-        run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
-        run = self.ticks(run, 2)
+        run = self.reviewed(count=2, grants=["github"])
         with patch.object(self.github, "comment", side_effect=TeamError("GitHub unavailable")), \
                 self.assertRaises(TeamError):
             self.ticks(run, 1)
@@ -915,7 +888,7 @@ class PullRequestTests(unittest.TestCase):
     def test_movement_during_first_outbox_write_withholds_later_evidence(self):
         head = self.open_pr()
         self.agents.reject = True
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"]), 2)
+        run = self.reviewed(count=2, grants=["github"])
         self.assertEqual(run["stage"], "review")
         real = self.github.comment
 
@@ -941,7 +914,7 @@ class PullRequestTests(unittest.TestCase):
     def interrupted_update(self, point):
         """Interrupt update_pr at `point`, then recover by running the update again."""
         head = self.open_pr()
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         external = self.push_external()
         run = self.ticks(run, 1)
         self.assertEqual(run["stage"], "stale")
@@ -996,9 +969,7 @@ class PullRequestTests(unittest.TestCase):
 
     def test_supplied_findings_are_revised_with_fresh_evidence(self):
         head = self.open_pr()
-        self.github.permissions["example/demo"] = True
-        run = self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit", "push", "github"],
-                                 findings=["Append a closing line to feature.txt"])
+        run = self.writable("findings", findings=["Append a closing line to feature.txt"])
         self.assertEqual(run["operations"], ["revision", "validate", "publish", "review"])
         run = self.ticks(run, 5)
         self.assertEqual(run["stage"], "stopped")
@@ -1029,8 +1000,7 @@ class PullRequestTests(unittest.TestCase):
         self.store.update_project("demo", max_revisions=0)
         self.open_pr()
         self.agents.reject = True
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
-        return self.team.decide(run["id"], "repair")
+        return self.team.decide(self.reviewed()["id"], "repair")
 
     def test_repair_adoption_refuses_changed_head_identity(self):
         for change in ("repository", "branch"):
@@ -1057,7 +1027,7 @@ class PullRequestTests(unittest.TestCase):
 
     def test_evidence_is_invalidated_by_configuration_change(self):
         self.open_pr()
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         self.store.update_project("demo", tests=["true"])
         with self.assertRaisesRegex(TeamError, "evidence invalidated"):
             self.team.select("demo", ["review"], [], run_id=run["id"])
@@ -1068,7 +1038,7 @@ class PullRequestTests(unittest.TestCase):
         self.store.update_project("demo", max_revisions=0)
         self.open_pr()
         self.agents.reject = True
-        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        run = self.reviewed()
         self.assertEqual(run["stage"], "handoff")
         self.assertIn("feature.txt:1", run["handoffs"][0]["text"])
         run = self.team.decide(run["id"], "repair")

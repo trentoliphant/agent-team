@@ -299,22 +299,15 @@ validation/review evidence. Review can run locally without a PR. It writes GitHu
 evidence only for a published candidate and with the content grant.
 
 `pr review|revise|findings` adopts an existing PR as a selected run with no
-issue (user-facing rules are in the README). Its published commit is the PR head;
-the base is never merged. Revision modes store `pr_followup`
-(`revision validate [publish] review`), entered by a rejection within the budget;
-`select --run` releases it (`released_pr_followup`). In `pr revise`, a failed
-validation of the unedited head stays pending (`attempted_context`) until review
-runs, and one rejection records both. Unknown, mixed, or unresolved trailer
-authorship sets `independence.established=false`, so review records
-`review_withheld` instead of `reviewed_sha`. Movement of the head, base, or head
-repository/branch, found by reconciliation, before a push, after an adopted
-review, or before each evidence or readiness write, retires evidence to
-`evidence_invalidations` (`historical_evidence` in `pr show`), moves remaining
-writes to `unpublished_evidence`, and stops the run as `stale`. Re-adoption
-inherits the highest round, revision limit, and `rejected_shas` of earlier runs
-(`prior_runs`); a findings revision spends its round before the budget check.
-`pr update` journals the swap and invalidation (`pending_pr_update`) before
-renaming directories, so rerunning it completes an interrupted update.
+issue (rules are in the README). Its published commit is the PR head; the base is
+never merged. Revision modes store `pr_followup`, entered by a rejection within
+the budget and released by `select --run`. A failed validation of the unedited
+head stays pending (`attempted_context`) until review, and one rejection records
+both. Unestablished independence records `review_withheld`, not `reviewed_sha`.
+Movement retires evidence to `evidence_invalidations`, moves queued writes to
+`unpublished_evidence`, and stops the run as `stale`. Re-adoption inherits the
+round, limit, and `rejected_shas` of `prior_runs`. `pr update` journals its swap
+(`pending_pr_update`) before renaming, so a rerun completes it.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

@@ -136,8 +136,7 @@ def contributing_families(run, extra=()):
 
 
 def assess_independence(declared, families, unresolved=()):
-    """Whether any agent family can review independently. Unknown or mixed authorship cannot be
-    resolved by guessing, so the review still reports findings but never claims independent success."""
+    """Whether any agent family can review independently; unknown or mixed authorship is never guessed."""
     if {"openai", "anthropic"} <= set(families):
         return {"established": False, "reason": "both model families contributed"}
     if "unknown" in declared:
@@ -149,8 +148,7 @@ def assess_independence(declared, families, unresolved=()):
 
 
 def split_trailers(text):
-    """Agent-Family trailer values as (supported model families, unresolved values). Unresolved values
-    are provenance nobody can attribute; they are recorded, never mapped to an agent."""
+    """Agent-Family trailer values as (supported families, unresolved values never mapped to an agent)."""
     values = {line.strip().casefold() for line in text.splitlines() if line.strip()}
     supported = set(FAMILIES.values())
     return sorted(values & supported), sorted(values - supported)
@@ -1285,8 +1283,7 @@ class Coordinator:
 
     @staticmethod
     def adopted_revision_refusal(project, run):
-        """Why an adopted PR may not be edited, if anything. Checked before every author operation,
-        including continuations and recovery, because adoption's own checks do not cover later paths."""
+        """Why an adopted PR may not be edited, if anything; checked before every author operation."""
         info = run.get("adopted_pr")
         if not info:
             return None
@@ -1428,8 +1425,7 @@ class Coordinator:
 
     @staticmethod
     def review_first(run):
-        """Whether a selected review must still review the adopted PR's unedited head, even when it
-        failed validation. Review-only then reports both and stops; review-and-revise edits only after."""
+        """Whether the adopted PR's unedited head must be reviewed, even when it failed validation."""
         info = run.get("adopted_pr")
         return bool(info and (info["mode"] == "review" or (info["mode"] == "revise" and run.get("pr_followup")))
                     and "review" in run.get("operations", []) and run.get("sha") == info["head_sha"]
@@ -1452,8 +1448,7 @@ class Coordinator:
         if review:
             entry["review"] = {k: review[k] for k in ("agent", "family", "cli_version",
                                                       "requested_model", "observed_models")}
-            # The reviewer's own report, kept apart from the combined rejection: a passing review of a
-            # commit that failed validation is still reported as a pass.
+            # The reviewer's own report, kept apart from the combined rejection.
             entry["review_report"] = review["report"]
         changes = dict(feedback=feedback, revision_history=history + [entry],
                        rejected_shas=list(dict.fromkeys(run.get("rejected_shas", []) + [run["sha"]])))
@@ -1489,8 +1484,7 @@ class Coordinator:
                         **self.queue_writes(run, *writes))
 
     def compatible_validation(self, project, run, attempted=False):
-        """Check the candidate still matches its validation. `attempted` accepts a failed validation of
-        the same commit, which review-and-revise reviews before its first edit."""
+        """Check the candidate still matches its validation (or, if `attempted`, its failed validation)."""
         if not run.get("selection"):
             return
         # Before the context check, so a verdict gathered with other pins is kept as superseded history.
@@ -1556,8 +1550,7 @@ class Coordinator:
         self.github.status(project["repo"], sha, "pending", description)
 
     def publish_adopted(self, project, run):
-        """Push a validated revision to an adopted PR's existing head branch: fast-forward only, after
-        confirming the PR is open, untargeted, unmoved, and writable. Never creates or edits a PR."""
+        """Fast-forward an adopted PR's own head branch to a validated revision. Never creates or edits a PR."""
         self.compatible_validation(project, run)
         self.require_effect(run, "push")
         self.require_effect(run, "github")
@@ -1783,8 +1776,7 @@ class Coordinator:
         if not self.reconcile(project, run):
             return
         def moved(pr=None):
-            # After `reconcile`, an adopted PR is rechecked before each later readiness write;
-            # movement stops the run and retires the evidence.
+            # An adopted PR is rechecked before each later readiness write.
             change = run.get("adopted_pr") and self.adopted_pr_change(project, run, run["sha"], pr)
             if change:
                 self.adopted_pr_moved(run, *change)
@@ -1923,8 +1915,7 @@ class Coordinator:
 
     @staticmethod
     def reassess(run, declared, families, unresolved):
-        """Recompute independence after a contribution, persisting unresolved trailers. Authorship that
-        cannot be established withholds independent-review success; a later change never restores it."""
+        """Recompute independence after a contribution; once withheld, it is never restored."""
         info = run.get("adopted_pr")
         unresolved = sorted(set(run.get("unresolved_trailers", [])) | set((info or {}).get("unresolved_trailers", []))
                             | set(unresolved))
@@ -2228,8 +2219,7 @@ class Coordinator:
         return run
 
     def inspect_pr(self, project, cwd, number):
-        """Fetch a PR head through the base repository's pull ref (works for accessible forks) into a
-        clone of its base branch. Trailers count only commits the PR adds beyond the merge base."""
+        """Fetch a PR head through the base repository's pull ref, which also serves accessible forks."""
         base = git(cwd, "rev-parse", "HEAD")
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
         head = git(cwd, "rev-parse", "FETCH_HEAD^{commit}")
@@ -2242,8 +2232,7 @@ class Coordinator:
                 "commit_authors": sorted({line.strip() for line in authors.splitlines() if line.strip()})}
 
     def adopt_pr(self, name, reference, mode, contributors, grants=(), reviewer=None, findings=(), plan_only=False):
-        """Track an existing PR in a durable selected run without an issue, implementation pass, or new PR.
-        Review-only stops after reporting; revision modes edit the existing PR branch within the budget."""
+        """Track an existing PR in a durable selected run without an issue, implementation pass, or new PR."""
         project = self.store.project(name)
         number = pull_number(project, reference)
         if mode not in PR_MODES:
@@ -2391,8 +2380,7 @@ class Coordinator:
         return run
 
     def update_pr(self, run_id, contributors):
-        """Deliberately adopt a changed head or base of an adopted PR. The new head is checked out
-        as-is (no base merge), the previous checkout is preserved, and earlier evidence is invalidated."""
+        """Deliberately adopt a changed head or base of an adopted PR, as-is, preserving the old checkout."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
         info = run.get("adopted_pr")
@@ -2485,8 +2473,7 @@ class Coordinator:
         return self.finish_pr_update(project, run)
 
     def finish_pr_update(self, project, run):
-        """Finish a journaled checkout swap from update_pr. Each step is idempotent: the previous
-        checkout is moved aside only if it is still the recorded one, and nothing is deleted."""
+        """Finish a journaled checkout swap from update_pr idempotently; nothing is deleted."""
         pending = run["pending_pr_update"]
         cwd = self.store.workspace(run)
         fresh, preserved = Path(pending["fresh"]), Path(pending["preserved"])
@@ -2507,8 +2494,7 @@ class Coordinator:
         return run
 
     def pr_report(self, run_id):
-        """Local findings and an explicit account of performed and omitted checks for an adopted PR.
-        A revision that was not pushed is handed off as a local commit and patch."""
+        """Local findings, performed and omitted checks, and any local handoff for an adopted PR."""
         run = self.store.get(run_id)
         info = run.get("adopted_pr")
         if not info:

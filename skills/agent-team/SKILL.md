@@ -284,10 +284,8 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 ## Existing pull requests
 
-Recognize requests to review an existing PR, review and fix it, or fix findings
-someone supplied. Confirm the PR belongs to a registered repository. Ask which
-operation and which effects the operator authorizes; `--plan` previews without
-saving.
+Confirm the PR belongs to a registered repository and which operation and
+effects the operator authorizes; `--plan` previews without saving.
 
 ```sh
 agent-team pr review example 42 --contributor human
@@ -301,26 +299,20 @@ agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
 ```
 
-These are alternatives. `pr review` validates and reviews the current head, even
-if validation fails, then stops: no edits, pushes, base merges, or repair loop.
-Add `--grant github` only to publish the review. `pr revise` reviews the head
-first, then fixes findings on the PR's own branch within the revision budget and
-reviews the exact new commit. `pr findings` revises only the supplied findings and
-still requires fresh validation and review. A later `select --run` performs only
-the operations it names (`--operations revision validate publish review` to fix).
+These are alternatives. `pr review` validates and reviews the head, then stops
+without edits, pushes, base merges, or repair; `--grant github` publishes the
+review. `pr revise` then fixes findings on the PR's branch within the budget;
+`pr findings` revises only supplied findings. Both need fresh review of the exact
+result. A later `select --run` performs only the operations it names.
 
-Declare every contributor truthfully: `human`, `openai`, `anthropic`, or
-`unknown`, including your own family if you edited the branch. Never infer a model
-family from a GitHub username. With `unknown`, both families, or an unsupported
-`Agent-Family` trailer, independent-review success is withheld and revision is
-refused. Report that; never change declarations to get past it.
+Declare every contributor truthfully (`human`, `openai`, `anthropic`, `unknown`),
+including your own family. Never infer a family from a GitHub username. With
+`unknown`, both families, or an unsupported trailer, independent-review success
+is withheld and revision refused; report it, never change declarations.
 
-From `pr show`, report the PR, head and base commits, roles, validation, findings,
-checks run and omitted, and any local handoff. A standalone review is not a
-readiness verdict, and an unpublished local commit is never ready. When the head,
-base, or head branch moves, the run stops as `stale` and earlier evidence becomes
-`historical_evidence`. Inspect the change, then use `pr update` with the new
-contributors and reselect validation (a changed head repository or branch needs a
-new adoption). Without push access, give the operator the commit and patch from
-`pr show`. Never open a replacement PR, force-push, merge the base, reopen,
-retarget, change draft state, or merge.
+From `pr show`, report the head and base, roles, validation, findings, checks run
+and omitted, and any local handoff. A standalone review is not a readiness
+verdict. After movement (`stale`), inspect the change, run `pr update` with the
+new contributors, and reselect validation. Without push access, hand over the
+commit and patch. Never open a replacement PR, force-push, merge the base,
+reopen, retarget, change draft state, or merge.
