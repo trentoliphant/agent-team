@@ -359,7 +359,8 @@ class PullRequestTests(unittest.TestCase):
     def test_readoption_after_stopped_exhausted_run_keeps_budget(self):
         self.store.update_project("demo", max_revisions=1)
         self.open_pr()
-        self.agents.reject = True
+        # The existing head and its revision are both rejected (`True` counts as one rejection).
+        self.agents.reject = 2
         run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"])
         for _ in range(10):
             if run["stage"] == "handoff":
