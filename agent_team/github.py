@@ -130,6 +130,20 @@ class GitHub:
     def pr(self, repo, number):
         return self.api(f"repos/{repo}/pulls/{number}")
 
+    def push_access(self, project, pr):
+        """Whether the coordinator's identity can push to the PR's actual head branch. Fork heads
+        need write access to the fork, or maintainer edits enabled plus write access to the base."""
+        head = (pr["head"].get("repo") or {}).get("full_name")
+        if not head:
+            return {"allowed": False, "reason": "the head repository is unavailable"}
+        if (self.repo(head).get("permissions") or {}).get("push"):
+            return {"allowed": True, "reason": f"write access to {head}"}
+        if head.casefold() == project["repo"].casefold():
+            return {"allowed": False, "reason": f"no write access to {head}"}
+        if pr.get("maintainer_can_modify") and (self.repo(project["repo"]).get("permissions") or {}).get("push"):
+            return {"allowed": True, "reason": f"maintainer edits allowed on fork {head}"}
+        return {"allowed": False, "reason": f"no write access to fork {head} and maintainer edits are not available"}
+
     def mark_ready(self, repo, number):
         execute(["gh", "pr", "ready", str(number), "--repo", repo])
 

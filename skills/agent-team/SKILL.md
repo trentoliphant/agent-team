@@ -228,8 +228,8 @@ and ready label remain required. Tasks never require synthetic issues. Existing
 branches/commits require every contributor to be declared. Choose one operation
 or an ordered sequence; local review may omit publication. Individual publication,
 review, and CI reuse a tracked run's compatible evidence. Without such evidence,
-select validation first. Existing-PR adoption from outside Agent Team is #10;
-do not create a replacement PR or author pass to work around that limitation.
+select validation first. For a PR opened outside Agent Team, use `agent-team pr`
+(below); never create a replacement PR or author pass instead.
 After a compatible local review, `publish ci` publishes and checks readiness
 without repeating review. Publication posts the stored review on the PR;
 readiness requires its comment write to succeed. Inspect each continuation's grants and effects to
@@ -281,3 +281,46 @@ commits and input from both model families are refused before scope is claimed.
 If the input becomes invalid after selection, preparation leaves no author
 checkout. Correct the input branch, inspect the blocked run, then explicitly
 resume it. Selection and preparation revisions remain recorded in provenance.
+
+## Existing pull requests
+
+Recognize requests to review an existing PR, review and fix it, or fix findings
+someone supplied. Confirm the PR belongs to a registered repository. Ask which
+operation and which effects the operator authorizes; `--plan` previews without
+saving.
+
+```sh
+agent-team pr review example 42 --contributor human
+agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
+  --contributor human --grant edit --grant push --grant github
+agent-team pr findings example 42 --contributor human --grant edit --grant push --grant github \
+  --finding 'parser.py:88 drops the last field; keep it and add a test'
+agent-team run example --run RUN_ID --watch
+agent-team pr show RUN_ID
+agent-team pr update RUN_ID --contributor human
+agent-team select example --run RUN_ID --operations validate review
+```
+
+These are alternatives. `pr review` validates and reviews the current head, then
+stops: no edits, pushes, base merges, or repair loop. Add `--grant github` only if
+the operator wants the review comment and status published; otherwise report the
+findings from `pr show`. `pr revise` reviews the existing head first, then fixes
+findings on the PR's own branch within the revision budget and reviews the exact
+new commit. `pr findings` revises only the supplied findings and still requires
+fresh validation and independent review.
+
+Declare every contributor truthfully: `human`, `openai`, `anthropic`, or
+`unknown`, including your own family if you edited the branch. Never infer a model
+family from a GitHub username. With `unknown` or both families, independence
+cannot be established: review reports findings but withholds the
+independent-review success verdict, and revision is refused. Report that
+limitation; do not change the declarations to get past it.
+
+From `pr show`, report the PR, head and base commits, roles, validation, findings,
+the checks that ran and those omitted, and any local handoff. A standalone review
+does not check CI and is not a readiness verdict. When the head or base moves, the
+run stops as `stale` and pushes nothing. Inspect the change, then use `pr update`
+with the new contributors and reselect validation. Without push access (for
+example, a fork without maintainer edits), give the operator the local commit and
+patch from `pr show`. Never open a replacement PR, force-push, merge the base,
+reopen, retarget, change draft state, or merge.

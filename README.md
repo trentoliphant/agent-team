@@ -562,8 +562,9 @@ Select one operation or an ordered sequence. Publication can be omitted before
 local review. New branch/commit work can enter at validation; it does not need an
 implementation pass. Individual publication, review, and readiness operations
 reuse a tracked run's compatible evidence. They refuse missing prerequisites;
-select validation first when there is no recorded evidence. Adopting an existing
-PR from outside Agent Team is companion issue #10. No command merges PRs.
+select validation first when there is no recorded evidence. To review or revise
+a PR created outside Agent Team, use `agent-team pr` (see
+[Existing pull requests](#existing-pull-requests)). No command merges PRs.
 
 Grants are separate: `edit` permits local source edits and candidate commits,
 `push` permits topic-branch publication, `github` permits GitHub content and
@@ -659,8 +660,9 @@ publication, review, and readiness. Valid contributor declarations and a sequenc
 starting at validation or an earlier rebuilding stage invalidate old evidence
 and continue in one selection. Evidence-consuming entry points still refuse
 changed inputs until their prerequisites are rebuilt. Changed remote head/base commits invalidate
-readiness. External PR-head adoption remains subject to #10 and existing #7
-repair rules; it is never inferred from trailers alone.
+readiness. A changed head of an adopted PR needs `agent-team pr update`, and a
+changed head after the revision limit needs `adopt`. Neither is inferred from
+trailers alone.
 
 For unpublished base drift, use `agent-team refresh RUN_ID --grant edit`. It
 integrates the current base into a separate clone, preserves the old checkout,
@@ -690,3 +692,81 @@ commits and input from both model families are refused before scope is claimed.
 If the input becomes invalid after selection, preparation leaves no author
 checkout. Correct the input branch, inspect the blocked run, then explicitly
 resume it. Selection and preparation revisions remain recorded in provenance.
+
+### Existing pull requests
+
+`agent-team pr` adopts an open PR in the registered repository, whether a human,
+another tool, or Agent Team opened it. It needs no issue, no implementation pass,
+and no new PR. Pass a PR number or `https://github.com/OWNER/REPO/pull/NUMBER`.
+Adoption records the PR's head repository, branch, and commit, its base branch
+and commit, its state and draft flag, the requested operation, declared
+contributors, `Agent-Family` trailers, and GitHub usernames in a durable run.
+
+| Command | Operations | Grants |
+| --- | --- | --- |
+| `pr review` | Validate and review the current head, then stop. No edits, pushes, base merges, or repair loop. | Optional `github` publishes the review comment and status. |
+| `pr revise` | Validate and review the current head first. On rejection, revise the existing PR branch, revalidate, push, and review the exact new commit, within the revision budget. | `edit` required; `push` and `github` to push to the PR branch. |
+| `pr findings` | Revise the `--finding` items, validate, push, and review the exact result. | `edit` required; `push` and `github` to push to the PR branch. |
+
+```sh
+# Review an existing PR; findings stay local:
+agent-team pr review example 42 --contributor human
+agent-team run example --run RUN_ID --watch
+agent-team pr show RUN_ID
+
+# Review and fix it on its existing branch:
+agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
+  --contributor human --grant edit --grant push --grant github --plan
+agent-team pr revise example 42 --contributor human --grant edit --grant push --grant github
+agent-team run example --run RUN_ID --watch
+
+# Revise findings supplied by a human reviewer:
+agent-team pr findings example 42 --contributor human --grant edit --grant push --grant github \
+  --finding 'parser.py:88 drops the last field; keep it and add a test'
+agent-team run example --run RUN_ID --watch
+
+# Continue after someone pushes to the PR (the run stops as stale):
+agent-team pr update RUN_ID --contributor human
+agent-team select example --run RUN_ID --operations validate review
+agent-team run example --run RUN_ID --watch
+```
+
+`pr show` reports the findings, validation results, review verdict, roles,
+authorship, push access, and which checks ran or were omitted. A standalone review
+never checks GitHub CI and is never a readiness verdict. No `pr` command reopens,
+retargets, changes draft state, marks ready, or merges a PR. Readiness stays a
+separate `select --run RUN_ID --operations ci --grant readiness`, which requires
+exact-commit independent review.
+
+**Authorship.** Declare every contributor with `--contributor`: `human`, `openai`,
+`anthropic`, or `unknown`. GitHub usernames are recorded but never treated as a
+model family. Trailer families are added to the declarations. When one model
+family contributed, the other family reviews and the same family revises. When
+`unknown` is declared or both families contributed, independence cannot be
+established. `pr review` still reports findings but withholds the
+independent-review success verdict, and revision modes are refused.
+
+**Ownership.** A PR can be tracked by only one open run. Adopting it again, or
+adopting a PR that another run already tracks, is refused. The PR title,
+description, labels, and history are left unchanged.
+
+**Movement.** The head and base are checked before every push and whenever
+evidence is reused. If either moved, the run stops as `stale` and nothing is
+pushed. `pr update RUN_ID --contributor ...` adopts the new commits deliberately.
+It preserves the previous checkout, including any unpushed local revision, and
+invalidates earlier validation and review. The base is never merged into an
+adopted PR; if the head lacks the current base, `pr show` reports that. Pushes are
+plain fast-forward pushes; nothing is force-pushed. An interrupted push is
+reconciled from the recorded pending commit.
+
+**Forks and permissions.** Fork PRs can be reviewed when GitHub exposes their
+head. Before pushing, Agent Team checks the actual head repository. It pushes only
+with write access to it, or to a fork with maintainer edits enabled and write
+access to the base. Otherwise the revision is validated and reviewed locally, and
+`pr show` gives the commit and a patch to apply. No replacement PR is created.
+
+**State.** Closed and merged PRs are refused. Revision is refused for PRs that do
+not target the registered base; review-only is allowed and keeps the PR's own
+base. The revision budget, quota retries, and `handoff`/`decide`/`adopt` flow are
+the same as for other runs; an adopted repair is checked out as-is, without a
+base merge.

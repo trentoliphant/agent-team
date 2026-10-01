@@ -296,8 +296,23 @@ Discovery records a read-only proposal report; issue preparation records local
 issue drafts. Validation can enter from a remote branch or commit without an
 author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
-evidence only for a published candidate and with the content grant. Existing PR
-adoption from outside the coordinator remains companion #10.
+evidence only for a published candidate and with the content grant.
+
+`pr review|revise|findings` adopts an existing PR as a selected run with no
+issue. The run records the PR's head repository/branch/commit, base branch/commit,
+state, mode, declared contributors, trailer families, and GitHub identities
+(provenance only, never model authorship). Its published commit is the PR head,
+so validation and review run on the head as-is and the base is never merged.
+Review-only selects `validate review` and stops. Revision modes store a follow-up
+sequence (`revision validate [publish] review`) that a rejection enters within the
+revision budget. `publish` is omitted when the actual head repository cannot be
+written. Adopted publication checks that the PR is still open, untargeted, and
+unmoved, then pushes fast-forward only to the PR's own branch. It never creates or
+edits a PR. Unknown or mixed authorship records `independence.established=false`.
+Review then records `review_withheld` instead of `reviewed_sha`, so readiness
+stays unavailable. Head or base movement stops the run as `stale`; `pr update`
+journals the change, preserves the previous checkout and any unpushed commit, and
+invalidates evidence.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor
