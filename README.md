@@ -705,7 +705,7 @@ contributors, `Agent-Family` trailers, and GitHub usernames in a durable run.
 | Command | Operations | Grants |
 | --- | --- | --- |
 | `pr review` | Validate and review the current head, then stop. No edits, pushes, base merges, or repair loop. | Optional `github` publishes the review comment and status. |
-| `pr revise` | Validate and review the current head first. On rejection, revise the existing PR branch, revalidate, push, and review the exact new commit, within the revision budget. | `edit` required; `push` and `github` to push to the PR branch. |
+| `pr revise` | Validate and review the current head first, even if validation fails. On rejection or failed validation, revise the existing PR branch, revalidate, push, and review the exact new commit, within the revision budget. | `edit` required; `push` and `github` to push to the PR branch. |
 | `pr findings` | Revise the `--finding` items, validate, push, and review the exact result. | `edit` required; `push` and `github` to push to the PR branch. |
 
 ```sh
@@ -729,7 +729,15 @@ agent-team run example --run RUN_ID --watch
 agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
 agent-team run example --run RUN_ID --watch
+
+# If that review requests changes, fix them explicitly:
+agent-team select example --run RUN_ID --operations revision validate publish review
+agent-team run example --run RUN_ID --watch
 ```
+
+Automatic fixing belongs to the `pr revise` or `pr findings` selection that
+adopted the PR. A later `select --run` performs only the operations it names; a
+rejection after `--operations validate review` stops without editing or pushing.
 
 `pr show` reports the findings, validation results, review verdict, roles,
 authorship, push access, and which checks ran or were omitted. A standalone review
@@ -751,9 +759,11 @@ independent-review success verdict, and revision modes are refused.
 adopting a PR that another run already tracks, is refused. The PR title,
 description, labels, and history are left unchanged.
 
-**Movement.** The head and base are checked before every push and whenever
-evidence is reused. If either moved, the run stops as `stale` and nothing is
-pushed. `pr update RUN_ID --contributor ...` adopts the new commits deliberately.
+**Movement.** The head and base are checked before every push, after every
+review (with or without `github`), and whenever evidence is reused. If either
+moved, the run stops as `stale` and nothing is pushed. Its validation and review
+no longer count: `pr show` lists them under `historical_evidence` with the head
+and base they covered, and reports `current_evidence: false`. `pr update RUN_ID --contributor ...` adopts the new commits deliberately.
 It preserves the previous checkout, including any unpushed local revision, and
 invalidates earlier validation and review. The base is never merged into an
 adopted PR; if the head lacks the current base, `pr show` reports that. Pushes are

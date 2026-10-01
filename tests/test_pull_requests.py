@@ -493,6 +493,107 @@ class PullRequestTests(unittest.TestCase):
         run = self.team.update_pr(run["id"], ["human"])
         self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "validate"))
 
+    def test_local_review_movement_retires_evidence(self):
+        head = self.open_pr()
+        base = git(self.remote, "rev-parse", "main")
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 2)
+        self.assertEqual(run["stage"], "review")
+        real = self.agents.run
+
+        def moving(agent, role, *args, **kwargs):
+            if role == "review":
+                self.push_external()
+            return real(agent, role, *args, **kwargs)
+
+        # Without a github grant nothing is queued for publication, yet the PR is still rechecked.
+        with patch.object(self.agents, "run", side_effect=moving):
+            run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        self.assertIn("PR head moved", run["error"])
+        self.assertIsNone(run["validated_sha"])
+        self.assertIsNone(run["reviewed_sha"])
+        self.assertEqual((self.github.comments, self.github.statuses), ({}, []))
+        report = self.team.pr_report(run["id"])
+        self.assertFalse(report["current_evidence"])
+        self.assertFalse(report["validation"]["passed_for_candidate"])
+        self.assertEqual(report["validation"]["results"], [])
+        self.assertFalse(report["independent_review_success"])
+        self.assertTrue(any("historical" in item for item in report["limitations"]))
+        historical = report["historical_evidence"][-1]
+        self.assertEqual((historical["head"], historical["base"], historical["verdict"]), (head, base, "pass"))
+        self.assertEqual((historical["validated"], historical["reviewed"]), (head, head))
+        self.assertTrue(historical["independent_review_success"])
+
+    def test_movement_after_stopped_review_retires_evidence(self):
+        head = self.open_pr()
+        base = git(self.remote, "rev-parse", "main")
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        self.assertTrue(self.team.pr_report(run["id"])["independent_review_success"])
+        self.advance_base()
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        self.assertIsNone(run["reviewed_sha"])
+        self.assertIsNone(run["review_record"])
+        report = self.team.pr_report(run["id"])
+        self.assertFalse(report["current_evidence"])
+        self.assertFalse(report["independent_review_success"])
+        self.assertFalse(report["validation"]["passed_for_candidate"])
+        historical = report["historical_evidence"][-1]
+        self.assertEqual((historical["head"], historical["base"], historical["verdict"]), (head, base, "pass"))
+        self.assertIn("PR base changed", historical["reason"])
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def test_continuation_after_update_stops_on_rejection_without_revision(self):
+        head = self.open_pr()
+        self.github.permissions["example/demo"] = True
+        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit", "push", "github"])
+        run = self.ticks(run, 3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
+        external = self.push_external()
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        run = self.team.update_pr(run["id"], ["human"])
+        run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"])
+        self.assertIsNone(run["pr_followup"])
+        self.assertEqual(run["released_pr_followup"], ["revision", "validate", "publish", "review"])
+        self.agents.reject = True
+        run = self.ticks(run, 4)
+        # The selected review endpoint holds: no edit, push, or repair loop.
+        self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
+        self.assertIn(external, run["rejected_shas"])
+        self.assertEqual([role for _, role in self.agents.calls], ["review", "review"])
+        self.assertEqual(run["sha"], external)
+        self.assertEqual(self.remote_head(), external)
+        self.assertEqual(run["adopted_pr"].get("pushed", []), [])
+
+    def test_review_and_revise_reviews_failing_head_before_editing(self):
+        head = self.open_pr()
+        self.store.update_project("demo", tests=["grep -q fixed feature.txt"])
+        self.github.permissions["example/demo"] = True
+        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit", "push", "github"])
+        run = self.ticks(run, 2)
+        # Failed validation is recorded, but the existing head is reviewed before any edit.
+        self.assertEqual(run["stage"], "review")
+        self.assertEqual(run["tests"][0]["exit_code"], 1)
+        self.assertIsNone(run["validated_sha"])
+        self.assertEqual(run.get("rejected_shas", []), [])
+        self.assertEqual(self.agents.calls, [])
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "revision")
+        self.assertEqual(self.agents.calls, [(run["reviewer"], "review")])
+        entry = run["revision_history"][0]
+        self.assertEqual((entry["sha"], entry["kind"], entry["validation_failed"]), (head, "review", True))
+        self.assertEqual(entry["findings"][0]["severity"], "validation")
+        self.assertIn((head, "failure", "Configured validation failed"), self.github.status_descriptions)
+        self.assertIn("exit 1", self.github.comments[(7, f"{run['id']}-review-0-{head}")])
+        self.assertEqual(self.remote_head(), head)
+        run = self.ticks(run, 4)
+        self.assertEqual(self.agents.calls, [(run["reviewer"], "review"), (run["author"], "implement"),
+                                             (run["reviewer"], "review")])
+        self.assertEqual((run["stage"], run["validated_sha"], run["reviewed_sha"]), ("stopped", run["sha"], run["sha"]))
+        self.assertEqual(git(self.remote, "rev-parse", f"{run['sha']}^"), head)
+        self.assertEqual(self.remote_head(), run["sha"])
+
     def test_base_movement_before_comment_retry_keeps_evidence_local(self):
         head = self.open_pr()
         run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])

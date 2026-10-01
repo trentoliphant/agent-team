@@ -304,10 +304,14 @@ agent-team select example --run RUN_ID --operations validate review
 These are alternatives. `pr review` validates and reviews the current head, then
 stops: no edits, pushes, base merges, or repair loop. Add `--grant github` only if
 the operator wants the review comment and status published; otherwise report the
-findings from `pr show`. `pr revise` reviews the existing head first, then fixes
-findings on the PR's own branch within the revision budget and reviews the exact
-new commit. `pr findings` revises only the supplied findings and still requires
-fresh validation and independent review.
+findings from `pr show`. `pr revise` reviews the existing head first, even when
+its validation fails, then fixes findings on the PR's own branch within the
+revision budget and reviews the exact new commit. `pr findings` revises only the
+supplied findings and still requires fresh validation and independent review.
+Automatic fixing belongs to the `pr revise` selection only. A later
+`select --run` performs only the operations it names, so a rejection after
+`--operations validate review` stops. To fix it, select
+`--operations revision validate publish review` explicitly.
 
 Declare every contributor truthfully: `human`, `openai`, `anthropic`, or
 `unknown`, including your own family if you edited the branch. Never infer a model
@@ -319,7 +323,9 @@ limitation; do not change the declarations to get past it.
 From `pr show`, report the PR, head and base commits, roles, validation, findings,
 the checks that ran and those omitted, and any local handoff. A standalone review
 does not check CI and is not a readiness verdict. When the head or base moves, the
-run stops as `stale` and pushes nothing. Inspect the change, then use `pr update`
+run stops as `stale` and pushes nothing. Its earlier validation and review move
+to `historical_evidence` in `pr show`; never report them as current. Inspect the
+change, then use `pr update`
 with the new contributors and reselect validation. Without push access (for
 example, a fork without maintainer edits), give the operator the local commit and
 patch from `pr show`. Never open a replacement PR, force-push, merge the base,

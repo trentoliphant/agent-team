@@ -305,14 +305,21 @@ state, mode, declared contributors, trailer families, and GitHub identities
 so validation and review run on the head as-is and the base is never merged.
 Review-only selects `validate review` and stops. Revision modes store a follow-up
 sequence (`revision validate [publish] review`) that a rejection enters within the
-revision budget. `publish` is omitted when the actual head repository cannot be
+revision budget. A continuation (`select --run`) releases the follow-up
+(`released_pr_followup`), so later rejections stop at the selected endpoint.
+`pr revise` reviews the unedited head before any edit: if its validation fails,
+the failure stays pending (`attempted_context` binds it to the candidate), review
+runs, and one rejection records both. `publish` is omitted when the actual head repository cannot be
 written. Adopted publication checks that the PR is still open, untargeted, and
 unmoved, then pushes fast-forward only to the PR's own branch. It never creates or
 edits a PR. Unknown or mixed authorship records `independence.established=false`.
 Review then records `review_withheld` instead of `reviewed_sha`, so readiness
 stays unavailable. Agent-Family trailers other than `openai` and `anthropic` are
 recorded as `unresolved_trailers` and withhold independence the same way. Head or
-base movement stops the run as `stale`. Queued review comments and statuses carry
+base movement stops the run as `stale`, whether found by reconciliation, before a
+push, or by the recheck after every adopted review (with or without `github`). It
+also retires validation and review to `evidence_invalidations` with the head and
+base they covered; `pr show` reports them as `historical_evidence`. Queued review comments and statuses carry
 the reviewed commit; before publishing them, including outbox retries, the
 coordinator rechecks the PR's head, base, state, and head repository. If any
 changed, the writes move to `unpublished_evidence` and the run stops as `stale`.
