@@ -51,6 +51,16 @@ GitHub CLI configuration directory discourages accidental worker authentication.
 These measures do not make credentials on the same OS account inaccessible to
 arbitrary code. Use a dedicated OS account or VM for stronger isolation.
 
+Companion repositories are declared by the operator, confirmed public at
+declaration, and cloned anonymously at full commit SHAs. Clones run with an
+empty temporary home, so local credentials such as `.netrc` are not used. A committed manifest can
+re-pin declared companions but cannot add new ones. Companion code runs during
+validation like project code, so declare only repositories you trust. Companion
+checkouts are compared with their fresh-clone state after each validation command
+and after review, including `.git` (replacement refs, grafts, alternates, objects).
+A command that changes a checkout and fully restores it before exiting is not
+detected.
+
 Only register repositories you trust. Validation commands and project code execute
 in fresh candidate clones with the operator's filesystem access. Issue text is untrusted input, and
 prompts tell workers it cannot expand permissions. Prompts are not a security
@@ -79,6 +89,8 @@ grants. Grants persist across compatible tracked continuation; they do not add
 operations or extend the stop point. Local-only work queues no GitHub writes.
 Review and readiness require compatible exact-commit validation, and readiness
 also requires independent passing review of the current PR candidate.
+Validation and review gathered with other companion pins never satisfy these
+requirements; continuation must select validation again.
 
 External local changes require contributor declarations before re-entry. The
 reviewer's family must not have contributed. Rejected commits and revision limits

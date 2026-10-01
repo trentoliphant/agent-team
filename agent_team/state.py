@@ -10,6 +10,7 @@ import sqlite3
 import time
 import uuid
 
+from .companions import basename, configure as configure_companions
 from .process import TeamError, QuotaError
 
 ACTIVE = {"discovery", "issue_prepare", "revision", "prepare", "implement", "validate", "publish", "review", "checks", "ci"}
@@ -167,11 +168,16 @@ class Store:
                         (project["name"], json.dumps(project)))
         self.db.commit()
 
-    def update_project(self, name, **changes):
+    def update_project(self, name, remove=(), check=None, **changes):
+        """Atomic read-modify-write; `check` may reject the result, which rolls back."""
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             project = self.project(name)
+            for key in remove:
+                project.pop(key, None)
             project.update(changes)
+            if check:
+                check(project)
             self.db.execute("UPDATE projects SET data=? WHERE name=?", (json.dumps(project), name))
         return project
 
@@ -192,6 +198,7 @@ class Store:
                        ready_label="agent:ready", timeout=1800, max_revisions=2,
                        quota_cooldown=3600, max_quota_retries=3, codex_model=None, claude_model=None)
         project.update(options)
+        configure_companions(repo, project.get("companions", []), project.get("companion_manifest"))
         self.save_project(project)
         return project
 
@@ -256,13 +263,25 @@ class Store:
             if plan:
                 run.update(plan)
             run["branch"] = f"agent-team/{run['issue'] if run['issue'] is not None else 'task'}-{run['id']}"
+            if project.get("companions"):
+                # Suite runs keep the primary basename so companions can sit beside it.
+                run["checkout"] = basename(project["repo"])
             self.db.execute("INSERT INTO runs VALUES (?,?,?,?)",
                             (run["id"], run["project"], run["issue"], json.dumps(run)))
             self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(index + 1)))
             return run
 
+    def run_root(self, run):
+        return self.home / "runs" / run["id"]
+
     def workspace(self, run):
-        return self.home / "runs" / run["id"] / "author"
+        root = self.run_root(run) / "author"
+        return root / run["checkout"] if run.get("checkout") else root
+
+    def layout(self, run, name):
+        """(root, checkout) for a fresh workspace; suite runs nest the checkout under its basename."""
+        root = self.run_root(run) / name
+        return root, (root / run["checkout"] if run.get("checkout") else root)
 
     def artifacts(self, run):
         path = self.home / "runs" / run["id"] / "artifacts"

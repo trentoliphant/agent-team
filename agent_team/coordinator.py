@@ -7,6 +7,7 @@ import time
 import tempfile
 
 from .agents import Agents, FAMILIES
+from . import companions
 from .github import GitHub
 from .process import execute, git, clone_repository, TeamError, QuotaError, worker_env, git_env, metadata, assert_metadata
 from .state import ACTIVE, RECOVERY, CapacityWait, issue_fingerprint
@@ -47,6 +48,10 @@ def validation_text(tests):
     return "; ".join(f"{code(t['command'])} exit {t['exit_code']}" for t in tests) or "none recorded"
 
 
+def companion_line(pins):
+    return f"Companion pins: {companions.text(pins)}\n\n" if pins else ""
+
+
 def review_comment(sha, record):
     """Readable review evidence. Every report field is published; nothing is truncated."""
     report = record["report"]
@@ -54,8 +59,10 @@ def review_comment(sha, record):
     observed = ", ".join(record["observed_models"]) or "not reported"
     lines = [f"**Independent review of `{sha}`: {verdict}**", "",
              f"Reviewer `{record['agent']}` ({record['family']}), CLI {record['cli_version']}, "
-             f"model requested {record['requested_model']}, observed {observed}.", "",
-             report["summary"]]
+             f"model requested {record['requested_model']}, observed {observed}.", ""]
+    if record.get("companions"):
+        lines += [f"Reviewed with companion pins: {companions.text(record['companions'])}.", ""]
+    lines.append(report["summary"])
     for number, finding in enumerate(report["findings"], 1):
         lines += ["", f"**{number}. {finding['severity']}: {finding['location']}**", "",
                   f"Evidence: {finding['evidence']}", "", f"Request: {finding['request']}"]
@@ -74,6 +81,7 @@ def pr_body(run):
             f"`{run['author']}` ({FAMILIES[run['author']]}); independent reviewer "
             f"`{run['reviewer']}` ({FAMILIES[run['reviewer']]}). Run `{run['id']}`.\n\n"
             f"Validation: {validation_text(run['tests'])}\n\n"
+            + companion_line(run.get("validated_companions"))
             + "".join(f"Adopted direct repair `{a['sha']}` after revision {a['round'] - 1}: declared contributors "
                       f"{', '.join(a['declared'])}; model families {', '.join(a['families'])}.\n\n"
                       for a in run.get("adoptions", [])) +
@@ -151,6 +159,7 @@ def handoff_comment(project, run, limit):
              f"Run `{run['id']}` · {scope} · {where}", "",
              f"Candidate commit `{latest['sha']}`{local}", "",
              f"Validation: {validation_text(latest['tests'])}", "",
+             *([f"Companion pins: {companions.text(latest['companions'])}", ""] if latest.get("companions") else []),
              f"**Remaining findings from {latest['kind']} ({len(latest['findings'])})**"]
     for number, finding in enumerate(latest["findings"], 1):
         lines += ["", f"**{number}. {finding['severity']}: {finding['location']}** ({MATCHES[finding['match']]})", "",
@@ -260,7 +269,7 @@ def status_forms(project, run):
 
 
 def ready_forms(run):
-    validation = f"Validation: {validation_text(run['tests'])}\n\n"
+    validation = f"Validation: {validation_text(run['tests'])}\n\n" + companion_line(run.get("validated_companions"))
     detailed = (f"**Ready for maintainer decision**\n\nCommit `{run['sha']}` passed the configured "
                 "local validation, observed GitHub checks, and independent review.\n\n"
                 f"{validation}The coordinator will not merge this PR.")
@@ -408,9 +417,9 @@ class Coordinator:
                                   if r["stage"] in RECOVERY or r.get("in_flight")],
                 "paused": project["paused"]}
 
-    def call_agent(self, agent, role, prompt, cwd, artifacts, project):
+    def call_agent(self, agent, role, prompt, cwd, artifacts, project, **options):
         with self.store.subscription(agent, project["quota_cooldown"]):
-            return self.agents.run(agent, role, prompt, cwd, artifacts, project)
+            return self.agents.run(agent, role, prompt, cwd, artifacts, project, **options)
 
     @staticmethod
     def operation_plan(operations, grants):
@@ -618,12 +627,16 @@ class Coordinator:
                 path = cwd / name
                 working.update(name.encode())
                 working.update(os.readlink(path).encode() if path.is_symlink() else path.read_bytes())
+        configuration = {k: project.get(k) for k in
+                         ("repo", "base", "tests", "timeout", "codex_model", "claude_model")}
+        # Declared companions and the manifest path are trusted configuration; manifest pins are in
+        # the tree. Omitted when unset so single-repository contexts keep their earlier shape.
+        configuration.update({k: project[k] for k in ("companions", "companion_manifest") if project.get(k)})
         return {"working": working.hexdigest(), "head": git(cwd, "rev-parse", "HEAD"),
                 "tree": git(cwd, "rev-parse", "HEAD^{tree}"),
                 "dirty": git(cwd, "status", "--porcelain"),
                 "base": run["base_sha"], "scope": run["issue_digest"],
-                "configuration": {k: project.get(k) for k in
-                                  ("repo", "base", "tests", "timeout", "codex_model", "claude_model")}}
+                "configuration": configuration}
 
     def continue_run(self, run_id, operations, contributors=(), grants=None):
         """Explicit re-entry; never clear rejection history or revision limits."""
@@ -662,6 +675,12 @@ class Coordinator:
             return run
         if run.get("pr") and not self.reconcile(project, run):
             return run
+        # Evidence gathered with other companion pins cannot authorize later operations. Checked
+        # before the context comparison so the old verdict is kept as superseded history.
+        if (run.get("validated_sha") or run.get("review_record")) and self.pins_changed(project, run):
+            self.invalidate_pins(project, run)
+            if operations[0] not in {"discovery", "issue_prepare", "implement", "revision", "validate"}:
+                raise TeamError("Companion pins changed; evidence invalidated. Select validation to continue")
         context = self.evidence_context(project, run)
         previous = run.get("evidence_context")
         changed_work = previous and any(context[k] != previous[k] for k in ("head", "tree", "dirty", "working") if k in previous)
@@ -869,7 +888,8 @@ class Coordinator:
                                         "operation": stage, "at": time.time(), "round": run["round"],
                                         "head": run.get("sha"), "base": run.get("base_sha"),
                                         "output_stage": run["stage"], "tests": run.get("tests", []),
-                                        "review_sha": run.get("review_sha")}],
+                                        "review_sha": run.get("review_sha"),
+                                        "companions": run.get("validated_companions") or []}],
                                     omitted_operations=[op for op in (ENTRY_POINTS if run.get("selection") else STOP_POINTS)
                                                         if op not in run.get("requested_operations", [])],
                                     unperformed_operations=[op for op in (ENTRY_POINTS if run.get("selection") else STOP_POINTS)
@@ -926,11 +946,85 @@ class Coordinator:
             self.store.save(run, stage="stale", notification_pending=True,
                             error="PR base changed. Use refresh to integrate and revalidate.")
             return False
+        if run["stage"] == "ready" and self.pins_changed(project, run):
+            self.invalidate_pins(project, run)
+            return False
         if run["stage"] == "ready" and self.github.ci(project["repo"], expected) != "success":
             if self.has_effect(run, "github"):
                 self.github.status(project["repo"], expected, "pending", "CI changed; waiting for checks")
             self.store.save(run, stage="ci", notification_pending=True)
         return True
+
+    def suite(self, project, run):
+        """Whether this run validates with companions. Runs created before companions were
+        configured lack the basename-preserving layout, so they cannot take companions."""
+        if not project.get("companions"):
+            return False
+        if not run.get("checkout"):
+            raise TeamError("This run was created before companions were configured; close it and "
+                            "track the work in a new linked issue")
+        return True
+
+    def manifest(self, project, run, checkout, rev):
+        """Manifest entries committed at `rev` and the resulting pins for every declared companion."""
+        path = project.get("companion_manifest")
+        entries = companions.read_manifest(checkout, rev, path) if path else []
+        return entries, companions.resolve(project, entries)
+
+    def pins_changed(self, project, run):
+        """Whether the candidate's current pins differ from those it was validated with. Manifest
+        entries are cached per commit at validation, so this needs no Git call."""
+        recorded = run.get("validated_companions") or []
+        if not project.get("companions"):
+            return bool(recorded)
+        cached = run.get("companion_manifest") or {}
+        if cached.get("sha") != run["sha"] or cached.get("path") != project.get("companion_manifest"):
+            return True
+        try:
+            return companions.resolve(project, cached["entries"]) != recorded
+        except TeamError:
+            # A pin that is now missing needs validation to report it.
+            return True
+
+    def supersede(self, run):
+        """Changes that retire this commit's saved verdict or failed validation. They were gathered
+        with other pins, so they no longer count, but stay on the run as historical evidence."""
+        kept = []
+        if run.get("review_record") and run.get("review_sha") == run["sha"]:
+            kept.append({"kind": "review", "record": run["review_record"]})
+        if self.pending_validation_failure(run):
+            kept.append({"kind": "validation", "tests": run["validation_failure"]["tests"],
+                         "feedback": run["validation_failure"]["feedback"]})
+        history = [dict(e, sha=run["sha"], companions=run.get("validated_companions") or [], at=time.time())
+                   for e in kept]
+        return dict(superseded_evidence=run.get("superseded_evidence", []) + history, review_record=None,
+                    review_sha=None, reviewed_sha=None,
+                    **({"validation_failure": None} if self.pending_validation_failure(run) else {}))
+
+    def invalidate_pins(self, project, run):
+        """Changed companion pins void earlier validation and review; the same commit is checked again.
+        Partial runs stop for explicit re-entry at validation instead of continuing on their own."""
+        if run.get("pr") and self.has_effect(run, "github"):
+            self.github.status(project["repo"], run.get("published_sha") or run["sha"], "pending",
+                               "Companion pins changed; validation and review need renewal")
+        selected = {}
+        if run.get("stop_after"):
+            selected = dict(stage="stopped", next_stage="validate", validated_context=None,
+                            partial_result="Companion pins changed; evidence invalidated, explicit re-entry required",
+                            evidence_invalidations=run.get("evidence_invalidations", []) + [{
+                                "at": time.time(), "before": run.get("validated_context"),
+                                "companions": run.get("validated_companions") or [],
+                                "reason": "Companion pins changed"}])
+        self.store.save(run, **self.supersede(run), validated_sha=None, validated_tree=None,
+                        needs_revision=False, notification_pending=True, error=None,
+                        **{"stage": "validate", **selected})
+
+    def renew_pins(self, project, run):
+        """Inside a stage: invalidate evidence gathered with other pins. A partial run must not
+        record the stage as performed, so it stops for explicit re-entry at validation."""
+        self.invalidate_pins(project, run)
+        if run.get("stop_after"):
+            raise ReentryRequired("Companion pins changed; new validation and review are required")
 
     def prepare(self, project, run):
         cwd = self.store.workspace(run)
@@ -976,16 +1070,31 @@ class Coordinator:
         self.require_effect(run, "edit")
         cwd = self.store.workspace(run)
         before = git(cwd, "rev-parse", "HEAD")
+        suite, readable = "", []
+        if self.suite(project, run):
+            _, pins = self.manifest(project, run, cwd, "HEAD")
+            # Coordinator Git never runs in checkouts the author could edit: earlier companion
+            # checkouts and any other siblings are kept aside, and every companion is cloned again.
+            for existing in cwd.parent.iterdir():
+                if existing.name != run["checkout"]:
+                    existing.rename(self.store.run_root(run) / f"companion-preserved-{time.time_ns()}-{existing.name}")
+            companions.populate(cwd.parent, pins, project["timeout"])
+            readable = companions.paths(cwd.parent, pins)
+            manifest = project.get("companion_manifest")
+            suite = ("Companion repositories are cloned beside this checkout at pinned commits. They are "
+                     "read-only dependencies; edits there are discarded: " +
+                     "; ".join(f"../{companions.basename(p['repo'])} = {p['repo']} at {p['rev']}" for p in pins) +
+                     (f". Pins come from the committed manifest {manifest}" if manifest else "") + ".\n")
         prompt = (GUIDANCE + self.style(project, "pr") +
                   "Your summary and limitations become the PR description.\n"
                   f"\nImplement {('issue #' + str(run['issue'])) if run['issue'] is not None else 'scoped task'}: "
                   f"{run['title']}\n\n{run['body']}\n\n"
-                  f"Configured validation commands: {json.dumps(project['tests'])}\n"
+                  f"Configured validation commands: {json.dumps(project['tests'])}\n" + suite +
                   f"Feedback from previous validation/review:\n{run['feedback']}\n"
                   "Edit files directly. Tests are run by the coordinator after you finish. "
                   "Report limitations honestly; do not claim tests you did not run.")
         record = self.call_agent(run["author"], "implement", prompt, cwd,
-                                 self.store.artifacts(run) / f"author-{run['round']}", project)
+                                 self.store.artifacts(run) / f"author-{run['round']}", project, readable=readable)
         assert_metadata(cwd, run["git_metadata"])
         if git(cwd, "rev-parse", "HEAD") != before:
             raise TeamError("Worker changed commit history; manual inspection required")
@@ -999,8 +1108,11 @@ class Coordinator:
     def validate(self, project, run):
         # A failure persisted for this exact commit is recorded after an interruption, never rerun.
         if self.pending_validation_failure(run):
-            self.record_validation_failure(project, run)
-            return
+            if not self.pins_changed(project, run):
+                self.record_validation_failure(project, run)
+                return
+            # The failure was with other pins: keep it as history and validate with the current ones.
+            self.store.save(run, **self.supersede(run))
         author = self.store.workspace(run)
         if git(author, "status", "--porcelain"):
             self.require_effect(run, "edit")
@@ -1018,10 +1130,21 @@ class Coordinator:
         if sha in run.get("rejected_shas", []):
             raise TeamError("Candidate is a previously rejected commit; rejected evidence cannot be replaced by a reroll")
         self.store.save(run, sha=sha, commit_contributors=None)
-        cwd = author.parent / f"validation-{run['round']}-{time.time_ns()}"
+        # Outside the author root, so companions and the candidate sit side by side under fresh basenames.
+        root, cwd = self.store.layout(run, f"validation-{run['round']}-{time.time_ns()}")
+        cwd.parent.mkdir(parents=True, exist_ok=True)
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                  str(author), str(cwd)], env=git_env(), timeout=project["timeout"])
         git(cwd, "checkout", "--detach", sha)
+        pins, baselines = [], {}
+        if self.suite(project, run):
+            entries, pins = self.manifest(project, run, cwd, sha)
+            baselines = companions.populate(root, pins, project["timeout"])
+            # Recorded before the tests run, so failed validation evidence names the pins too.
+            self.store.save(run, validated_companions=pins, companion_manifest={
+                "sha": sha, "path": project.get("companion_manifest"), "entries": entries})
+        elif run.get("validated_companions"):
+            self.store.save(run, validated_companions=[], companion_manifest=None)
         baseline = metadata(cwd)
         candidate_tree = git(cwd, "rev-parse", "HEAD^{tree}")
         results = []
@@ -1033,6 +1156,8 @@ class Coordinator:
             (self.store.artifacts(run) / f"test-{run['round']}-{index}.log").write_text(output)
             assert_metadata(cwd, baseline)
             assert_metadata(author, run["git_metadata"])
+            # Evidence names the pins, so the companions must still be exactly the pinned commits.
+            companions.verify(root, pins, baselines)
             results.append({"command": command, "exit_code": result.returncode})
             if result.returncode:
                 # The failure is bound to this commit before the rejection is recorded.
@@ -1069,6 +1194,8 @@ class Coordinator:
                  "published": run["sha"] == run.get("published_sha"), "tests": run.get("tests", []),
                  "findings": classify(findings, [f for e in history for f in e["findings"]]),
                  "feedback": feedback, "at": time.time()}
+        if run.get("validated_companions"):
+            entry["companions"] = run["validated_companions"]
         if review:
             entry["review"] = {k: review[k] for k in ("agent", "family", "cli_version",
                                                       "requested_model", "observed_models")}
@@ -1101,6 +1228,9 @@ class Coordinator:
     def compatible_validation(self, project, run):
         if not run.get("selection"):
             return
+        # Before the context check, so a verdict gathered with other pins is kept as superseded history.
+        if self.pins_changed(project, run):
+            self.renew_pins(project, run)
         context = self.evidence_context(project, run)
         if context != run.get("validated_context") or run.get("validated_sha") != context["head"]:
             self.store.save(run, evidence_invalidations=run.get("evidence_invalidations", []) +
@@ -1132,6 +1262,10 @@ class Coordinator:
             raise TeamError("Candidate commit changed after validation")
         if sha == run["base_sha"]:
             raise TeamError("Worker produced no changes; no PR created")
+        # Validation with other pins cannot authorize publication; checked before any Git or GitHub write.
+        if self.pins_changed(project, run):
+            self.renew_pins(project, run)
+            return
         self.store.save(run, sha=sha, pending_push_sha=sha)
         # Explicit destination prevents worker-edited remote settings from redirecting publication.
         git(cwd, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
@@ -1150,10 +1284,14 @@ class Coordinator:
         self.github.status(project["repo"], sha, "pending", description)
 
     def independent_review(self, project, run):
-        cwd = self.store.workspace(run).parent / f"review-{run['round']}-{time.time_ns()}"
+        root, cwd = self.store.layout(run, f"review-{run['round']}-{time.time_ns()}")
+        cwd.parent.mkdir(parents=True, exist_ok=True)
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                  str(self.store.workspace(run)), str(cwd)], env=git_env(), timeout=project["timeout"])
         git(cwd, "checkout", "--detach", run["sha"])
+        # The review stage checked these are still the current pins.
+        pins = run.get("validated_companions") or []
+        baselines = companions.populate(root, pins, project["timeout"])
         baseline = metadata(cwd)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Review checkout changed; inspect before retry")
@@ -1165,17 +1303,22 @@ class Coordinator:
                   f"\nIndependently review {('issue #' + str(run['issue'])) if run['issue'] is not None else 'scoped task'}: "
                   f"{run['title']}\n{run['body']}\n"
                   f"Base {run['base_sha']}; candidate {run['sha']}.\n"
-                  f"Coordinator validation: {json.dumps(run['tests'])}\n"
+                  f"Coordinator validation: {json.dumps(run['tests'])}\n" +
+                  ("Validated with companion repositories cloned beside the candidate (read-only): " +
+                   "; ".join(f"../{companions.basename(p['repo'])} = {p['repo']} at {p['rev']}" for p in pins) +
+                   "\n" if pins else "") +
                   "Inspect source and applicable instructions. Check correctness, missing acceptance criteria, "
                   "regressions, and inadequate tests. Do not modify files. Do not assume passing tests prove correctness. "
                   "Return changes_requested for actionable findings, otherwise pass with an empty findings list.\n"
                   f"Diff:\n{diff}")
         record = self.call_agent(run["reviewer"], "review", prompt, cwd,
-                                 self.store.artifacts(run) / f"review-{run['round']}", project)
+                                 self.store.artifacts(run) / f"review-{run['round']}", project,
+                                 readable=companions.paths(root, pins))
         assert_metadata(cwd, baseline)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Reviewer modified candidate; evidence rejected")
-        return record
+        companions.verify(root, pins, baselines)
+        return dict(record, companions=pins) if pins else record
 
     def review(self, project, run):
         if self.finalize_rejection(project, run):
@@ -1187,6 +1330,10 @@ class Coordinator:
             raise TeamError("Reviewer must come from a family that did not contribute to the candidate")
         if run["sha"] in run.get("rejected_shas", []):
             raise TeamError("Candidate was already rejected; a new commit is required for another review")
+        # Checked before any saved verdict is reused: one gathered with other pins is superseded, not recorded.
+        if self.pins_changed(project, run):
+            self.renew_pins(project, run)
+            return
         record = run.get("review_record")
         # A verdict persisted for this exact commit is reused after an interruption, never rerolled.
         if not (record and run.get("review_sha") == run["sha"]):
@@ -1195,8 +1342,12 @@ class Coordinator:
         self.record_review(project, run, record)
 
     def review_write(self, run, record):
+        marker = f"{run['id']}-review-{run['round']}-{run['sha']}"
+        if record.get("companions"):
+            # A review of the same commit with other pins is separate evidence; never overwrite it.
+            marker += f"-{companions.digest(record['companions'])}"
         return {"type": "comment", "number": run["pr"] if run.get("published_sha") == run["sha"] else None,
-                "marker": f"{run['id']}-review-{run['round']}-{run['sha']}",
+                "marker": marker,
                 "body": review_comment(run["sha"], record), "heading": f"Independent review of `{run['sha']}`"}
 
     def record_review(self, project, run, record):
@@ -1217,6 +1368,14 @@ class Coordinator:
         cannot discard the evidence and review or validate the same commit again. Returns True if a
         rejection was recorded. A closed or merged run is terminal; recording a rejection would reactivate it."""
         if run["stage"] in {"closed", "merged"}:
+            return False
+        pending = self.pending_validation_failure(run) or (
+            run.get("review_record") and run.get("review_sha") == run["sha"]
+            and run["sha"] not in run.get("rejected_shas", []))
+        if pending and self.pins_changed(project, run):
+            # Evidence gathered with other pins must not consume the revision budget or reject the
+            # commit; it is kept as history, and the caller's transition requires new validation and review.
+            self.store.save(run, **self.supersede(run))
             return False
         record = run.get("review_record")
         if self.pending_validation_failure(run):
@@ -1241,7 +1400,8 @@ class Coordinator:
         state = self.github.ci(project["repo"], run["sha"])
         self.store.save(run, ci_checks=run.get("ci_checks", []) + [{
             "at": time.time(), "sha": run["sha"], "base": run["base_sha"],
-            "context": context, "state": state, "readiness_changed": False}],
+            "context": context, "companions": run.get("validated_companions") or [],
+            "state": state, "readiness_changed": False}],
             stage=self.successor(run, "checks", "ci"))
 
     def ci(self, project, run):
@@ -1254,6 +1414,9 @@ class Coordinator:
             raise TeamError("Missing review for this exact commit")
         if not run.get("pr"):
             raise TeamError("Readiness requires an existing PR")
+        if self.pins_changed(project, run):
+            self.renew_pins(project, run)
+            return
         state = self.github.ci(project["repo"], run["sha"])
         if state == "failure":
             raise TeamError("GitHub CI failed; inspect checks and resume after correction")
@@ -1315,7 +1478,7 @@ class Coordinator:
         if pr["state"] != "open" or pr["base"]["ref"] != project["base"]:
             raise TeamError("PR must be open and target the registered base")
         cwd = self.store.workspace(run)
-        fresh = cwd.parent / f"refresh-{time.time_ns()}"
+        fresh = self.store.run_root(run) / f"refresh-{time.time_ns()}"
         clone_repository(project["repo"], fresh, run["branch"], project["timeout"])
         candidate = git(fresh, "rev-parse", "HEAD")
         base_sha = git(fresh, "rev-parse", f"origin/{project['base']}")
@@ -1325,7 +1488,7 @@ class Coordinator:
         git(fresh, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
             "-c", "commit.gpgsign=false", "merge", "--no-edit", base_sha)
         if cwd.exists():
-            cwd.rename(cwd.parent / f"author-preserved-{time.time_ns()}")
+            cwd.rename(self.store.run_root(run) / f"author-preserved-{time.time_ns()}")
         fresh.rename(cwd)
         return dict(base_sha=base_sha, sha=git(cwd, "rev-parse", "HEAD"),
                     published_sha=candidate, reviewed_sha=None, review_record=None,
@@ -1422,7 +1585,8 @@ class Coordinator:
                 contributor_changes = dict(contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
                     contribution_history=run.get("contribution_history", []) +
                     [{"at": time.time(), "context": context, "declared": list(contributors)}])
-            fresh = cwd.parent / f"refresh-{time.time_ns()}"
+            # The run root, not the author root: suite runs keep companions beside the checkout there.
+            fresh = self.store.run_root(run) / f"refresh-{time.time_ns()}"
             execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                      str(cwd), str(fresh)], env=git_env(), timeout=project["timeout"])
             git(fresh, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git",
@@ -1433,7 +1597,7 @@ class Coordinator:
             if run.get("selection") and authorize_edit:
                 contributor_changes["grants"] = sorted(set(run["grants"]) | {"edit"})
             self.store.save(run, pending_integration={"fresh": str(fresh),
-                "preserved": str(cwd.parent / f"author-preserved-{time.time_ns()}"),
+                "preserved": str(self.store.run_root(run) / f"author-preserved-{time.time_ns()}"),
                 "metadata": metadata(fresh), "sha": git(fresh, "rev-parse", "HEAD"),
                 "base": base, "previous": previous, "contributions": contributor_changes})
             return self.finish_local_integration(project, run)
@@ -1475,7 +1639,7 @@ class Coordinator:
             # Nothing was pushed, so the repair happens in a local clone of the rejected commit. The author
             # checkout is untouched, and the clone is made before the decision is saved, so an interruption
             # leaves at most an unused directory and the decision can be recorded again.
-            checkout = self.store.workspace(run).parent / f"repair-{time.time_ns()}"
+            checkout = self.store.run_root(run) / f"repair-{time.time_ns()}"
             # Like any active stage, check the author checkout's recorded metadata before Git runs against it.
             assert_metadata(self.store.workspace(run), run["git_metadata"])
             execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
@@ -1582,7 +1746,7 @@ class Coordinator:
         if candidate in run.get("rejected_shas", []):
             raise TeamError("Repair checkout is still at a rejected candidate; commit a repair first (previous work retained)")
         cwd = self.store.workspace(run)
-        fresh = cwd.parent / f"adopt-{time.time_ns()}"
+        fresh = self.store.run_root(run) / f"adopt-{time.time_ns()}"
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                  str(checkout), str(fresh)], env=git_env(), timeout=project["timeout"])
         git(fresh, "checkout", "-B", run["branch"], candidate)
@@ -1613,7 +1777,7 @@ class Coordinator:
         sha = git(fresh, "rev-parse", "HEAD")
         # A crash after the swap but before the save leaves the run in repair; adopting again is safe.
         if cwd.exists():
-            cwd.rename(cwd.parent / f"author-preserved-{time.time_ns()}")
+            cwd.rename(self.store.run_root(run) / f"author-preserved-{time.time_ns()}")
         fresh.rename(cwd)
         round_ = run["round"] + 1
         adoption = {"head": candidate, "sha": sha, "base_sha": base_sha, "declared": declared,

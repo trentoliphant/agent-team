@@ -11,7 +11,7 @@ from agent_team.process import TeamError, QuotaError
 
 
 class AdapterTests(unittest.TestCase):
-    def call(self, agent, payload, *, exit_code=0, stderr="", role="review"):
+    def call(self, agent, payload, *, exit_code=0, stderr="", role="review", readable=()):
         self.commands = []
         self.environments = []
         self.workspaces = []
@@ -30,7 +30,8 @@ class AdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with patch("agent_team.agents.subscription_status", return_value="test-version"), \
                     patch("agent_team.agents.execute", side_effect=fake_execute):
-                return Agents().run(agent, role, "Review", Path(temp), Path(temp) / "artifacts", {"timeout": 30})
+                return Agents().run(agent, role, "Review", Path(temp), Path(temp) / "artifacts", {"timeout": 30},
+                                    readable=readable)
 
     def test_codex_uses_subscription_and_read_only_sandbox(self):
         result = self.call("codex", {"type": "turn.completed"})
@@ -73,6 +74,34 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("--bare", command)
         self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
         self.assertEqual(result["observed_models"], ["a-model"])
+        self.assertNotIn("--add-dir", command)
+
+    def test_claude_can_read_companion_checkouts_without_new_tools(self):
+        envelope = {"is_error": False, "structured_output": {"verdict": "pass", "summary": "ok", "findings": []}}
+        self.call("claude", envelope)
+        single = self.commands[-1]
+        companions = [Path("/runs/r/review-1/lib"), Path("/runs/r/review-1/other lib")]
+        self.call("claude", envelope, readable=companions)
+        command = self.commands[-1]
+        self.assertEqual([command[i + 1] for i, a in enumerate(command) if a == "--add-dir"],
+                         [str(p) for p in companions])
+        # The directory grants are the only difference; tools and permission mode are unchanged.
+        extra = [a for i, a in enumerate(command) if a == "--add-dir" or (i and command[i - 1] == "--add-dir")]
+        remaining = [a for a in command if a not in extra]
+        self.assertEqual(remaining[:remaining.index("--json-schema")], single[:single.index("--json-schema")])
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
+        self.call("claude", {"is_error": False, "structured_output": {"summary": "s", "limitations": "l"}},
+                  role="implement", readable=companions)
+        self.assertEqual(self.commands[-1][self.commands[-1].index("--tools") + 1], "Read,Glob,Grep,Edit,Write")
+
+    def test_codex_needs_no_companion_grant(self):
+        self.call("codex", {"type": "turn.completed"})
+        single = self.commands[-1]
+        self.call("codex", {"type": "turn.completed"}, readable=[Path("/runs/r/review-1/lib")])
+        self.assertEqual(self.commands[-1][:self.commands[-1].index("--output-schema")],
+                         single[:single.index("--output-schema")])
+        self.assertNotIn("--add-dir", self.commands[-1])
 
     def test_claude_quota_error_inside_successful_process(self):
         with self.assertRaises(QuotaError):
@@ -202,9 +231,19 @@ class GitHubTests(unittest.TestCase):
 
     def test_publication_reuses_existing_pr(self):
         github = GitHub()
-        with patch.object(github, "find_pr", return_value={"number": 9}), patch.object(github, "api") as api:
-            self.assertEqual(github.create_pr({"repo": "example/repo"}, {"branch": "topic"}, "body"), {"number": 9})
+        with patch.object(github, "find_pr", return_value={"number": 9, "body": "body"}), \
+                patch.object(github, "api") as api:
+            self.assertEqual(github.create_pr({"repo": "example/repo"}, {"branch": "topic"}, "body"),
+                             {"number": 9, "body": "body"})
             api.assert_not_called()
+
+    def test_republication_updates_stale_pr_body(self):
+        github = GitHub()
+        with patch.object(github, "find_pr", return_value={"number": 9, "body": "old pins"}), \
+                patch.object(github, "api", return_value={"number": 9, "body": "new pins"}) as api:
+            self.assertEqual(github.create_pr({"repo": "example/repo"}, {"branch": "topic"}, "new pins"),
+                             {"number": 9, "body": "new pins"})
+            api.assert_called_once_with("repos/example/repo/pulls/9", "PATCH", {"body": "new pins"})
 
 
 if __name__ == "__main__":

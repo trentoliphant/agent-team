@@ -140,6 +140,46 @@ must be self-contained: do not depend on a development checkout elsewhere.
 `agent:discovered`. The default base branch comes from GitHub; override it with
 `--base BRANCH` during registration.
 
+### Companion repositories
+
+A project whose tests need other repositories can declare them as companions.
+Single-repository projects need none of this; their registration is unchanged.
+
+```sh
+agent-team project add suite your-account/builder \
+  --test 'python3 -m unittest discover -s tests -v' \
+  --companion your-account/fixtures@0123456789abcdef0123456789abcdef01234567 \
+  --companion your-account/runtime --companion-manifest companions.json
+```
+
+- Only declared companions are cloned. Each must be public on GitHub. The
+  coordinator clones them anonymously, without credentials.
+- Each companion is pinned to a full commit SHA. Give the SHA after `@`, or
+  commit a manifest in the registered repository:
+  `{"companions": [{"repo": "your-account/runtime", "rev": "SHA"}]}`.
+  A manifest pin replaces the registration pin. A manifest cannot add
+  companions. The manifest is read from the commit under test, never from
+  ignored or uncommitted files.
+- Author, validation, and review workspaces keep repository basenames:
+  `builder/` sits beside `fixtures/` and `runtime/`. Commands run in
+  `builder/`, so they can use `../runtime`.
+- Validation results, review comments, the PR description, and the ready comment
+  list the companion pins. If a pin changes, earlier validation and review no longer
+  count. The same commit is validated and reviewed again with the new pins.
+  A partial selection stops instead; continue it from `validate`.
+- A missing pin, a missing manifest, an undeclared manifest entry, or an
+  unpublished revision blocks the run.
+- Validation commands and reviewers must not change companions. A moved HEAD,
+  changed Git configuration, or changed or added files block the run, and the
+  results are not accepted. This includes files hidden from Git by index flags
+  or ignore rules, and replacement refs, grafts, or other `.git` changes that
+  make Git return different contents for the pinned commit.
+
+`project configure NAME --companion ...` replaces the declared list;
+`--companion-manifest PATH` sets the manifest; `--no-companions` removes both.
+Runs created before a project had companions cannot use them; close them and
+open a new linked issue.
+
 Choose a small GitHub issue with clear acceptance criteria, then approve its
 current content. Approval records a SHA-256 fingerprint in a GitHub comment and
 adds `agent:ready`. Both the matching approval and label are required. A label
@@ -303,7 +343,8 @@ These advisory file locks require a local filesystem; sharing state across hosts
 or using separate directories for the same repositories provides no coordinated
 claims. Stop every worker before backing up, moving, or upgrading shared state.
 Do not mix older coordinators with this version against one directory. Companion
-repository validation and multi-host coordination are separate features.
+checkouts belong to each run, so concurrent runs never share them. Multi-host
+coordination is a separate feature.
 
 Optional model selection is external configuration, not hard-coded in a project:
 

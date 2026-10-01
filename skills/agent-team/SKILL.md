@@ -255,7 +255,10 @@ a run automatically just because its selected operations finished. Revision
 exhaustion requires `decide`. An extension or adoption returns selected work to
 an explicit boundary. Reselect operations without resetting its budget/history.
 Changed candidate, base, scope, configuration, or dependency pins invalidate
-affected evidence. Local handoff edits require contributor declarations, including
+affected evidence. Changed companion pins stop selected work with `validate` as
+the next stage and keep the old verdict as superseded evidence; reselect
+validation before publication, review, or readiness. Report the companion pins
+recorded with validation and review. Local handoff edits require contributor declarations, including
 your family if you contributed. The reviewer's family is refused.
 A valid declaration with validation or an earlier rebuilding
 entry continues in one command after invalidating old evidence. Publication,

@@ -15,12 +15,72 @@ this package or needs its workflow files.
 | `writing.py` | Writing-standard precedence, validation, and prompt text (style only); the coordinator applies the `status` policy to its status comments |
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
 | `cli.py` | Registration, scheduling, inspection, recovery |
+| `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
 
-Each project registers one repository. Register multiple repositories separately
-to work across projects. Cross-repository dependency scheduling and coordinated
-suite checkouts are not implemented in 0.1.0. An issue requiring undeclared sibling
+Each project registers one repository. It may also declare public companion
+repositories that its validation needs (see the README). Companions are read-only
+dependencies: the coordinator never pushes to them or schedules work across them.
+Register multiple repositories separately to work across projects. Cross-repository
+dependency scheduling is not implemented. An issue requiring undeclared sibling
 checkouts must be split or handled manually; do not substitute private workspace
 paths in validation commands.
+
+## Companion repositories
+
+Runs of a project with companions record the primary basename (`checkout`). The
+author checkout is `runs/<id>/author/<basename>`, and each validation or review
+directory holds `<basename>/` beside one directory per companion. Single-repository
+runs keep the `runs/<id>/author` layout.
+
+Pins come from the registration, replaced by entries in the manifest committed at
+the commit being used. `git show` reads the manifest, so ignored and uncommitted
+files never count. Manifest entries must name declared companions. Each pin is a
+full commit SHA. Clones use HTTPS with no credential helper, no forwarded tokens,
+and a fresh empty `HOME`, so no `.netrc` or user Git configuration can supply
+credentials and private repositories fail. Each clone is checked out detached at
+its pin and verified. Author and review agents receive the companion checkouts as
+readable directories (Claude `--add-dir`; Codex sandboxes already read outside the
+workspace). Their tool sets and permission modes are unchanged.
+
+Before each implementation round, earlier author companion checkouts, and any
+other directories beside the author checkout, move aside as
+`companion-preserved-*`. Every companion is then cloned again, so the coordinator
+never runs Git in a directory the author could edit. Validation records the pins
+(`validated_companions`) and caches the manifest entries for that commit before
+running tests. Review uses the same pins and records them in the review record.
+Publication (before any push or PR write), the review stage, the `ci` stage, and
+ready reconciliation compare the current pins with the recorded ones. A difference
+sets a pending status on an existing PR and returns the same commit to validation. Review comment markers include a pin digest, so an
+earlier review of that commit stays published.
+
+Partial selections apply the same checks. Declared companions and the manifest
+path are part of the candidate fingerprint's configuration (omitted when unset),
+and manifest pins are part of its tree. Continuation and every evidence-consuming
+selected stage compare pins before reusing validation or review. A difference
+moves the old verdict to `superseded_evidence`, records an evidence invalidation,
+and stops the run with `validate` as the next stage; the stage is not recorded as
+performed. A pending status is written only with the `github` grant. Operation
+history and `checks` snapshots record the pins in effect. Unpublished refresh
+builds its clone in the run root, so the author directory keeps only the
+basename checkout and its companions.
+
+After each validation command, and after review, each companion checkout must
+still be a real directory with its original Git configuration and HEAD at the pin.
+Its working tree, outside `.git`, must match the snapshot taken right after the
+fresh checkout: every path, file type, executable bit, content hash, and symlink
+target. The snapshot is read from the filesystem, not through Git, so index flags
+(`assume-unchanged`, `skip-worktree`) and ignore rules cannot hide edited or added
+files. Its `.git` directory, except the index, must match too. Replacement refs,
+grafts, shallow files, alternates, and added objects or refs therefore reject the
+evidence, even if removed after use. Replacement refs and grafts are also checked
+by name. Staged entries must still name the original objects. Otherwise the stage
+blocks and its results are not accepted. Configuration is checked before Git runs
+there. Coordinator Git reads of companions and manifests use `--no-replace-objects`.
+
+Pins are compared before a saved verdict or failed validation is reused after an
+interruption, including in `refresh` and `adopt`. Evidence gathered with other
+pins does not reject the commit or use a revision. It moves to
+`superseded_evidence` with its pins, and the commit needs new validation and review.
 
 ## Durable transitions
 
@@ -83,7 +143,7 @@ retain their one-attempt fallback when capacity is unavailable.
 This coordination boundary is one host and one shared local state directory.
 Independent directories, remote filesystems, GitHub repository aliases caused by
 renames, and mixed coordinator versions are outside the boundary. Stop all workers
-before migration or backup. Companion repository validation is independent work.
+before migration or backup.
 
 ## Review independence
 

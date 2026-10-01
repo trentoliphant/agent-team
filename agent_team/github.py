@@ -118,6 +118,9 @@ class GitHub:
     def create_pr(self, project, run, body):
         found = self.find_pr(project, run["branch"])
         if found:
+            # Republication refreshes the description so it matches the current validation evidence.
+            if found.get("body") != body:
+                found = self.api(f"repos/{project['repo']}/pulls/{found['number']}", "PATCH", {"body": body})
             return found
         return self.api(f"repos/{project['repo']}/pulls", "POST", {
             "title": run["title"][:240], "head": run["branch"], "base": project["base"],
