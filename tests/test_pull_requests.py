@@ -285,6 +285,34 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(run["review_withheld"]["sha"], head)
         self.assertIsNone(run.get("reviewed_sha"))
 
+    def test_unknown_and_unsupported_trailers_withhold_independence(self):
+        for number, value in ((7, "unknown"), (8, "gemini")):
+            with self.subTest(value=value):
+                head = self.open_pr(number, f"branch-{number}", message=f"Add feature\n\nAgent-Family: {value}")
+                with self.assertRaisesRegex(TeamError, "unknown or unsupported model families"):
+                    self.team.adopt_pr("demo", str(number), "revise", ["human"], grants=["edit"])
+                run = self.team.adopt_pr("demo", str(number), "review", ["human"], grants=["github"])
+                self.assertFalse(run["independence"]["established"])
+                self.assertEqual(run["adopted_pr"]["unresolved_trailers"], [value])
+                self.assertEqual(run["adopted_pr"]["trailer_families"], [])
+                self.assertEqual(run["contributors"], ["human"])
+                run = self.ticks(run, 3)
+                self.assertEqual(run["stage"], "stopped")
+                self.assertIsNone(run.get("reviewed_sha"))
+                self.assertEqual(run["review_withheld"]["sha"], head)
+                body = self.github.comments[(number, f"{run['id']}-review-0-{head}")]
+                self.assertIn("Review (independence not established)", body)
+                report = self.team.pr_report(run["id"])
+                self.assertFalse(report["independent_review_success"])
+                self.assertEqual(report["authorship"]["unresolved_trailers"], [value])
+                self.store.save(run, stage="closed")
+        # A known family alongside an unsupported value still never reviews its own work.
+        self.open_pr(9, "branch-9", message="Add feature\n\nAgent-Family: openai\nAgent-Family: gemini")
+        run = self.team.adopt_pr("demo", "9", "review", ["human"])
+        self.assertEqual((run["author"], run["reviewer"]), ("codex", "claude"))
+        self.assertEqual(run["adopted_pr"]["trailer_families"], ["openai"])
+        self.assertFalse(run["independence"]["established"])
+
     def test_single_family_authorship_assigns_independent_roles(self):
         self.open_pr(message="Add feature\n\nAgent-Family: openai")
         with self.assertRaisesRegex(TeamError, "cannot review independently"):
@@ -432,6 +460,118 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(run["outbox"], [])
         self.assertIn((7, f"{run['id']}-review-0-{head}"), self.github.comments)
         self.assertEqual(len(self.agents.calls), 1)
+
+    def test_head_movement_during_review_keeps_evidence_local(self):
+        head = self.open_pr()
+        self.agents.reject = True
+        run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
+        run = self.ticks(run, 2)
+        self.assertEqual(run["stage"], "review")
+        real = self.agents.run
+
+        def moving(agent, role, *args, **kwargs):
+            if role == "review":
+                self.push_external()
+            return real(agent, role, *args, **kwargs)
+
+        with patch.object(self.agents, "run", side_effect=moving):
+            run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        self.assertIn("PR head moved", run["error"])
+        self.assertIn("before review evidence was published", run["error"])
+        self.assertNotIn((7, f"{run['id']}-review-0-{head}"), self.github.comments)
+        self.assertNotIn((head, "failure"), self.github.statuses)
+        self.assertEqual(run["outbox"], [])
+        self.assertEqual({i["evidence"] for i in run["unpublished_evidence"]}, {head})
+        report = self.team.pr_report(run["id"])
+        self.assertEqual(len(report["unpublished_evidence"]), 2)
+        self.assertTrue(any("was not published" in item for item in report["limitations"]))
+        run = self.ticks(run, 2)
+        self.assertEqual(run["stage"], "stale")
+        self.assertEqual(self.github.comments, {})
+        self.assertEqual(len(self.agents.calls), 1)
+        run = self.team.update_pr(run["id"], ["human"])
+        self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "validate"))
+
+    def test_base_movement_before_comment_retry_keeps_evidence_local(self):
+        head = self.open_pr()
+        run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
+        run = self.ticks(run, 2)
+        with patch.object(self.github, "comment", side_effect=TeamError("GitHub unavailable")), \
+                self.assertRaises(TeamError):
+            self.ticks(run, 1)
+        run = self.store.get(run["id"])
+        self.assertEqual(len(run["outbox"]), 1)
+        self.advance_base()
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        self.assertIn("PR base changed", run["error"])
+        self.assertEqual(run["outbox"], [])
+        self.assertNotIn((7, f"{run['id']}-review-0-{head}"), self.github.comments)
+        self.assertEqual(run["unpublished_evidence"][0]["evidence"], head)
+        self.assertEqual(len(self.agents.calls), 1)
+
+    def interrupted_update(self, point):
+        """Interrupt update_pr at `point`, then recover by running the update again."""
+        head = self.open_pr()
+        run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 3)
+        external = self.push_external()
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+
+        class Interrupted(Exception):
+            pass
+
+        real_rename, real_save, renames = Path.rename, self.store.save, []
+
+        def rename(path, target):
+            result = real_rename(path, target)
+            renames.append(target)
+            if point == f"rename-{len(renames)}":
+                raise Interrupted()
+            return result
+
+        def save(record, **changes):
+            if point == "final-save" and "pending_pr_update" in changes and changes["pending_pr_update"] is None:
+                raise Interrupted()
+            real_save(record, **changes)
+            if point == "journal" and changes.get("pending_pr_update"):
+                raise Interrupted()
+
+        with patch("pathlib.Path.rename", rename), patch.object(self.store, "save", side_effect=save), \
+                self.assertRaises(Interrupted):
+            self.team.update_pr(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"]), ("stale", head))
+        self.assertTrue(run["pending_pr_update"])
+        with self.assertRaisesRegex(TeamError, "interrupted"):
+            self.team.select("demo", ["validate"], [], run_id=run["id"])
+        with self.assertRaisesRegex(TeamError, "interrupted"):
+            self.team.resume(run["id"])
+        run = self.team.update_pr(run["id"], ["human"])
+        self.assertIsNone(run["pending_pr_update"])
+        self.assertEqual((run["stage"], run["next_stage"], run["sha"]), ("stopped", "validate", external))
+        self.assertEqual(git(self.store.workspace(run), "rev-parse", "HEAD"), external)
+        self.assertEqual(git(Path(run["adopted_pr"]["updates"][0]["preserved"]), "rev-parse", "HEAD"), head)
+        self.assertIsNone(run["validated_sha"])
+        self.assertIsNone(run["reviewed_sha"])
+        self.assertEqual(run["evidence_context"]["head"], external)
+        self.assertEqual(run["evidence_invalidations"][-1]["reason"], "Deliberate adoption of changed PR head or base")
+        self.assertEqual(self.remote_head(), external)
+        run = self.ticks(self.team.select("demo", ["validate", "review"], [], run_id=run["id"]), 2)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", external))
+
+    def test_update_interrupted_after_journal_recovers(self):
+        self.interrupted_update("journal")
+
+    def test_update_interrupted_after_first_rename_recovers(self):
+        self.interrupted_update("rename-1")
+
+    def test_update_interrupted_after_second_rename_recovers(self):
+        self.interrupted_update("rename-2")
+
+    def test_update_interrupted_before_final_save_recovers(self):
+        self.interrupted_update("final-save")
 
     def test_supplied_findings_are_revised_with_fresh_evidence(self):
         head = self.open_pr()

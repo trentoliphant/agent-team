@@ -310,9 +310,16 @@ written. Adopted publication checks that the PR is still open, untargeted, and
 unmoved, then pushes fast-forward only to the PR's own branch. It never creates or
 edits a PR. Unknown or mixed authorship records `independence.established=false`.
 Review then records `review_withheld` instead of `reviewed_sha`, so readiness
-stays unavailable. Head or base movement stops the run as `stale`; `pr update`
-journals the change, preserves the previous checkout and any unpushed commit, and
-invalidates evidence.
+stays unavailable. Agent-Family trailers other than `openai` and `anthropic` are
+recorded as `unresolved_trailers` and withhold independence the same way. Head or
+base movement stops the run as `stale`. Queued review comments and statuses carry
+the reviewed commit; before publishing them, including outbox retries, the
+coordinator rechecks the PR's head, base, state, and head repository. If any
+changed, the writes move to `unpublished_evidence` and the run stops as `stale`.
+`pr update` journals the checkout swap and the evidence invalidation
+(`pending_pr_update`) before renaming directories. Rerunning `pr update` after an
+interruption finishes the swap from the journal. The previous checkout and any
+unpushed commit are preserved.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

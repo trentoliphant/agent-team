@@ -135,14 +135,25 @@ def contributing_families(run, extra=()):
         c for c in [*run.get("contributors", []), *extra] if c not in {"human", "unknown"}}
 
 
-def assess_independence(declared, families):
+def assess_independence(declared, families, unresolved=()):
     """Whether any agent family can review independently. Unknown or mixed authorship cannot be
     resolved by guessing, so the review still reports findings but never claims independent success."""
     if {"openai", "anthropic"} <= set(families):
         return {"established": False, "reason": "both model families contributed"}
     if "unknown" in declared:
         return {"established": False, "reason": "authorship includes unknown contributors"}
+    if unresolved:
+        return {"established": False, "reason": "commit trailers name unknown or unsupported model families ("
+                + ", ".join(sorted(unresolved)) + ")"}
     return {"established": True, "reason": None}
+
+
+def split_trailers(text):
+    """Agent-Family trailer values as (supported model families, unresolved values). Unresolved values
+    are provenance nobody can attribute; they are recorded, never mapped to an agent."""
+    values = {line.strip().casefold() for line in text.splitlines() if line.strip()}
+    supported = set(FAMILIES.values())
+    return sorted(values & supported), sorted(values - supported)
 
 
 def withheld(run):
@@ -442,6 +453,8 @@ class Coordinator:
     def flush(self, project, run):
         if not self.has_effect(run, "github"):
             return
+        if run.get("adopted_pr") and any(i.get("evidence") for i in run.get("outbox", [])):
+            self.withhold_moved_evidence(project, run)
         # Each write is idempotent (marked comment or same status), so a crash can only repeat it.
         while run.get("outbox"):
             item = run["outbox"][0]
@@ -451,6 +464,43 @@ class Coordinator:
                 self.github.comment(project["repo"], item["number"], item["marker"], item["body"],
                                     heading=item.get("heading"))
             self.store.save(run, outbox=run["outbox"][1:])
+
+    def adopted_pr_change(self, project, run, sha):
+        """Why an adopted PR no longer matches the commit and inputs that evidence names, or None.
+        Returns (stage, reason); the stage is `merged`, `closed`, or `stale`."""
+        info = run["adopted_pr"]
+        pr = self.github.pr(project["repo"], info["number"])
+        if pr.get("merged") or pr["state"] != "open":
+            return ("merged", "PR was merged") if pr.get("merged") else ("closed", "PR was closed")
+        head = pr["head"].get("repo") or {}
+        if head.get("full_name", "").casefold() != info["head_repo"].casefold() or pr["head"]["ref"] != info["head_ref"]:
+            return "stale", "PR head repository or branch changed"
+        if pr["head"]["sha"] != sha:
+            return "stale", f"PR head moved to {pr['head']['sha']}"
+        if pr["base"]["ref"] != info["base_ref"] or pr["base"]["sha"] != run["base_sha"]:
+            return "stale", f"PR base changed to {pr['base']['ref']} at {pr['base']['sha']}"
+        return None
+
+    def withhold_moved_evidence(self, project, run):
+        """Before review evidence reaches an adopted PR, including outbox retries, confirm the PR still
+        has the reviewed head, base, state, and identity. If not, the evidence stays local and the run stops."""
+        evidence = [i for i in run["outbox"] if i.get("evidence")]
+        change = next(filter(None, (self.adopted_pr_change(project, run, sha)
+                                    for sha in dict.fromkeys(i["evidence"] for i in evidence))), None)
+        if not change:
+            return
+        stage, reason = change
+        changes = {}
+        if stage in {"merged", "closed"}:
+            changes = dict(stage=stage)
+        elif run["stage"] not in {"handoff", "repair", "closed", "merged"}:
+            changes = dict(stage="stale",
+                           error=f"{reason} before review evidence was published; the evidence is kept locally "
+                                 "(agent-team pr show RUN_ID). Inspect the change, then run agent-team pr update "
+                                 "RUN_ID --contributor ...")
+        self.store.save(run, outbox=[i for i in run["outbox"] if not i.get("evidence")],
+                        unpublished_evidence=run.get("unpublished_evidence", []) +
+                        [dict(i, withheld_reason=reason, at=time.time()) for i in evidence], **changes)
 
     def notify(self, project, run):
         self.flush(project, run)
@@ -731,6 +781,8 @@ class Coordinator:
         if not operations or any(op not in ENTRY_POINTS for op in operations):
             raise TeamError("Select supported operations explicitly")
         run = self.store.get(run_id)
+        if run.get("pending_pr_update"):
+            raise TeamError("A PR update was interrupted; finish it with agent-team pr update RUN_ID first")
         selecting = run.get("selection") or grants is not None
         plan = None
         if selecting:
@@ -842,6 +894,8 @@ class Coordinator:
 
     def resume(self, run_id):
         run = self.store.get(run_id)
+        if run.get("pending_pr_update"):
+            raise TeamError("A PR update was interrupted; finish it with agent-team pr update RUN_ID first")
         if run["stage"] not in {"blocked", "quota_wait"}:
             raise TeamError("Only blocked or quota-waiting runs can be resumed")
         if not self.enforce_boundary(run, run["resume_stage"]):
@@ -1508,15 +1562,16 @@ class Coordinator:
         body = review_comment(run["sha"], record, title)
         if run.get("adopted_pr"):
             body += "\n" + adopted_scope(run, reason)
+        # `evidence` names the reviewed commit, so `flush` can recheck the PR before publishing it.
         return {"type": "comment", "number": run["pr"] if run.get("published_sha") == run["sha"] else None,
-                "marker": marker, "body": body, "heading": f"{title} of `{run['sha']}`"}
+                "marker": marker, "body": body, "heading": f"{title} of `{run['sha']}`", "evidence": run["sha"]}
 
     def record_review(self, project, run, record):
         # The outcome is saved with its GitHub writes queued, so a failed write cannot hide a
         # rejection or a handoff; `flush` publishes them afterwards and retries on later ticks.
         comment = self.review_write(run, record)
         if record["report"]["verdict"] != "pass":
-            status = {"type": "status", "sha": run["sha"], "state": "failure",
+            status = {"type": "status", "sha": run["sha"], "state": "failure", "evidence": run["sha"],
                       "description": "Reviewer requested changes" if withheld(run)
                       else "Independent reviewer requested changes"}
             self.revise(project, run, report_text(record["report"]), record["report"]["findings"], record,
@@ -2003,8 +2058,9 @@ class Coordinator:
         merge_base = git(cwd, "merge-base", base, head)
         trailers = git(cwd, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{merge_base}..{head}")
         authors = git(cwd, "log", "--format=%an", f"{merge_base}..{head}")
+        families, unresolved = split_trailers(trailers)
         return {"head": head, "base": base, "merge_base": merge_base, "base_contained": merge_base == base,
-                "trailer_families": sorted({line.strip().casefold() for line in trailers.splitlines() if line.strip()}),
+                "trailer_families": families, "unresolved_trailers": unresolved,
                 "commit_authors": sorted({line.strip() for line in authors.splitlines() if line.strip()})}
 
     def adopt_pr(self, name, reference, mode, contributors, grants=(), reviewer=None, findings=(), plan_only=False):
@@ -2057,13 +2113,14 @@ class Coordinator:
         if any(found["head"] in r.get("rejected_shas", []) for r in runs):
             raise TeamError("PR head was rejected by an earlier run; continue that run and its budget")
         families = {c for c in declared if c in FAMILIES.values()} | set(found["trailer_families"])
-        independence = assess_independence(declared, families)
+        independence = assess_independence(declared, families, found["unresolved_trailers"])
         if mode != "review" and not independence["established"]:
             raise TeamError(f"Independent review cannot be established ({independence['reason']}), so revision is "
                             "refused. Review mode reports findings and withholds an independent-review success verdict")
         agent_of = {family: agent for agent, family in FAMILIES.items()}
         roles = None
-        if independence["established"] and families:
+        if len(families) == 1:
+            # A single known family is never assigned to review, even when independence is otherwise withheld.
             author = agent_of[next(iter(families))]
             roles = (author, "claude" if author == "codex" else "codex")
             if reviewer and reviewer != roles[1]:
@@ -2085,6 +2142,7 @@ class Coordinator:
                 "merge_base": found["merge_base"], "base_contained": found["base_contained"],
                 "state": pr["state"], "draft": bool(pr.get("draft")), "mode": mode, "findings": findings,
                 "declared": declared, "trailer_families": found["trailer_families"],
+                "unresolved_trailers": found["unresolved_trailers"],
                 # GitHub identities are recorded as provenance only, never as model authorship.
                 "github_identities": {"pr_author": (pr.get("user") or {}).get("login"),
                                       "commit_authors": found["commit_authors"]},
@@ -2115,7 +2173,8 @@ class Coordinator:
             performed_operations=[], unperformed_operations=list(ENTRY_POINTS), input_ref=None,
             contributors=sorted(set(declared) | families), revision_limit=project["max_revisions"],
             provenance={"kind": "pull_request", "pr": number, "scope": issue_fingerprint(issue), "declared": declared,
-                        "trailer_families": found["trailer_families"], "selected_revision": found["head"],
+                        "trailer_families": found["trailer_families"],
+                        "unresolved_trailers": found["unresolved_trailers"], "selected_revision": found["head"],
                         "selected_base": found["base"]},
             author_record={"report": {"summary": f"Existing PR #{number}",
                                       "limitations": "Existing work; implementation was not performed by Agent Team"}},
@@ -2137,6 +2196,9 @@ class Coordinator:
         info = run.get("adopted_pr")
         if not info:
             raise TeamError("Run does not track an adopted pull request")
+        if run.get("pending_pr_update"):
+            # Finish the interrupted swap with its journaled declarations; nothing is fetched again.
+            return self.finish_pr_update(project, run)
         if run["stage"] in TERMINAL:
             raise TeamError(f"Run is {run['stage']}; adopt the PR in a new run if needed")
         if recovering(run) or run["stage"] in {"handoff", "repair"} or (
@@ -2177,7 +2239,8 @@ class Coordinator:
             raise TeamError("PR head is a rejected commit; push a new commit first (previous work retained)")
         all_declared = sorted(set(info["declared"]) | set(declared))
         families = contributing_families(run, declared) | set(found["trailer_families"])
-        independence = assess_independence(all_declared, families)
+        unresolved = sorted(set(info.get("unresolved_trailers", [])) | set(found["unresolved_trailers"]))
+        independence = assess_independence(all_declared, families, unresolved)
         if independence["established"] and FAMILIES[run["reviewer"]] in families:
             independence = {"established": False, "reason": "the assigned reviewer's family contributed"}
         if info["mode"] != "review" and not independence["established"]:
@@ -2191,7 +2254,7 @@ class Coordinator:
         new_info = dict(info, head_sha=found["head"], base_sha=found["base"], merge_base=found["merge_base"],
                         base_contained=found["base_contained"], declared=all_declared,
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
-                        updates=info.get("updates", []) + [update])
+                        unresolved_trailers=unresolved, updates=info.get("updates", []) + [update])
         common = dict(adopted_pr=new_info, independence=independence, base_sha=found["base"], sha=found["head"],
                       published_sha=found["head"], pending_push_sha=None, error=None, resume_stage=None,
                       in_flight=False, contributors=sorted(set(run.get("contributors", [])) | set(declared) | families))
@@ -2203,21 +2266,44 @@ class Coordinator:
         git(fresh, "checkout", "--detach", found["head"])
         git(fresh, "switch", "-c", run["branch"])
         preserved = self.store.run_root(run) / f"author-preserved-{time.time_ns()}"
-        cwd.rename(preserved)
-        fresh.rename(cwd)
-        update["preserved"] = str(preserved)
+        new_info["updates"][-1]["preserved"] = str(preserved)
         # Supplied findings that no revision has addressed yet remain the requested scope.
         pending = bool(run.get("needs_revision")) and info["mode"] == "findings" and \
             "revision" not in run.get("performed_operations", [])
-        self.store.save(run, **common, git_metadata=metadata(cwd), validated_sha=None, validated_tree=None,
-                        validated_context=None, reviewed_sha=None, review_sha=None, review_record=None,
-                        review_withheld=None, needs_revision=pending, stage="stopped",
-                        next_stage="revision" if pending else "validate",
-                        partial_result="Changed PR inputs adopted deliberately; select the next operation",
-                        evidence_invalidations=run.get("evidence_invalidations", []) + [{
-                            "at": time.time(), "before": run.get("evidence_context"),
-                            "reason": "Deliberate adoption of changed PR head or base"}])
-        self.store.save(run, evidence_context=self.evidence_context(project, run))
+        changes = dict(common, git_metadata=metadata(fresh), validated_sha=None, validated_tree=None,
+                       validated_context=None, reviewed_sha=None, review_sha=None, review_record=None,
+                       review_withheld=None, needs_revision=pending, stage="stopped",
+                       next_stage="revision" if pending else "validate",
+                       partial_result="Changed PR inputs adopted deliberately; select the next operation",
+                       evidence_invalidations=run.get("evidence_invalidations", []) + [{
+                           "at": time.time(), "before": run.get("evidence_context"),
+                           "reason": "Deliberate adoption of changed PR head or base"}])
+        # Journal the swap and the invalidation before any rename, so an interruption is finished, not repeated.
+        self.store.save(run, pending_pr_update={"fresh": str(fresh), "preserved": str(preserved),
+                                                "metadata": changes["git_metadata"], "sha": found["head"],
+                                                "changes": changes})
+        return self.finish_pr_update(project, run)
+
+    def finish_pr_update(self, project, run):
+        """Finish a journaled checkout swap from update_pr. Each step is idempotent: the previous
+        checkout is moved aside only if it is still the recorded one, and nothing is deleted."""
+        pending = run["pending_pr_update"]
+        cwd = self.store.workspace(run)
+        fresh, preserved = Path(pending["fresh"]), Path(pending["preserved"])
+        if fresh.exists():
+            assert_metadata(fresh, pending["metadata"])
+            if cwd.exists():
+                assert_metadata(cwd, run["git_metadata"])
+                if preserved.exists():
+                    raise TeamError("PR update paths conflict; inspect preserved work")
+                cwd.rename(preserved)
+            fresh.rename(cwd)
+        assert_metadata(cwd, pending["metadata"])
+        if git(cwd, "rev-parse", "HEAD") != pending["sha"] or git(cwd, "status", "--porcelain"):
+            raise TeamError("Journaled PR update checkout changed; inspect it before recovery")
+        changes = pending["changes"]
+        context = self.evidence_context(project, dict(run, **changes))
+        self.store.save(run, **changes, evidence_context=context, pending_pr_update=None)
         return run
 
     def pr_report(self, run_id):
@@ -2271,6 +2357,9 @@ class Coordinator:
         if handoff:
             limitations.append(f"The revision is local only ({handoff['reason']}). Apply the patch or push the "
                                "commit yourself; no replacement PR was created.")
+        unpublished = run.get("unpublished_evidence", [])
+        for item in unpublished:
+            limitations.append(f"Review evidence for {item['evidence']} was not published: {item['withheld_reason']}.")
         return {"run": run["id"], "stage": run["stage"], "next_stage": run.get("next_stage"), "error": run.get("error"),
                 "pr": {k: info[k] for k in ("number", "url", "head_repo", "head_ref", "base_ref", "state", "draft")},
                 "mode": info["mode"], "requested_findings": info["findings"],
@@ -2278,6 +2367,7 @@ class Coordinator:
                             "base_contained": info["base_contained"], "updates": info.get("updates", [])},
                 "candidate": sha, "published": published,
                 "authorship": {"declared": info["declared"], "trailer_families": info["trailer_families"],
+                               "unresolved_trailers": info.get("unresolved_trailers", []),
                                "contributing_families": sorted(contributing_families(run)),
                                "github_identities": info["github_identities"],
                                "note": "GitHub identities are not treated as model authorship"},
@@ -2291,6 +2381,7 @@ class Coordinator:
                 "independent_review_success": bool(run.get("reviewed_sha") == sha and not withheld(run)),
                 "ci_checks": checks or "not checked",
                 "push": run.get("push_access") or info["push_access"], "local_handoff": handoff,
+                "unpublished_evidence": unpublished,
                 "performed_operations": run.get("performed_operations", []),
                 "omitted_operations": run.get("omitted_operations", []),
                 "unperformed_operations": run.get("unperformed_operations", []),

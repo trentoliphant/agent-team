@@ -742,7 +742,8 @@ exact-commit independent review.
 `anthropic`, or `unknown`. GitHub usernames are recorded but never treated as a
 model family. Trailer families are added to the declarations. When one model
 family contributed, the other family reviews and the same family revises. When
-`unknown` is declared or both families contributed, independence cannot be
+`unknown` is declared, both families contributed, or a commit has an
+`Agent-Family` trailer other than `openai` or `anthropic`, independence cannot be
 established. `pr review` still reports findings but withholds the
 independent-review success verdict, and revision modes are refused.
 
@@ -757,7 +758,10 @@ It preserves the previous checkout, including any unpushed local revision, and
 invalidates earlier validation and review. The base is never merged into an
 adopted PR; if the head lacks the current base, `pr show` reports that. Pushes are
 plain fast-forward pushes; nothing is force-pushed. An interrupted push is
-reconciled from the recorded pending commit.
+reconciled from the recorded pending commit. Review comments and statuses are
+published only after the PR is checked again. If it moved during the review or
+before a failed write is retried, the evidence stays local (`pr show`) and the run
+stops as `stale`. If `pr update` is interrupted, run it again to finish.
 
 **Forks and permissions.** Fork PRs can be reviewed when GitHub exposes their
 head. Before pushing, Agent Team checks the actual head repository. It pushes only
