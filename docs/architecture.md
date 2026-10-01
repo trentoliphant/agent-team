@@ -299,45 +299,22 @@ validation/review evidence. Review can run locally without a PR. It writes GitHu
 evidence only for a published candidate and with the content grant.
 
 `pr review|revise|findings` adopts an existing PR as a selected run with no
-issue. The run records the PR's head repository/branch/commit, base branch/commit,
-state, mode, declared contributors, trailer families, and GitHub identities
-(provenance only, never model authorship). Its published commit is the PR head,
-so validation and review run on the head as-is and the base is never merged.
-Review-only selects `validate review` and stops. Revision modes store a follow-up
-sequence (`revision validate [publish] review`) that a rejection enters within the
-revision budget. A continuation (`select --run`) releases the follow-up
-(`released_pr_followup`), so later rejections stop at the selected endpoint.
-`pr revise` reviews the unedited head before any edit: if its validation fails,
-the failure stays pending (`attempted_context` binds it to the candidate), review
-runs, and one rejection records both. `publish` is omitted when the actual head repository cannot be
-written. Adopted publication checks that the PR is still open, untargeted, and
-unmoved, then pushes fast-forward only to the PR's own branch. It never creates or
-edits a PR. Unknown or mixed authorship records `independence.established=false`.
-Review then records `review_withheld` instead of `reviewed_sha`, so readiness
-stays unavailable. Agent-Family trailers other than `openai` and `anthropic` are
-recorded as `unresolved_trailers` and withhold independence the same way. Head or
-base movement stops the run as `stale`, whether found by reconciliation, before a
-push, or by the recheck after every adopted review (with or without `github`).
-Reconciliation also compares the head repository and branch, so a PR that switches
-heads at the same commit goes stale too. Each case, and `pr update`, retires
-validation and review to `evidence_invalidations` with the head and base they
-covered; `pr show` reports them as `historical_evidence`, with full review reports. Queued review comments and statuses carry
-the reviewed commit; before publishing each one, including outbox retries, the
-coordinator rechecks the PR's head, base, state, and head repository. If any
-changed, the remaining writes move to `unpublished_evidence`, current evidence is
-retired, and the run stops as `stale`. Adopting a PR again after earlier runs
-ended keeps their budget: the new run inherits the highest round and the earlier
-revision limit, records them in `prior_runs`, and copies their `rejected_shas`. A
-findings revision always spends the next round before the budget check, including
-on first adoption, so `max_revisions=0` refuses it and a limit of N allows N
-revisions, as in revise mode. Revision modes are refused once an
-earlier run reached its revision limit; review mode stays available. Adopting a
-direct repair refuses a changed head repository or branch, even at the same
-commit; the PR must be adopted again in a new run.
-`pr update` journals the checkout swap and the evidence invalidation
-(`pending_pr_update`) before renaming directories. Rerunning `pr update` after an
-interruption finishes the swap from the journal. The previous checkout and any
-unpushed commit are preserved.
+issue (user-facing rules are in the README). Its published commit is the PR head;
+the base is never merged. Revision modes store `pr_followup`
+(`revision validate [publish] review`), entered by a rejection within the budget;
+`select --run` releases it (`released_pr_followup`). In `pr revise`, a failed
+validation of the unedited head stays pending (`attempted_context`) until review
+runs, and one rejection records both. Unknown, mixed, or unresolved trailer
+authorship sets `independence.established=false`, so review records
+`review_withheld` instead of `reviewed_sha`. Movement of the head, base, or head
+repository/branch, found by reconciliation, before a push, after an adopted
+review, or before each queued GitHub write, retires evidence to
+`evidence_invalidations` (`historical_evidence` in `pr show`), moves remaining
+writes to `unpublished_evidence`, and stops the run as `stale`. Re-adoption
+inherits the highest round, revision limit, and `rejected_shas` of earlier runs
+(`prior_runs`); a findings revision spends its round before the budget check.
+`pr update` journals the swap and invalidation (`pending_pr_update`) before
+renaming directories, so rerunning it completes an interrupted update.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

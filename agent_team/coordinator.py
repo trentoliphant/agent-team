@@ -2274,8 +2274,7 @@ class Coordinator:
             raise TeamError("PR head or base moved during adoption; retry")
         if any(found["head"] in r.get("rejected_shas", []) for r in runs):
             raise TeamError("PR head was rejected by an earlier run; continue that run and its budget")
-        # Earlier, finished runs for this PR keep their budget: readoption never resets it, even after an
-        # external commit changes the inputs. Review-only runs count too, since they can be continued into revision.
+        # Readoption never resets the budget of earlier runs, including review-only runs.
         prior = [r for r in runs if r.get("pr") == number]
         exhausted = [r for r in prior if r.get("handoffs") and
                      r["handoffs"][-1]["round"] >= revision_limit(project, r)]
@@ -2283,10 +2282,8 @@ class Coordinator:
             raise TeamError(f"PR #{number} reached its revision limit in run {exhausted[-1]['id']}; readoption "
                             "does not reset the budget. Review mode is still available; further revision needs "
                             "an operator repair outside Agent Team")
-        # Like a handoff, the earlier limit is kept, so later configuration changes cannot widen it.
         inherited_limit = max((revision_limit(project, r) for r in prior), default=project["max_revisions"])
-        # A findings revision edits immediately, so it spends the next round before the budget check,
-        # exactly as revise mode does after its first review rejects the candidate.
+        # A findings revision edits immediately, so it spends its round before the budget check.
         inherited_round = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
         if mode != "review" and inherited_round > inherited_limit:
             raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
@@ -2556,8 +2553,7 @@ class Coordinator:
             handoff = {"commit": sha, "builds_on": published, "checkout": str(cwd), "patch": str(path),
                        "reason": reason or "publication to the PR branch was not selected",
                        "replacement_pr": "not created"}
-        # Observations from `checks` and readiness, each named with its head and base. Only those for the
-        # current candidate and base apply; the rest are historical.
+        # Only CI observations for the current candidate and base apply.
         checks = [{"operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
                    "state": c["state"], "at": c.get("at"), "readiness_changed": c.get("readiness_changed", False),
                    "current": current and c["sha"] == sha and c["base"] == run["base_sha"]}

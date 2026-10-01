@@ -129,6 +129,24 @@ class PullRequestTests(unittest.TestCase):
     def remote_head(self, branch="feature"):
         return git(self.remote, "rev-parse", f"refs/heads/{branch}")
 
+    def until_handoff(self, run):
+        for _ in range(10):
+            if run["stage"] == "handoff":
+                break
+            run = self.ticks(run, 1)
+        return run
+
+    def tick_moving_during_review(self, run):
+        real = self.agents.run
+
+        def moving(agent, role, *args, **kwargs):
+            if role == "review":
+                self.push_external()
+            return real(agent, role, *args, **kwargs)
+
+        with patch.object(self.agents, "run", side_effect=moving):
+            return self.ticks(run, 1)
+
     def test_review_only_reports_locally_without_edits_or_github_writes(self):
         head = self.open_pr(user="claude-bot")
         base = git(self.remote, "rev-parse", "main")
@@ -162,8 +180,7 @@ class PullRequestTests(unittest.TestCase):
     def test_review_only_rejection_publishes_scoped_findings_and_stops(self):
         head = self.open_pr()
         self.agents.reject = True
-        run = self.team.adopt_pr("https://github.com/example/demo/pull/7".split("/")[-1] and "demo",
-                                 "https://github.com/example/demo/pull/7", "review", ["human"], grants=["github"])
+        run = self.team.adopt_pr("demo", "https://github.com/example/demo/pull/7", "review", ["human"], grants=["github"])
         run = self.ticks(run, 3)
         self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
         self.assertIn(head, run["rejected_shas"])
@@ -361,11 +378,7 @@ class PullRequestTests(unittest.TestCase):
         self.open_pr()
         # The existing head and its revision are both rejected (`True` counts as one rejection).
         self.agents.reject = 2
-        run = self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"])
-        for _ in range(10):
-            if run["stage"] == "handoff":
-                break
-            run = self.ticks(run, 1)
+        run = self.until_handoff(self.team.adopt_pr("demo", "7", "revise", ["human"], grants=["edit"]))
         self.assertEqual((run["stage"], run["round"]), ("handoff", 1))
         run = self.team.decide(run["id"], "stop")
         self.assertEqual(run["stage"], "closed")
@@ -627,15 +640,7 @@ class PullRequestTests(unittest.TestCase):
         run = self.team.adopt_pr("demo", "7", "review", ["human"], grants=["github"])
         run = self.ticks(run, 2)
         self.assertEqual(run["stage"], "review")
-        real = self.agents.run
-
-        def moving(agent, role, *args, **kwargs):
-            if role == "review":
-                self.push_external()
-            return real(agent, role, *args, **kwargs)
-
-        with patch.object(self.agents, "run", side_effect=moving):
-            run = self.ticks(run, 1)
+        run = self.tick_moving_during_review(run)
         self.assertEqual(run["stage"], "stale")
         self.assertIn("PR head moved", run["error"])
         self.assertIn("before review evidence was published", run["error"])
@@ -658,16 +663,8 @@ class PullRequestTests(unittest.TestCase):
         base = git(self.remote, "rev-parse", "main")
         run = self.ticks(self.team.adopt_pr("demo", "7", "review", ["human"]), 2)
         self.assertEqual(run["stage"], "review")
-        real = self.agents.run
-
-        def moving(agent, role, *args, **kwargs):
-            if role == "review":
-                self.push_external()
-            return real(agent, role, *args, **kwargs)
-
         # Without a github grant nothing is queued for publication, yet the PR is still rechecked.
-        with patch.object(self.agents, "run", side_effect=moving):
-            run = self.ticks(run, 1)
+        run = self.tick_moving_during_review(run)
         self.assertEqual(run["stage"], "stale")
         self.assertIn("PR head moved", run["error"])
         self.assertIsNone(run["validated_sha"])
@@ -981,17 +978,12 @@ class PullRequestTests(unittest.TestCase):
         run = self.ticks(self.team.select("demo", ["validate", "review"], [], run_id=run["id"]), 2)
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", external))
 
-    def test_update_interrupted_after_journal_recovers(self):
-        self.interrupted_update("journal")
-
-    def test_update_interrupted_after_first_rename_recovers(self):
-        self.interrupted_update("rename-1")
-
-    def test_update_interrupted_after_second_rename_recovers(self):
-        self.interrupted_update("rename-2")
-
-    def test_update_interrupted_before_final_save_recovers(self):
-        self.interrupted_update("final-save")
+    def test_interrupted_update_recovers(self):
+        for point in ("journal", "rename-1", "rename-2", "final-save"):
+            with self.subTest(point=point):
+                self.tearDown()
+                self.setUp()
+                self.interrupted_update(point)
 
     def test_supplied_findings_are_revised_with_fresh_evidence(self):
         head = self.open_pr()
@@ -1019,10 +1011,7 @@ class PullRequestTests(unittest.TestCase):
         self.agents.reject = True
         run = self.team.adopt_pr("demo", "7", "findings", ["human"], grants=["edit"], findings=["Fix it"])
         self.assertEqual((run["round"], run["revision_limit"]), (1, 1))
-        for _ in range(10):
-            if run["stage"] == "handoff":
-                break
-            run = self.ticks(run, 1)
+        run = self.until_handoff(run)
         # Like revise mode with the same limit, exactly one revision is made before the handoff.
         self.assertEqual((run["stage"], run["round"]), ("handoff", 1))
         self.assertEqual([call for call in self.agents.calls if call[1] == "implement"], [(run["author"], "implement")])

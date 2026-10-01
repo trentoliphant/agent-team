@@ -768,24 +768,19 @@ adopting a PR that another run already tracks, is refused. The PR title,
 description, labels, and history are left unchanged.
 
 **Movement.** The head and base are checked before every push, after every
-review (with or without `github`), and whenever evidence is reused. If either
-moved, or the PR now uses another head repository or branch (even at the same
-commit), the run stops as `stale` and nothing is pushed. Its validation and review
-no longer count: `pr show` lists them under `historical_evidence` with the head
-and base they covered, including the full review (summary, findings, reviewer),
-and reports `current_evidence: false`. A changed head repository or branch needs
-a new adoption. `pr update RUN_ID --contributor ...` adopts new commits deliberately.
-It preserves the previous checkout, including any unpushed local revision, and
-moves earlier validation and review to `historical_evidence`. The base is never merged into an
-adopted PR; if the head lacks the current base, `pr show` reports that. Pushes are
-plain fast-forward pushes; nothing is force-pushed. An interrupted push is
-reconciled from the recorded pending commit. Review comments and statuses are
-published only after the PR is checked again, before each write. If it moved
-during the review, between writes, or before a failed write is retried, the
-remaining evidence stays local (`pr show`) and the run stops as `stale`. If
-`pr update` is interrupted, run it again to finish. Adopting a PR again after an
-earlier run ended does not reset its revision budget. Once an earlier run reached
-the limit, only review mode is accepted.
+review, before each review comment or status write, and whenever evidence is
+reused. If either moved, or the PR now uses another head repository or branch
+(even at the same commit), the run stops as `stale`, nothing more is pushed or
+published, and unpublished evidence stays local. `pr show` then lists earlier
+validation and review, with the full review, under `historical_evidence` and
+reports `current_evidence: false`. A changed head repository or branch needs a
+new adoption. `pr update RUN_ID --contributor ...` adopts new commits
+deliberately and preserves the previous checkout, including any unpushed
+revision; if interrupted, run it again. The base is never merged into an adopted
+PR; `pr show` reports a head that lacks the current base. Pushes are plain
+fast-forward pushes, and an interrupted push is reconciled from the recorded
+pending commit. Adopting a PR again does not reset its revision budget; once an
+earlier run reached the limit, only review mode is accepted.
 
 **Forks and permissions.** Fork PRs can be reviewed when GitHub exposes their
 head. Before pushing, Agent Team checks the actual head repository. It pushes only
