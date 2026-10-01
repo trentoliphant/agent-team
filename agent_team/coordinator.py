@@ -482,11 +482,11 @@ class Coordinator:
                                     heading=item.get("heading"))
             self.store.save(run, outbox=run["outbox"][1:])
 
-    def adopted_pr_change(self, project, run, sha):
+    def adopted_pr_change(self, project, run, sha, pr=None):
         """Why an adopted PR no longer matches the commit and inputs that evidence names, or None.
         Returns (stage, reason); the stage is `merged`, `closed`, or `stale`."""
         info = run["adopted_pr"]
-        pr = self.github.pr(project["repo"], info["number"])
+        pr = pr or self.github.pr(project["repo"], info["number"])
         if pr.get("merged") or pr["state"] != "open":
             return ("merged", "PR was merged") if pr.get("merged") else ("closed", "PR was closed")
         head = pr["head"].get("repo") or {}
@@ -499,16 +499,14 @@ class Coordinator:
         return None
 
     def recheck_adopted(self, project, run):
-        """After a review of an adopted PR, with or without publication grants, confirm the PR still has
-        the head and base the evidence names. Returns True if it moved."""
+        """Stop the run if an adopted PR no longer has the head and base its review names; True if so."""
         change = self.adopted_pr_change(project, run, run.get("published_sha") or run["sha"])
         if change:
             self.adopted_pr_moved(run, *change)
         return bool(change)
 
     def adopted_pr_moved(self, run, stage, reason):
-        """Stop an adopted run whose PR changed. Queued review evidence stays local, and current
-        evidence is retired to history under the head and base it was gathered for."""
+        """Stop an adopted run whose PR changed, keeping queued evidence local and retiring current evidence."""
         evidence = [i for i in run.get("outbox", []) if i.get("evidence")]
         changes = {}
         if stage in {"merged", "closed"}:
@@ -524,8 +522,7 @@ class Coordinator:
 
     @staticmethod
     def retire_adopted_evidence(run, reason):
-        """Changes that void validation and review once an adopted PR's head or base moved. The
-        evidence stays on the run as history, named with the head and base it was gathered for."""
+        """Changes that void validation and review once an adopted PR moved, kept as history under its head and base."""
         evidence = {k: run[k] for k in ("validated_sha", "reviewed_sha", "review_sha", "review_record",
                                         "review_withheld") if run.get(k)}
         changes = dict(validated_sha=None, validated_tree=None, validated_context=None, attempted_context=None,
@@ -908,6 +905,8 @@ class Coordinator:
             raise TeamError("This operation requires compatible successful validation")
         if first == "ci" and (not run.get("pr") or run.get("reviewed_sha") != context["head"]):
             raise TeamError("Readiness requires an existing PR and exact-commit independent review")
+        if first == "ci" and run.get("published_sha") != context["head"]:
+            raise TeamError("Readiness requires the exact candidate to be the published PR head; publish it first")
         if "checks" in operations and not run.get("pr") and "publish" not in operations:
             raise TeamError("CI checks require a tracked PR or selected publication")
         if "ci" in operations and "review" not in operations and (
@@ -1762,6 +1761,9 @@ class Coordinator:
             raise TeamError("Missing review for this exact commit")
         if not run.get("pr"):
             raise TeamError("Readiness requires an existing PR")
+        # `reconcile` then confirms the PR head is this published commit; a local handoff is never ready.
+        if run.get("published_sha") != run["sha"]:
+            raise TeamError("Readiness requires the exact candidate to be the published PR head; publish it first")
         if self.pins_changed(project, run):
             self.renew_pins(project, run)
             return
@@ -1780,14 +1782,28 @@ class Coordinator:
             return
         if not self.reconcile(project, run):
             return
+        def moved(pr=None):
+            # After `reconcile`, an adopted PR is rechecked before each later readiness write;
+            # movement stops the run and retires the evidence.
+            change = run.get("adopted_pr") and self.adopted_pr_change(project, run, run["sha"], pr)
+            if change:
+                self.adopted_pr_moved(run, *change)
+            return change
         # Reconcile the marked review before readiness, including reviews performed
         # locally without a GitHub grant. A failed write must leave the PR draft.
         comment = self.review_write(run, run["review_record"])
         self.github.comment(project["repo"], run["pr"], comment["marker"], comment["body"],
                             heading=comment["heading"])
+        if moved():
+            return
         self.github.status(project["repo"], run["sha"], "success", "Cross-family review and configured tests passed; human merge only")
-        if self.github.pr(project["repo"], run["pr"]).get("draft"):
+        pr = self.github.pr(project["repo"], run["pr"])
+        if moved(pr):
+            return
+        if pr.get("draft"):
             self.github.mark_ready(project["repo"], run["pr"])
+        if moved():
+            return
         self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready",
                             self.status_text(project, run, "ready", ready_forms(run)))
         self.store.save(run, stage="ready", ci_checks=run["ci_checks"][:-1] + [dict(run["ci_checks"][-1],

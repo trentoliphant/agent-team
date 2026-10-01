@@ -308,7 +308,7 @@ runs, and one rejection records both. Unknown, mixed, or unresolved trailer
 authorship sets `independence.established=false`, so review records
 `review_withheld` instead of `reviewed_sha`. Movement of the head, base, or head
 repository/branch, found by reconciliation, before a push, after an adopted
-review, or before each queued GitHub write, retires evidence to
+review, or before each evidence or readiness write, retires evidence to
 `evidence_invalidations` (`historical_evidence` in `pr show`), moves remaining
 writes to `unpublished_evidence`, and stops the run as `stale`. Re-adoption
 inherits the highest round, revision limit, and `rejected_shas` of earlier runs
