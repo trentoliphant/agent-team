@@ -189,3 +189,92 @@ explicit refresh. Closed runs are not automatically recreated; a new attempt
 needs a new linked issue and approval. Do not reset state, remove locks, change
 retry limits, force-push, or weaken validation/review policy as a recovery
 shortcut. If the cause remains unresolved, report it and stop.
+
+## Selected portions of work
+
+Recognize requests for discovery, issue drafts, implementation without publication,
+validation only, publication of existing work, review only, revision followed by
+review, and CI/readiness. Use `select`; a single tick of the full queue does not
+establish a stop boundary. Do not replace a partial request with a full workflow.
+
+Identify explicit scope and acceptance criteria, the existing issue or revision,
+and any tracked run first. Explain the selected operations and effects. Honor
+existing operator authorization; ask only for missing scope or effects. Grants
+are separate: `edit` for local edits and candidate commits, `push` for branch
+publication, `github` for content/status writes, and `readiness` for PR readiness.
+They permit effects but never select additional operations. Use `--plan` to
+preview. `select` saves the plan without executing it.
+
+```sh
+agent-team select example --task 'Add a CSV exporter; preserve JSON output and test both formats' \
+  --operations implement validate --grant edit
+agent-team select example --task 'Validate the existing CSV exporter' \
+  --ref csv-export --contributor human --operations validate
+agent-team select example --run RUN_ID --operations publish --grant push --grant github
+agent-team select example --run RUN_ID --operations review
+agent-team select example --run RUN_ID --operations revision validate review --grant edit
+agent-team select example --run RUN_ID --operations ci --grant readiness
+agent-team select example --run RUN_ID --operations checks
+agent-team select example --run RUN_ID --operations publish ci --grant push --grant github --grant readiness
+agent-team select example --task 'Investigate onboarding gaps and prepare issue drafts' \
+  --operations discovery issue_prepare
+agent-team run example --run RUN_ID --watch
+agent-team inspect RUN_ID
+```
+
+These are alternative selections. Run the returned ID after saving each plan.
+`--issue 123` can replace task scope for approved issues; its existing fingerprint
+and ready label remain required. Tasks never require synthetic issues. Existing
+branches/commits require every contributor to be declared. Choose one operation
+or an ordered sequence; local review may omit publication. Individual publication,
+review, and CI reuse a tracked run's compatible evidence. Without such evidence,
+select validation first. Existing-PR adoption from outside Agent Team is #10;
+do not create a replacement PR or author pass to work around that limitation.
+After a compatible local review, `publish ci` publishes and checks readiness
+without repeating review. Publication posts the stored review on the PR;
+readiness requires its comment write to succeed. Inspect each continuation's grants and effects to
+report what that segment authorized.
+For CI inspection without readiness, select `checks`. It reads once, saves pending,
+failure, or success with the exact revision and time, and stops without review or
+readiness changes. A passing snapshot cannot replace validation or independent
+review. Existing issue-progress grants still apply.
+`issue_prepare` produces local drafts for human triage, without creating or
+approving an issue. The separate legacy `discover` command publishes unready issues.
+
+Report the run ID, exact candidate/base revisions, selected and performed stages,
+validation/review evidence, and omitted checks. `stopped` does not mean whole
+workflow success. All rejections stop selected work before fixes.
+A stopped run holds the repository across restarts,
+including other registrations, and blocks queue work and new selections. Report
+this hold when reporting partial completion. Continue explicitly with
+`select --run RUN_ID`, or use `agent-team close RUN_ID` when the operator has
+authorized ending orchestration and no continuation is planned. Closing releases
+the repository, preserves work and history, and leaves GitHub issues and PRs open.
+It is terminal: the same issue or task scope cannot restart the run. Do not close
+a run automatically just because its selected operations finished. Revision
+exhaustion requires `decide`. An extension or adoption returns selected work to
+an explicit boundary. Reselect operations without resetting its budget/history.
+Changed candidate, base, scope, configuration, or dependency pins invalidate
+affected evidence. Local handoff edits require contributor declarations, including
+your family if you contributed. The reviewer's family is refused.
+A valid declaration with validation or an earlier rebuilding
+entry continues in one command after invalidating old evidence. Publication,
+review, checks, and readiness still refuse invalidated prerequisites. Do not reroll
+rejected evidence. Unpublished base drift can be integrated with
+`refresh RUN_ID --grant edit`; declare contributors if its committed HEAD changed.
+It preserves prior work and returns to stopped validation. Conflicts require
+human resolution. An interrupted swap is reconciled by explicit refresh.
+
+The legacy `run --issue 123 --stop-after validate --watch` still starts from
+implementation and retains issue progress writes. Its saved boundary cannot be
+expanded by watch or resume. `continue` retains contiguous legacy continuation;
+use `select --run` for separate grants and individually selected stages.
+
+Existing input refs must contain the current registered base. Selection checks
+this before claiming task scope and checks again during preparation. Integrate
+the base into the input branch before entry. Trailer-detected model families
+join declared contributors and determine the independent reviewer. Rejected
+commits and input from both model families are refused before scope is claimed.
+If the input becomes invalid after selection, preparation leaves no author
+checkout. Correct the input branch, inspect the blocked run, then explicitly
+resume it. Selection and preparation revisions remain recorded in provenance.

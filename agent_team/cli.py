@@ -9,7 +9,7 @@ import time
 
 from . import __version__
 from .agents import Agents, subscription_status
-from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, Coordinator
+from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, STOP_POINTS, ENTRY_POINTS, EFFECTS, Coordinator
 from .github import GitHub
 from .process import TeamError, execute
 from .state import CoordinatorBusy, Store, default_home
@@ -69,8 +69,20 @@ def parser():
     run = commands.add_parser("run", help="Advance one stage, or poll with --watch")
     run.add_argument("project")
     run.add_argument("--issue", type=int, help="Select only this approved ready issue")
+    run.add_argument("--stop-after", choices=STOP_POINTS, help="Persist an endpoint for --issue; later ticks cannot advance beyond it")
     run.add_argument("--watch", action="store_true")
     run.add_argument("--interval", type=int, default=30)
+    run.add_argument("--run", dest="run_id", help="Advance only this tracked run, including task runs")
+    selection = commands.add_parser("select", help="Save explicit operations, scope, grants and endpoint; no execution")
+    selection.add_argument("project")
+    selection.add_argument("--operations", nargs="+", choices=ENTRY_POINTS, required=True)
+    selection.add_argument("--grant", action="append", choices=EFFECTS, default=[])
+    selection.add_argument("--issue", type=int)
+    selection.add_argument("--task", help="Explicit immutable task scope and acceptance criteria")
+    selection.add_argument("--ref", help="Existing remote branch or exact commit")
+    selection.add_argument("--run", dest="run_id", help="Continue compatible tracked evidence")
+    selection.add_argument("--contributor", action="append", choices=CONTRIBUTORS, default=[])
+    selection.add_argument("--plan", action="store_true", help="Show operations and effects without saving or executing")
     queue = commands.add_parser("queue", help="Inspect or save a project's implementation order").add_subparsers(
         dest="queue_command", required=True)
     for verb in ("show", "set", "reorder", "clear"):
@@ -87,6 +99,13 @@ def parser():
     for verb in ("inspect", "resume", "close", "refresh"):
         item = commands.add_parser(verb)
         item.add_argument("run_id")
+        if verb == "refresh":
+            item.add_argument("--contributor", action="append", choices=CONTRIBUTORS, default=[])
+            item.add_argument("--grant", choices=["edit"], help="Explicit local base-integration authorization")
+    continuation = commands.add_parser("continue", help="Explicitly continue a stopped run without resetting its history")
+    continuation.add_argument("run_id")
+    continuation.add_argument("--operations", nargs="+", choices=ENTRY_POINTS, required=True)
+    continuation.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), default=[])
     handoff = commands.add_parser("handoff", help="Show the latest revision-limit handoff and decisions")
     handoff.add_argument("run_id")
     handoff.add_argument("--json", action="store_true")
@@ -212,18 +231,32 @@ def dispatch(args, store):
             emit({"project": args.project, "saved_order": store.project(args.project)["queue_order"]})
     elif args.command == "approve":
         emit(github.approve(store.project(args.project), args.issue))
+    elif args.command == "select":
+        grants = sorted(set(args.grant) | set(store.get(args.run_id).get("grants", []) if args.run_id else []))
+        plan = team.operation_plan(args.operations, grants)
+        emit(plan)
+        if not args.plan:
+            emit(team.select(args.project, args.operations, args.grant, args.issue, args.task,
+                             args.ref, args.contributor, args.run_id))
     elif args.command == "run":
+        if args.run_id and (args.issue is not None or args.stop_after is not None):
+            raise TeamError("Use --run alone to retain the saved plan")
         if args.interval < 1:
             raise TeamError("Polling interval must be positive")
         # Lock per tick, not across sleep, so pause/status remain usable.
         while True:
             try:
-                value = team.tick(args.project, args.issue)
+                if args.run_id:
+                    value = team.tick(args.project, run_id=args.run_id)
+                elif args.stop_after is None:
+                    value = team.tick(args.project, args.issue)
+                else:
+                    value = team.tick(args.project, args.issue, args.stop_after)
             except CoordinatorBusy as exc:
                 value = {"project": args.project, "stage": "busy", "error": str(exc)}
             emit({k: value[k] for k in ("id", "project", "stage", "error", "pr") if k in value})
-            if not args.watch or (args.issue is not None and value["stage"] in {
-                    "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
+            if not args.watch or ((args.issue is not None or args.run_id) and value["stage"] in {
+                    "stopped", "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
                     "idle"}):
                 break
             time.sleep(args.interval)
@@ -233,25 +266,24 @@ def dispatch(args, store):
             emit(runs)
         else:
             for run in runs:
-                print(f"{run['id']}  {run['project']}  #{run['issue']}  {run['stage']}  "
+                scope = f"#{run['issue']}" if run["issue"] is not None else "task"
+                print(f"{run['id']}  {run['project']}  {scope}  {run['stage']}  "
                       f"{run['author']} → {run['reviewer']}  PR {run.get('pr') or '-'}")
             if not runs:
                 print("No runs. Approve a registered project's issue with: agent-team approve PROJECT NUMBER")
     elif args.command == "inspect":
         emit(store.get(args.run_id))
+    elif args.command == "continue":
+        emit(team.continue_run(args.run_id, args.operations, args.contributor))
     elif args.command == "resume":
-        run = store.get(args.run_id)
-        if run["stage"] not in {"blocked", "quota_wait"}:
-            raise TeamError("Only blocked or quota-waiting runs can be resumed")
-        store.save(run, stage=run["resume_stage"], error=None, in_flight=False, quota_attempts=0)
-        emit(run)
+        emit(team.resume(args.run_id))
     elif args.command == "close":
         run = store.get(args.run_id)
         store.save(run, stage="closed", in_flight=False, notification_pending=True)
         team.notify(store.project(run["project"]), run)
         emit({"id": run["id"], "stage": "closed", "note": "GitHub issue/PR and local checkout retained"})
     elif args.command == "refresh":
-        emit(team.refresh(args.run_id))
+        emit(team.refresh(args.run_id, args.contributor, args.grant == "edit"))
     elif args.command == "handoff":
         run = store.get(args.run_id)
         if not run.get("handoffs"):
@@ -285,8 +317,11 @@ def main(argv=None):
     args = parser().parse_args(argv)
     store = Store(args.home)
     try:
-        if args.command in {"resume", "close", "decide", "adopt", "refresh"}:
+        if args.command in {"continue", "resume", "close", "decide", "adopt", "refresh"}:
             with store.repository_lock(store.get(args.run_id)["project"]):
+                code = dispatch(args, store)
+        elif args.command == "select":
+            with store.repository_lock(args.project):
                 code = dispatch(args, store)
         elif args.command == "discover":
             with store.worker(args.project):
