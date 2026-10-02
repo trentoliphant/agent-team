@@ -62,6 +62,14 @@ class PullRequestTests(unittest.TestCase):
     def tearDown(self):
         test_coordinator.WorkflowTests.tearDown(self)
 
+    def scenarios(self, *cases):
+        """Run each case as a subtest on a fresh fixture, so commits and runs never leak between cases."""
+        for case in cases:
+            with self.subTest(case=case):
+                self.tearDown()
+                self.setUp()
+                yield case
+
     def local_git(self, cwd, *args):
         args = list(args)
         if "push" in args:
@@ -317,26 +325,25 @@ class PullRequestTests(unittest.TestCase):
         self.assertIsNone(run.get("reviewed_sha"))
 
     def test_unknown_and_unsupported_trailers_withhold_independence(self):
-        for number, value in ((7, "unknown"), (8, "gemini")):
-            with self.subTest(value=value):
-                head = self.open_pr(number, f"branch-{number}", message=f"Add feature\n\nAgent-Family: {value}")
-                with self.assertRaisesRegex(TeamError, "unknown or unsupported model families"):
-                    self.team.adopt_pr("demo", str(number), "revise", ["human"], grants=["edit"])
-                run = self.team.adopt_pr("demo", str(number), "review", ["human"], grants=["github"])
-                self.assertFalse(run["independence"]["established"])
-                self.assertEqual(run["adopted_pr"]["unresolved_trailers"], [value])
-                self.assertEqual(run["adopted_pr"]["trailer_families"], [])
-                self.assertEqual(run["contributors"], ["human"])
-                run = self.ticks(run, 3)
-                self.assertEqual(run["stage"], "stopped")
-                self.assertIsNone(run.get("reviewed_sha"))
-                self.assertEqual(run["review_withheld"]["sha"], head)
-                body = self.github.comments[(number, f"{run['id']}-review-0-{head}")]
-                self.assertIn("Review (independence not established)", body)
-                report = self.team.pr_report(run["id"])
-                self.assertFalse(report["independent_review_success"])
-                self.assertEqual(report["authorship"]["unresolved_trailers"], [value])
-                self.store.save(run, stage="closed")
+        for number, value in self.scenarios((7, "unknown"), (8, "gemini")):
+            head = self.open_pr(number, f"branch-{number}", message=f"Add feature\n\nAgent-Family: {value}")
+            with self.assertRaisesRegex(TeamError, "unknown or unsupported model families"):
+                self.team.adopt_pr("demo", str(number), "revise", ["human"], grants=["edit"])
+            run = self.team.adopt_pr("demo", str(number), "review", ["human"], grants=["github"])
+            self.assertFalse(run["independence"]["established"])
+            self.assertEqual(run["adopted_pr"]["unresolved_trailers"], [value])
+            self.assertEqual(run["adopted_pr"]["trailer_families"], [])
+            self.assertEqual(run["contributors"], ["human"])
+            run = self.ticks(run, 3)
+            self.assertEqual(run["stage"], "stopped")
+            self.assertIsNone(run.get("reviewed_sha"))
+            self.assertEqual(run["review_withheld"]["sha"], head)
+            body = self.github.comments[(number, f"{run['id']}-review-0-{head}")]
+            self.assertIn("Review (independence not established)", body)
+            report = self.team.pr_report(run["id"])
+            self.assertFalse(report["independent_review_success"])
+            self.assertEqual(report["authorship"]["unresolved_trailers"], [value])
+            self.store.save(run, stage="closed")
         # A known family alongside an unsupported value still never reviews its own work.
         self.open_pr(9, "branch-9", message="Add feature\n\nAgent-Family: openai\nAgent-Family: gemini")
         run = self.team.adopt_pr("demo", "9", "review", ["human"])
@@ -431,36 +438,34 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(self.github.pulls[8]["base"], "release")
 
     def test_revision_after_review_only_rejection_is_refused_before_editing(self):
-        git(self.remote, "branch", "release", "main")
-        cases = ((7, "feature", "main", ["human", "unknown"], "unknown contributors"),
-                 (8, "mixed", "main", ["openai", "anthropic"], "both model families"),
-                 (9, "release-fix", "release", ["human"], "never retargets"))
-        for number, branch, base, contributors, message in cases:
-            with self.subTest(number=number):
-                head = self.open_pr(number, branch, base=base)
-                self.agents.reject = True
-                run = self.reviewed(str(number), contributors=contributors)
-                self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
-                calls = list(self.agents.calls)
-                with self.assertRaisesRegex(TeamError, message):
-                    self.team.select("demo", ["revision", "validate"], ["edit"], run_id=run["id"])
-                run = self.store.get(run["id"])
-                self.assertEqual(run["stage"], "stopped")
-                # Recovery into a revision stage is refused by the same check before any author call.
-                self.store.save(run, stage="revision", grants=["edit"], operations=["revision", "validate"],
-                                stop_after="validate")
-                try:
-                    self.ticks(run, 1)
-                except TeamError as error:
-                    self.assertRegex(str(error), message)
-                run = self.store.get(run["id"])
-                self.assertNotIn(run["stage"], {"validate", "review"})
-                self.assertEqual(self.agents.calls, calls)
-                self.assertNotIn("implement", [role for _, role in self.agents.calls])
-                self.assertEqual(git(self.store.workspace(run), "rev-parse", "HEAD"), head)
-                self.assertEqual(git(self.store.workspace(run), "status", "--porcelain"), "")
-                self.assertEqual(self.remote_head(branch), head)
-                self.store.save(run, stage="closed")
+        for number, branch, base, contributors, message in self.scenarios(
+                (7, "feature", "main", ["human", "unknown"], "unknown contributors"),
+                (8, "mixed", "main", ["openai", "anthropic"], "both model families"),
+                (9, "release-fix", "release", ["human"], "never retargets")):
+            git(self.remote, "branch", "release", "main")
+            head = self.open_pr(number, branch, base=base)
+            self.agents.reject = True
+            run = self.reviewed(str(number), contributors=contributors)
+            self.assertEqual((run["stage"], run["next_stage"]), ("stopped", "implement"))
+            calls = list(self.agents.calls)
+            with self.assertRaisesRegex(TeamError, message):
+                self.team.select("demo", ["revision", "validate"], ["edit"], run_id=run["id"])
+            run = self.store.get(run["id"])
+            self.assertEqual(run["stage"], "stopped")
+            # Recovery into a revision stage is refused by the same check before any author call.
+            self.store.save(run, stage="revision", grants=["edit"], operations=["revision", "validate"],
+                            stop_after="validate")
+            try:
+                self.ticks(run, 1)
+            except TeamError as error:
+                self.assertRegex(str(error), message)
+            run = self.store.get(run["id"])
+            self.assertNotIn(run["stage"], {"validate", "review"})
+            self.assertEqual(self.agents.calls, calls)
+            self.assertNotIn("implement", [role for _, role in self.agents.calls])
+            self.assertEqual(git(self.store.workspace(run), "rev-parse", "HEAD"), head)
+            self.assertEqual(git(self.store.workspace(run), "status", "--porcelain"), "")
+            self.assertEqual(self.remote_head(branch), head)
 
     def readiness_run(self):
         head = self.open_pr()
@@ -521,28 +526,46 @@ class PullRequestTests(unittest.TestCase):
                       "observations are historical.", report["limitations"])
 
     def test_movement_during_readiness_writes_stops_before_ready(self):
-        for write, move in (("comment", self.push_external), ("status", self.advance_base)):
-            with self.subTest(write=write):
-                self.tearDown()
-                self.setUp()
-                head, run = self.readiness_run()
-                real = getattr(self.github, write)
+        for write, move in self.scenarios(("comment", "push_external"), ("status", "advance_base")):
+            head, run = self.readiness_run()
+            real = getattr(self.github, write)
 
-                def moving(repo, target, key, *args, **kwargs):
-                    real(repo, target, key, *args, **kwargs)
-                    if "-review-" in key or key == "success":
-                        move()
+            def moving(repo, target, key, *args, **kwargs):
+                real(repo, target, key, *args, **kwargs)
+                if "-review-" in key or key == "success":
+                    getattr(self, move)()
 
-                with patch.object(self.github, write, side_effect=moving):
-                    run = self.ticks(run, 1)
-                self.assertEqual(run["stage"], "stale")
-                self.assertEqual((run["validated_sha"], run["reviewed_sha"]), (None, None))
-                self.assertTrue(self.github.pulls[7]["draft"])
-                self.assertNotIn((7, f"{run['id']}-ready"), self.github.comments)
-                self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
-                self.assertFalse(run["ci_checks"][-1]["readiness_changed"])
-                if write == "comment":
-                    self.assertNotIn((head, "success"), self.github.statuses)
+            with patch.object(self.github, write, side_effect=moving):
+                run = self.ticks(run, 1)
+            self.assertEqual(run["stage"], "stale")
+            self.assertEqual((run["validated_sha"], run["reviewed_sha"]), (None, None))
+            self.assertTrue(self.github.pulls[7]["draft"])
+            self.assertNotIn((7, f"{run['id']}-ready"), self.github.comments)
+            self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
+            self.assertFalse(run["ci_checks"][-1]["readiness_changed"])
+            if write == "comment":
+                self.assertNotIn((head, "success"), self.github.statuses)
+
+    def test_movement_after_marking_ready_is_never_saved_as_ready(self):
+        head, run = self.readiness_run()
+        real = self.github.comment
+
+        def moving(repo, number, marker, *args, **kwargs):
+            real(repo, number, marker, *args, **kwargs)
+            if marker.endswith("-ready"):
+                self.push_external()
+
+        with patch.object(self.github, "comment", side_effect=moving):
+            run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        self.assertEqual(run["reviewed_sha"], None)
+        # The draft change already happened; the report says so instead of claiming nothing changed.
+        self.assertFalse(self.github.pulls[7]["draft"])
+        self.assertTrue(run["ci_checks"][-1]["readiness_changed"])
+        report = self.team.pr_report(run["id"])
+        self.assertIn(f"Agent Team marked the PR ready for {head}; that readiness is not current.",
+                      report["limitations"])
+        self.assertFalse(any("did not change draft" in item for item in report["limitations"]))
 
     def test_concurrent_head_change_requires_deliberate_update(self):
         self.open_pr()
@@ -726,27 +749,24 @@ class PullRequestTests(unittest.TestCase):
         self.assertFalse(report["independent_review_success"])
 
     def test_same_sha_head_identity_change_retires_evidence(self):
-        for number, change in ((7, {"branch": "other-branch"}), (8, {"head_repo": "someone/demo-fork"})):
-            with self.subTest(change=change):
-                branch = f"feature-{number}"
-                head = self.open_pr(number, branch)
-                run = self.reviewed(str(number), grants=["github"])
-                self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
-                if "branch" in change:
-                    git(self.remote, "branch", change["branch"], head)
-                self.github.pulls[number].update(change)
-                run = self.ticks(run, 1)
-                self.assertEqual(run["stage"], "stale")
-                self.assertIn("head repository or branch changed", run["error"])
-                self.assertEqual((run["validated_sha"], run["reviewed_sha"]), (None, None))
-                report = self.team.pr_report(run["id"])
-                self.assertFalse(report["independent_review_success"])
-                self.assertEqual(report["historical_evidence"][-1]["review"]["commit"], head)
-                self.assertIn((head, "pending", "PR head changed; review invalidated"),
-                              self.github.status_descriptions)
-                with self.assertRaisesRegex(TeamError, "adopt the PR again"):
-                    self.team.update_pr(run["id"], ["human"])
-                self.store.save(run, stage="closed")
+        for change in self.scenarios({"branch": "other-branch"}, {"head_repo": "someone/demo-fork"}):
+            head = self.open_pr()
+            run = self.reviewed(grants=["github"])
+            self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", head))
+            if "branch" in change:
+                git(self.remote, "branch", change["branch"], head)
+            self.github.pulls[7].update(change)
+            run = self.ticks(run, 1)
+            self.assertEqual(run["stage"], "stale")
+            self.assertIn("head repository or branch changed", run["error"])
+            self.assertEqual((run["validated_sha"], run["reviewed_sha"]), (None, None))
+            report = self.team.pr_report(run["id"])
+            self.assertFalse(report["independent_review_success"])
+            self.assertEqual(report["historical_evidence"][-1]["review"]["commit"], head)
+            self.assertIn((head, "pending", "PR head changed; review invalidated"),
+                          self.github.status_descriptions)
+            with self.assertRaisesRegex(TeamError, "adopt the PR again"):
+                self.team.update_pr(run["id"], ["human"])
 
     def test_continuation_after_update_stops_on_rejection_without_revision(self):
         head = self.open_pr()
@@ -818,34 +838,33 @@ class PullRequestTests(unittest.TestCase):
         self.assertFalse(report["validation"]["passed_for_candidate"] or report["independent_review_success"])
 
     def test_unresolved_trailers_in_external_repair_withhold_independence(self):
-        self.store.update_project("demo", max_revisions=0)
-        for number, value in ((7, "unknown"), (8, "gemini")):
-            with self.subTest(value=value):
-                branch = f"branch-{number}"
-                self.open_pr(number, branch)
-                self.agents.reject = True
-                run = self.reviewed(str(number))
-                self.assertTrue(run["independence"]["established"])
-                self.assertEqual(run["stage"], "handoff")
-                run = self.team.decide(run["id"], "repair")
-                external = self.push_external(branch, message=f"Repair\n\nAgent-Family: {value}")
-                run = self.team.adopt(run["id"], ["human"])
-                self.assertEqual(run["sha"], external)
-                self.assertFalse(run["independence"]["established"])
-                self.assertIn(value, run["independence"]["reason"])
-                self.assertEqual(run["adopted_pr"]["unresolved_trailers"], [value])
-                self.assertEqual(run["adoptions"][-1]["unresolved_trailers"], [value])
-                self.assertNotIn(value, run["contributors"])
-                self.agents.reject = False
-                run = self.ticks(self.team.select("demo", ["validate", "review"], [], contributors=["human"],
-                                                  run_id=run["id"]), 2)
-                self.assertEqual(run["stage"], "stopped")
-                self.assertIsNone(run.get("reviewed_sha"))
-                self.assertEqual(run["review_withheld"]["sha"], external)
-                report = self.team.pr_report(run["id"])
-                self.assertFalse(report["independent_review_success"])
-                self.assertEqual(report["authorship"]["unresolved_trailers"], [value])
-                self.store.save(run, stage="closed")
+        # A declared `unknown` repair contributor withholds independence like an unresolved trailer.
+        for value, declared in self.scenarios(("unknown", ["human"]), ("gemini", ["human"]), (None, ["unknown"])):
+            run = self.repair_handoff()
+            self.assertTrue(run["independence"]["established"])
+            external = self.push_external(message=f"Repair\n\nAgent-Family: {value}" if value else "Repair")
+            run = self.team.adopt(run["id"], declared)
+            self.assertEqual(run["sha"], external)
+            self.assertFalse(run["independence"]["established"])
+            self.assertIn(value or "unknown contributors", run["independence"]["reason"])
+            unresolved = [value] if value else []
+            self.assertEqual(run["adopted_pr"]["unresolved_trailers"], unresolved)
+            self.assertEqual(run["adoptions"][-1]["unresolved_trailers"], unresolved)
+            # Trailer values are never recorded as contributors; declarations are.
+            self.assertEqual(run["contributors"], sorted({"human", *declared}))
+            # Revision is refused before any author call; review still reports findings only.
+            with self.assertRaisesRegex(TeamError, "Independent review cannot be established"):
+                self.team.select("demo", ["revision", "validate"], ["edit"], run_id=run["id"])
+            self.agents.reject = False
+            run = self.ticks(self.team.select("demo", ["validate", "review"], [], contributors=declared,
+                                              run_id=run["id"]), 2)
+            self.assertEqual(run["stage"], "stopped")
+            self.assertIsNone(run.get("reviewed_sha"))
+            self.assertEqual(run["review_withheld"]["sha"], external)
+            self.assertNotIn("implement", [role for _, role in self.agents.calls])
+            report = self.team.pr_report(run["id"])
+            self.assertFalse(report["independent_review_success"])
+            self.assertEqual(report["authorship"]["unresolved_trailers"], unresolved)
 
     def test_unresolved_trailers_in_local_continuation_withhold_independence(self):
         head = self.open_pr()
@@ -961,11 +980,8 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("stopped", external))
 
     def test_interrupted_update_recovers(self):
-        for point in ("journal", "rename-1", "rename-2", "final-save"):
-            with self.subTest(point=point):
-                self.tearDown()
-                self.setUp()
-                self.interrupted_update(point)
+        for point in self.scenarios("journal", "rename-1", "rename-2", "final-save"):
+            self.interrupted_update(point)
 
     def test_supplied_findings_are_revised_with_fresh_evidence(self):
         head = self.open_pr()
@@ -995,6 +1011,11 @@ class PullRequestTests(unittest.TestCase):
         # Like revise mode with the same limit, exactly one revision is made before the handoff.
         self.assertEqual((run["stage"], run["round"]), ("handoff", 1))
         self.assertEqual([call for call in self.agents.calls if call[1] == "implement"], [(run["author"], "implement")])
+        # The shared pre-edit guard also refuses a continuation past the budget, before any author call.
+        self.store.save(run, stage="stopped", next_stage="revision", round=2, needs_revision=True)
+        with self.assertRaisesRegex(TeamError, "no revision budget left"):
+            self.team.select("demo", ["revision", "validate"], ["edit"], run_id=run["id"])
+        self.assertEqual(len([call for call in self.agents.calls if call[1] == "implement"]), 1)
 
     def repair_handoff(self):
         self.store.update_project("demo", max_revisions=0)
@@ -1003,27 +1024,24 @@ class PullRequestTests(unittest.TestCase):
         return self.team.decide(self.reviewed()["id"], "repair")
 
     def test_repair_adoption_refuses_changed_head_identity(self):
-        for change in ("repository", "branch"):
-            with self.subTest(change=change):
-                self.tearDown()
-                self.setUp()
-                run = self.repair_handoff()
-                before = git(self.store.workspace(run), "rev-parse", "HEAD")
-                if change == "repository":
-                    # Same commit, but the PR head now names another repository.
-                    self.github.pulls[7]["head_repo"] = "someone/demo"
-                else:
-                    # Same commit, pushed to another branch that the PR now uses.
-                    git(self.remote, "branch", "moved", "feature")
-                    self.github.pulls[7]["branch"] = "moved"
-                with self.assertRaisesRegex(TeamError, "head repository or branch changed"):
-                    self.team.adopt(run["id"], ["human"])
-                after = self.store.get(run["id"])
-                self.assertEqual(after["stage"], "repair")
-                self.assertFalse(after.get("adoptions"))
-                self.assertEqual(after["adopted_pr"], run["adopted_pr"])
-                self.assertEqual(git(self.store.workspace(after), "rev-parse", "HEAD"), before)
-                self.assertEqual(list(self.store.run_root(after).glob("refresh-*")), [])
+        for change in self.scenarios("repository", "branch"):
+            run = self.repair_handoff()
+            before = git(self.store.workspace(run), "rev-parse", "HEAD")
+            if change == "repository":
+                # Same commit, but the PR head now names another repository.
+                self.github.pulls[7]["head_repo"] = "someone/demo"
+            else:
+                # Same commit, pushed to another branch that the PR now uses.
+                git(self.remote, "branch", "moved", "feature")
+                self.github.pulls[7]["branch"] = "moved"
+            with self.assertRaisesRegex(TeamError, "head repository or branch changed"):
+                self.team.adopt(run["id"], ["human"])
+            after = self.store.get(run["id"])
+            self.assertEqual(after["stage"], "repair")
+            self.assertFalse(after.get("adoptions"))
+            self.assertEqual(after["adopted_pr"], run["adopted_pr"])
+            self.assertEqual(git(self.store.workspace(after), "rev-parse", "HEAD"), before)
+            self.assertEqual(list(self.store.run_root(after).glob("refresh-*")), [])
 
     def test_evidence_is_invalidated_by_configuration_change(self):
         self.open_pr()
@@ -1061,6 +1079,12 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(args.run_id, "RUN")
         with self.assertRaises(SystemExit):
             parser().parse_args(["pr", "review", "demo", "7", "--contributor", "human", "--grant", "readiness"])
+        args = parser().parse_args(["adopt", "RUN", "--contributor", "unknown"])
+        self.assertEqual(args.contributor, ["unknown"])
+        # `unknown` is accepted only for adopted PRs; new issue or task selections still refuse it.
+        with self.assertRaisesRegex(TeamError, "Unknown contributor"):
+            self.team.select("demo", ["validate"], [], task="Validate", ref="main", contributors=["unknown"])
+        self.assertEqual(self.store.runs(), [])
 
 
 if __name__ == "__main__":

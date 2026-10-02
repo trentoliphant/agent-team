@@ -106,7 +106,8 @@ def parser():
     selection.add_argument("--task", help="Explicit immutable task scope and acceptance criteria")
     selection.add_argument("--ref", help="Existing remote branch or exact commit")
     selection.add_argument("--run", dest="run_id", help="Continue compatible tracked evidence")
-    selection.add_argument("--contributor", action="append", choices=CONTRIBUTORS, default=[])
+    # `unknown` is accepted only for runs that track an existing PR; the coordinator checks the run.
+    selection.add_argument("--contributor", action="append", choices=PR_CONTRIBUTORS, default=[])
     selection.add_argument("--plan", action="store_true", help="Show operations and effects without saving or executing")
     queue = commands.add_parser("queue", help="Inspect or save a project's implementation order").add_subparsers(
         dest="queue_command", required=True)
@@ -130,7 +131,7 @@ def parser():
     continuation = commands.add_parser("continue", help="Explicitly continue a stopped run without resetting its history")
     continuation.add_argument("run_id")
     continuation.add_argument("--operations", nargs="+", choices=ENTRY_POINTS, required=True)
-    continuation.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), default=[])
+    continuation.add_argument("--contributor", action="append", choices=list(PR_CONTRIBUTORS), default=[])
     handoff = commands.add_parser("handoff", help="Show the latest revision-limit handoff and decisions")
     handoff.add_argument("run_id")
     handoff.add_argument("--json", action="store_true")
@@ -142,7 +143,7 @@ def parser():
     adopt = commands.add_parser("adopt", help="Adopt a direct repair (PR head, or local repair checkout "
                                                 "if never published) for new validation and review")
     adopt.add_argument("run_id")
-    adopt.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), required=True,
+    adopt.add_argument("--contributor", action="append", choices=list(PR_CONTRIBUTORS), required=True,
                        help="Who contributed to the repair; repeatable")
     pull = commands.add_parser("pr", help="Review or revise an existing pull request without a new issue or PR"
                                ).add_subparsers(dest="pr_command", required=True)

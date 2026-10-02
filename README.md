@@ -740,14 +740,16 @@ or omitted. A standalone review never checks CI and is not a readiness verdict.
 No `pr` command reopens, retargets, changes draft state, or merges a PR.
 Readiness (`select --run RUN_ID --operations ci --grant readiness`) requires
 independent review of the published head; CI results count only for the current
-head and base (`current_ci`).
+head and base (`current_ci`). The PR is rechecked before each readiness write and
+before `ready` is saved; if it moves after being marked ready, `pr show` says that
+readiness is not current.
 
 **Authorship.** Declare every contributor: `human`, `openai`, `anthropic`, or
 `unknown`. Usernames are never treated as model families; trailer families are
 added. With one model family, the other reviews. With `unknown`, both families,
 or an unsupported trailer, `pr review` withholds independent-review success and
 revision is refused. Adopted repairs and declared local changes are checked the
-same way.
+same way; `adopt`, `select --run`, and `continue` accept `unknown` for adopted PRs.
 
 **Ownership and movement.** One open run per PR; PR metadata is left unchanged.
 Head, base, and head repository/branch are rechecked before pushes and GitHub
@@ -763,6 +765,6 @@ limit, only review mode is accepted.
 with write access to the head repository, or maintainer edits plus base write
 access. Otherwise `pr show` gives the local commit and patch; no replacement PR is
 created. Closed and merged PRs are refused. Revision requires the registered base
-(review keeps the PR's own); independence and base are rechecked before every
-edit. The `handoff`/`decide`/`adopt` flow applies; an adopted repair is used
+(review keeps the PR's own); independence, base, and revision budget are
+rechecked before every edit. The `handoff`/`decide`/`adopt` flow applies; an adopted repair is used
 as-is, without a base merge.

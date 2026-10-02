@@ -809,11 +809,12 @@ class Coordinator:
         """Explicit re-entry; never clear rejection history or revision limits."""
         operations = list(operations)
         contributors = sorted(set(contributors))
-        if any(c not in CONTRIBUTORS for c in contributors):
+        run = self.store.get(run_id)
+        # Work on an existing PR may be unattributable; `unknown` then withholds independent success.
+        if any(c not in (PR_CONTRIBUTORS if run.get("adopted_pr") else CONTRIBUTORS) for c in contributors):
             raise TeamError("Declare supported contributors")
         if not operations or any(op not in ENTRY_POINTS for op in operations):
             raise TeamError("Select supported operations explicitly")
-        run = self.store.get(run_id)
         if run.get("pending_pr_update"):
             raise TeamError("A PR update was interrupted; finish it with agent-team pr update RUN_ID first")
         selecting = run.get("selection") or grants is not None
@@ -833,13 +834,14 @@ class Coordinator:
         if operations[0] != run.get("next_stage") and not selecting and not (
                 operations[0] == "validate" and contributors and run.get("needs_revision")):
             raise TeamError("Continuation must start at the recorded next stage")
-        if "revision" in operations and not run.get("needs_revision"):
-            raise TeamError("Revision requires recorded rejection feedback")
         project = self.store.project(run["project"])
+        # The shared adopted-PR guard comes first, so its reason is reported whatever else is missing.
         if {"implement", "revision"} & set(operations):
             refusal = self.adopted_revision_refusal(project, run)
             if refusal:
                 raise TeamError(refusal)
+        if "revision" in operations and not run.get("needs_revision"):
+            raise TeamError("Revision requires recorded rejection feedback")
         issue = self.github.issue(project["repo"], run["issue"]) if run["issue"] is not None else {
             "title": run["title"], "body": run["body"]}
         if (run["issue"] is not None and self.ineligible(project, issue)) or issue_fingerprint(issue) != run["issue_digest"]:
@@ -1295,6 +1297,8 @@ class Coordinator:
         if info["base_ref"] != project["base"]:
             return (f"PR targets {info['base_ref']}, not registered base {project['base']}. Revision is refused "
                     "before any change; Agent Team never retargets PRs")
+        if run["round"] > revision_limit(project, run):
+            return "The PR has no revision budget left; record an operator decision instead"
         return None
 
     def implement(self, project, run):
@@ -1355,7 +1359,7 @@ class Coordinator:
             git(author, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
                 "-c", "commit.gpgsign=false", "commit", "-m",
                 f"{run['title'][:150]}\n\n" +
-                "".join(f"Contributor: {c}\n" if c == "human" else f"Agent-Family: {c}\n"
+                "".join(f"Contributor: {c}\n" if c in {"human", "unknown"} else f"Agent-Family: {c}\n"
                         for c in (run.get("commit_contributors") or [FAMILIES[run['author']]])) +
                 f"Agent-Team-Run: {run['id']}")
         sha = git(author, "rev-parse", "HEAD")
@@ -1792,14 +1796,19 @@ class Coordinator:
         pr = self.github.pr(project["repo"], run["pr"])
         if moved(pr):
             return
+        changed = run["ci_checks"][:-1] + [dict(run["ci_checks"][-1], readiness_changed=True)]
         if pr.get("draft"):
             self.github.mark_ready(project["repo"], run["pr"])
+            # Recorded at once, so a later stop reports the draft change instead of denying it.
+            self.store.save(run, ci_checks=changed)
         if moved():
             return
         self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready",
                             self.status_text(project, run, "ready", ready_forms(run)))
-        self.store.save(run, stage="ready", ci_checks=run["ci_checks"][:-1] + [dict(run["ci_checks"][-1],
-                                                                                       readiness_changed=True)])
+        # Checked again immediately before the ready state is saved.
+        if moved():
+            return
+        self.store.save(run, stage="ready", ci_checks=changed)
 
     def discover(self, name, agent, focus):
         project = self.store.project(name)
@@ -2106,8 +2115,9 @@ class Coordinator:
         if self.finalize_rejection(project, run):
             return run
         declared = sorted(set(contributors or []))
-        if not declared or not set(declared) <= set(CONTRIBUTORS):
-            raise TeamError(f"Declare at least one contributor: {', '.join(CONTRIBUTORS)}")
+        allowed = PR_CONTRIBUTORS if run.get("adopted_pr") else CONTRIBUTORS
+        if not declared or not set(declared) <= set(allowed):
+            raise TeamError(f"Declare at least one contributor: {', '.join(allowed)}")
         if FAMILIES[run["reviewer"]] in contributing_families(run, declared):
             raise TeamError("The reviewer's family contributed to the repair, so no independent agent review "
                             "is possible; review it yourself, or rescope or stop the run")
@@ -2579,8 +2589,11 @@ class Coordinator:
                                "observations are historical.")
         elif latest_check["state"] != "success":
             limitations.append(f"GitHub CI checks for the current candidate did not pass (state: {latest_check['state']}).")
+        marked = [c for c in checks if c["readiness_changed"]]
         if run["stage"] != "ready":
-            limitations.append("Readiness was not assessed; Agent Team did not change draft or readiness state.")
+            limitations.append(f"Agent Team marked the PR ready for {marked[-1]['head']}; that readiness is not "
+                               "current." if marked else
+                               "Readiness was not assessed; Agent Team did not change draft or readiness state.")
         if handoff:
             limitations.append(f"The revision is local only ({handoff['reason']}). Apply the patch or push the "
                                "commit yourself; no replacement PR was created.")
