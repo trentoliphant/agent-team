@@ -181,11 +181,11 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(run["stage"], "publish")
         return run
 
-    def repair_handoff(self):
+    def repair_handoff(self, **options):
         self.store.update_project("demo", max_revisions=0)
         self.open_pr()
         self.agents.reject = True
-        run = self.reviewed()
+        run = self.reviewed(**options)
         self.assertEqual(run["stage"], "handoff")
         self.assertIn("feature.txt:1", run["handoffs"][0]["text"])
         run = self.team.decide(run["id"], "repair")
@@ -639,6 +639,49 @@ class PullRequestTests(unittest.TestCase):
             self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
             if write == "comment":
                 self.assertNotIn((head, "success"), self.github.statuses)
+
+    def test_local_change_during_ci_lookup_publishes_no_readiness(self):
+        for kind in self.scenarios("commit", "dirty"):
+            head, run = self.readiness_run()
+            real = self.github.ci
+
+            def lookup(*args):
+                self.local_commit(run) if kind == "commit" else (self.store.workspace(run) / "x.txt").write_text("x\n")
+                return real(*args)
+
+            with patch.object(self.github, "ci", side_effect=lookup), \
+                    patch.object(self.github, "comment", wraps=self.github.comment) as comment:
+                run = self.ticks(run, 1)
+            self.assertFalse([c for c in comment.call_args_list if c.args[2].endswith(("-ready", head))])
+            self.assert_no_success()
+            self.assert_fields(run, stage="stopped", reviewed_sha=None)
+            self.assertTrue(self.github.pulls[7]["draft"] and run["pending_contribution"])
+            self.assertIn(LOCAL_CHANGE, run["evidence_invalidations"][-1]["reason"])
+
+    def test_moved_inputs_withhold_repair_adoption_writes(self):
+        kinds = ("head", "base", "identity", "configuration")
+        for point, kind in self.scenarios(*zip(("journal", "rename-1", "rename-2", "final-save"), kinds),
+                                          *((None, k) for k in kinds)):
+            run = self.repair_handoff(grants=["github"])
+            head, repair = run["sha"], self.commit("feature", "feature", "repair.txt", "repair\n", "Repair")
+            adopt = lambda: self.team.adopt(run["id"], ["human"])
+            if point:
+                self.interrupt(point, adopt)
+                self.change(kind)
+                adopt()
+            else:
+                # Movement between the adoption status and comment.
+                with self.writes("status", lambda state: state == "pending", lambda: self.change(kind)):
+                    adopt()
+            run = self.store.get(run["id"])
+            self.assertEqual([(i["type"], i["evidence"]) for i in run["unpublished_evidence"]],
+                             [("status", repair)] * bool(point) + [("comment", repair)])
+            self.assertEqual(([k for _, k in self.github.comments if "-adopt-" in k],
+                              (repair, "pending") in self.github.statuses), ([], not point))
+            self.assertEqual((run["outbox"], run["adoptions"][-1]["head"], self.head_of(self.store.workspace(run))),
+                             ([], repair, repair))
+            self.assertEqual([self.head_of(p) for p in self.store.run_root(run).glob("author-preserved-*")], [head])
+            self.assert_fields(run, stage="stopped" if kind == "configuration" else "stale", validated_sha=None)
 
     def test_pr_show_verifies_the_complete_binding_without_a_tick(self):
         for change in self.scenarios("head", "base", "identity", "configuration", "pins", "local", "worker", "ready"):

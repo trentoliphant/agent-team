@@ -537,7 +537,7 @@ class Coordinator:
         return None
 
     def context_change(self, project, run, context):
-        if context.get("configuration") is not None and context["configuration"] != configuration(project):
+        if context.get("configuration") not in (None, configuration(self.store.project(run["project"]))):
             return "Validation configuration changed"
         if context.get("companions") is not None and (
                 context["companions"] != (run.get("validated_companions") or []) or self.pins_changed(project, run)):
@@ -1827,6 +1827,8 @@ class Coordinator:
         # Reconcile the marked review before readiness, including reviews performed
         # locally without a GitHub grant. A failed write must leave the PR draft.
         comment = self.review_write(run, run["review_record"])
+        if moved():
+            return
         self.github.comment(project["repo"], run["pr"], comment["marker"], comment["body"],
                             heading=comment["heading"])
         if moved():
@@ -2205,6 +2207,9 @@ class Coordinator:
                    "description": "Direct repair adopted; tests and independent review must run again"},
                   {"type": "comment", "number": run["pr"], "marker": f"{run['id']}-adopt-{adoption['round']}",
                    "body": body, "heading": "Agent Team adoption"}]
+        # Bound to the adopted inputs; `flush` withholds them if those move.
+        new = {**run, **changes, "validated_context": {"configuration": configuration(project)}}
+        writes = [self.bound(new, w) for w in writes]
         changes.update(contributors=sorted(set(run.get("contributors", [])) | families | set(declared)),
                        adoptions=run.get("adoptions", []) + [adoption], **self.queue_writes(run, *writes))
         if run.get("selection"):
