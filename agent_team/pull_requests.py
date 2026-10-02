@@ -317,7 +317,7 @@ class PullRequests:
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
                         unresolved_trailers=unresolved, updates=info.get("updates", []) + [update])
         if found["head"] != info["head_sha"]:
-            # Commit-bound like repairs; a rewritten head is attributed from the base.
+            # A rewritten head is attributed from the base.
             try:
                 core.git(fresh, "merge-base", "--is-ancestor", info["head_sha"], found["head"])
                 since = info["head_sha"]
@@ -355,7 +355,7 @@ class PullRequests:
             return self.summary(run, False)
 
     def currency(self, project, run):
-        """(True, None), (False, reason), or (None, reason) when unverifiable."""
+        """(True, None), (False, reason), or unverifiable (None, reason)."""
         if run.get("in_flight") or run.get("pending_swap"):
             return None, "an operation is in progress or was interrupted"
         try:

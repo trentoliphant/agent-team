@@ -173,7 +173,7 @@ def adoption_provenance(run, declared, families, unresolved):
 
 
 def contributed(info, kind, commit, declared, cwd, *span):
-    """Adds a commit-bound later contribution; run["provenance"] keeps the initial one."""
+    """Add a commit-bound later contribution."""
     found, unresolved = split_trailers(git(cwd, "log", "--format=%(trailers:key=Agent-Family,valueonly)", *span))
     entry = {"kind": kind, "commit": commit, "declared": sorted(declared), "trailer_families": found,
              "unresolved_trailers": unresolved, "at": time.time(),
@@ -247,7 +247,7 @@ def require_no_swap(run):
 
 
 def local_candidate(run):
-    """Unpublished candidate, including an unpushable adopted-PR revision."""
+    """Unpublished candidate, including an unpushable PR revision."""
     return not run.get("published_sha") or bool(run.get("adopted_pr")) and run["sha"] != run["published_sha"]
 
 
@@ -595,7 +595,7 @@ class Coordinator:
         changes, revoke = {}, []
         if (run.get("evidence_retired") or {}).get("reason") != reason:
             changes = retire_evidence(run, reason)
-        # The outbox revokes a success journaled before the ready save.
+        # Revokes a success journaled before the save.
         if (run["stage"] == "ready" or run.get("readiness_status")) and self.has_effect(run, "github"):
             revoke = [{"type": "status", "sha": run.get("readiness_status") or run.get("published_sha") or run["sha"],
                        "state": "pending", "description": "Evidence inputs changed; readiness invalidated"}]
@@ -1326,7 +1326,7 @@ class Coordinator:
         provenance = dict(run.get("provenance", {}))
         contributors = set(run.get("contributors", []))
         if info and cwd.exists():
-            # Installed before the metadata save; verify it before running Git there.
+            # Installed before the metadata save; verify it first.
             assert_metadata(cwd, run["installing"])
             if (git(cwd, "rev-parse", "HEAD"), git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
                     git(cwd, "status", "--porcelain")) != (info["head_sha"], run["branch"], ""):
@@ -1454,7 +1454,7 @@ class Coordinator:
         info, recorded = run.get("adopted_pr"), {}
         if info and run.get("commit_contributors") and sha not in [run.get("published_sha")] + [
                 c["commit"] for c in info.get("contributions", [])]:
-            # Saved with the candidate, also after a crash that followed the commit.
+            # Saved with the candidate, even after a crash.
             recorded["adopted_pr"] = contributed(info, "coordinator_commit", sha, run["commit_contributors"],
                                                  author, sha, f"^{sha}^")
         if run.get("needs_revision") and sha == run.get("published_sha"):
@@ -1525,7 +1525,7 @@ class Coordinator:
 
     @staticmethod
     def review_first(run):
-        """Whether an unedited PR head is reviewed despite failed validation."""
+        """Review an unedited PR head despite failed validation?"""
         info = run.get("adopted_pr")
         return bool(info and (info["mode"] == "review" or (info["mode"] == "revise" and run.get("pr_followup")))
                     and "review" in run.get("operations", []) and run.get("sha") == info["head_sha"]
@@ -1585,7 +1585,7 @@ class Coordinator:
                         **self.queue_writes(run, *writes))
 
     def compatible_validation(self, project, run, attempted=False):
-        """Check the candidate still matches its validation (failed, if `attempted`)."""
+        """Check the candidate still matches its (failed, if `attempted`) validation."""
         if not run.get("selection"):
             return
         # Before the context check, so a verdict gathered with other pins is kept as superseded history.
@@ -1678,11 +1678,11 @@ class Coordinator:
         self.store.save(run, stage=self.successor(run, "publish", "review"))
 
     def pushed(self, run, sha):
-        """Save the pushed commit with its status, and a review already done for it, queued so a crash cannot skip them."""
+        """Save the pushed commit with its queued status and any finished review."""
         info, new = run["adopted_pr"], dict(run, sha=sha, published_sha=sha)
         done = bool(run.get("review_record")) and run.get("review_sha") == sha and sha in {
             run.get("reviewed_sha"), (run.get("review_withheld") or {}).get("sha")}
-        # The review's original marker keeps the comment idempotent.
+        # The original marker keeps it idempotent.
         writes = ([self.review_write(new, run["review_record"])] if done else []) + [self.bound(new, {
             "type": "status", "sha": sha, "state": "pending", "description": "Review reported; readiness not checked"
             if done else "Revision pushed; independent review pending"})]
@@ -1870,7 +1870,7 @@ class Coordinator:
         if not self.reconcile(project, run):
             return
         moved = lambda pr=None: self.recheck_adopted(project, run, pr=pr)
-        # Drafting may call a model, so it precedes binding checks and writes.
+        # Drafting may call a model, so it comes first.
         ready = self.status_text(project, run, "ready", ready_forms(run))
         comment = self.review_write(run, run["review_record"])
         if moved():
@@ -2238,7 +2238,7 @@ class Coordinator:
             changes = {**retire_evidence(run, "Adopted external repair"), **changes}
         changes.update(self.reassess(dict(run, **changes), declared, families, unresolved))
         if run.get("adopted_pr"):
-            # contributor_check verified the repair extends the published candidate.
+            # contributor_check verified this extends the candidate.
             changes["adopted_pr"] = contributed(changes["adopted_pr"], "external_repair", changes["published_sha"],
                                                 declared, fresh, changes["published_sha"], "^" + run["published_sha"])
         adoption = {"head": changes["published_sha"], "sha": changes["sha"], "base_sha": changes["base_sha"],
@@ -2311,7 +2311,7 @@ class Coordinator:
                             "review is possible (previous work retained)")
         if info and base_sha != run["base_sha"]:
             raise TeamError("PR base changed; adopt it with pr update first (previous work retained)")
-        # An existing PR's base is never merged: merging the rejected ancestor is a no-op.
+        # An existing PR's base is never merged.
         try:
             git(fresh, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
                 "-c", "commit.gpgsign=false", "merge", "--no-edit", repair["candidate"] if info else base_sha)

@@ -695,7 +695,7 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 `agent-team pr` adopts an open PR of a registered repository. `pr review` stops
 after findings; `pr revise` fixes rejections on the PR branch; `pr findings`
-revises only `--finding` items. GitHub writes need `--grant github`.
+revises only `--finding` items.
 
 ```sh
 # Review only, review with fixes (--plan previews), supplied findings:
@@ -712,7 +712,6 @@ agent-team select example --run RUN_ID --operations validate review
 ```
 
 `pr show` reports findings, roles, and checks run or omitted; a review is not
-readiness. Declare every contributor; `unknown` or mixed families withhold
-independent success. Movement stops the run as `stale` until `pr update`.
-Pushes only fast-forward; without push access, `pr show` offers a local patch.
-Nothing reopens, retargets, changes draft state, or merges.
+readiness. `unknown` or mixed families withhold independent success. Movement
+stops the run as `stale`. Pushes only fast-forward; without push access, `pr
+show` offers a local patch. Nothing reopens, retargets, changes draft, or merges.

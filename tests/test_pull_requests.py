@@ -10,12 +10,14 @@ from agent_team.github import GitHub
 from agent_team.patches import COMPACT_NOTICE
 from agent_team.process import git, TeamError
 
-# Module imports, so discovery does not rerun WorkflowTests or the fixture proofs here.
+# Module imports keep discovery from rerunning other test classes.
 from tests import support_pull_requests as support, test_coordinator
 from tests.support_pull_requests import COMMIT, FORK, Interrupted, scenarios, trailed
 
 ALL = ["edit", "push", "github"]
+READY = ["github", "readiness"]
 FIX = ["Append a closing line to feature.txt"]
+RECHECK = ["validate", "review"]
 REVISION = ["revision", "validate"]
 FOLLOWUP = [*REVISION, "publish", "review"]
 CI_FAILED = "GitHub CI checks for the current candidate did not pass (state: {})."
@@ -32,7 +34,7 @@ REASONS = {"configuration": "Validation configuration changed", "pins": "Compani
 
 
 class FeatureGitHub(support.PullGitHub):
-    """Production PR parsing and push-permission checks over the offline fixture."""
+    """Production PR parsing and push checks over the fixture."""
 
     def pr(self, repo, number):
         return GitHub.pr(self, repo, number) if number in self.pulls else super().pr(repo, number)
@@ -64,7 +66,7 @@ class PullRequestTests(support.PullRequestFixture):
         return self.team.select("demo", list(operations), list(grants), run_id=run["id"], **options)
 
     def revalidate(self, run, **options):
-        return self.ticks(self.select(run, ["validate", "review"], **options), 2)
+        return self.ticks(self.select(run, RECHECK, **options), 2)
 
     def update(self, run):
         return self.team.update_pr(run["id"], ["human"])
@@ -75,9 +77,9 @@ class PullRequestTests(support.PullRequestFixture):
     def report(self, run):
         return self.team.pr_report(run["id"])
 
-    def writable(self, mode="revise", **options):
+    def writable(self, mode="revise", grants=ALL, **options):
         self.github.permissions["example/demo"] = True
-        return self.adopt_pr(mode, grants=ALL, **options)
+        return self.adopt_pr(mode, grants=grants, **options)
 
     def reviewed(self, number="7", count=3, contributors=("human",), **options):
         return self.ticks(self.adopt_pr("review", number, contributors, **options), count)
@@ -95,7 +97,7 @@ class PullRequestTests(support.PullRequestFixture):
     def readiness_run(self):
         head, run = self.stopped_review(grants=["github"])
         self.assertEqual(self.report(run)["ci_checks"], "not checked")
-        return head, self.select(run, ["ci"], ["github", "readiness"])
+        return head, self.select(run, ["ci"], READY)
 
     def at_publish(self):
         self.open_pr(reject=1)
@@ -215,7 +217,7 @@ class PullRequestTests(support.PullRequestFixture):
                            validation_failed=False)
         self.assertEqual(review["findings"][0]["location"], "feature.txt:1")
 
-    def test_adoption_refuses_unauthorized_or_inconsistent_requests(self):
+    def test_adoption_refuses_invalid_requests(self):
         self.open_pr()
         for mode, grants, options, message in (
                 ("review", ["edit"], {}, "Review-only never edits"), ("review", ["push"], {}, "Review-only never edits"),
@@ -228,10 +230,10 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(pull_number(self.project, "https://github.com/Example/Demo/pull/7/files"), 7)
         self.assertEqual((self.store.runs(), self.agents.calls), ([], []))
 
-    def test_review_and_revise_pushes_fast_forward_to_existing_branch(self):
+    def test_revise_fast_forwards_existing_branch(self):
         head = self.open_pr(reject=1)
         run = self.writable()
-        self.assert_fields(run, operations=["validate", "review"], pr_followup=FOLLOWUP)
+        self.assert_fields(run, operations=RECHECK, pr_followup=FOLLOWUP)
         run = self.ticks(run, 7)
         self.assert_revised(run, head)
         self.assert_fields(run["adopted_pr"], pushed=[run["sha"]])
@@ -245,7 +247,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_review(report["review_history"][0], head, False, "changes_requested", run["base_sha"], run["reviewer"])
 
     @scenarios(True, False)
-    def test_fork_pushes_only_with_maintainer_edits_and_otherwise_hands_off_locally(self, editable):
+    def test_fork_push_or_local_handoff(self, editable):
         head = self.open_pr(8, "fork-feature", head_repo=FORK, maintainer_can_modify=editable)
         self.github.permissions["example/demo"] = editable
         plan = self.adopt_pr("revise", "8", grants=ALL, plan_only=True)
@@ -266,8 +268,8 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(handoff, commit=run["sha"], builds_on=head, replacement_pr="not created")
         self.assertIn(FORK, handoff["reason"])
         self.assertIn("fixed", Path(handoff["patch"]).read_text())
-        self.refuses("published PR head", self.select, run, ["ci"], ["github", "readiness"])
-        self.store.save(run, stage="ci", grants=["github", "readiness"], operations=["ci"], stop_after="ci")
+        self.refuses("published PR head", self.select, run, ["ci"], READY)
+        self.store.save(run, stage="ci", grants=READY, operations=["ci"], stop_after="ci")
         self.assert_error(self.ticks(run), "blocked", "published PR head")
         self.assert_no_success()
         self.assertTrue(self.pull(8)["draft"])
@@ -276,8 +278,7 @@ class PullRequestTests(support.PullRequestFixture):
                ("anthropic", ["openai"], "both model families", ["anthropic", "openai"], []),
                ("unknown", ["human"], "unknown or unsupported model families", ["human"], ["unknown"]),
                ("gemini", ["human"], "unknown or unsupported model families", ["human"], ["gemini"]))
-    def test_unknown_mixed_or_unsupported_authorship_withholds_independent_success(
-            self, trailer, declared, refusal, contributors, unresolved):
+    def test_unresolved_authorship_withholds_success(self, trailer, declared, refusal, contributors, unresolved):
         head = self.open_pr(families=[trailer], user="openai-codex")
         self.refuses(refusal, self.editing, contributors=declared)
         run = self.adopt_pr(contributors=declared, grants=["github"])
@@ -292,7 +293,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_no_success()
         self.refuses("exact-commit independent review", self.select, run, ["ci"], ["readiness"])
 
-    def test_single_family_authorship_assigns_independent_roles(self):
+    def test_single_family_independent_roles(self):
         self.open_pr(families=["openai"])
         self.refuses("cannot review independently", self.adopt_pr, reviewer="codex")
         run = self.adopt_pr()
@@ -304,7 +305,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(run["adopted_pr"]["trailer_families"], ["openai"])
         self.assert_not_independent(run)
 
-    def test_duplicate_adoption_and_conflicting_ownership_are_refused(self):
+    def test_duplicate_adoption_refused(self):
         self.open_pr()
         run = self.adopt_pr()
         self.refuses(f"already tracked by run {run['id']}", self.editing)
@@ -315,7 +316,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.refuses(f"already tracked by run {owned['id']}", self.adopt_pr, number="9")
         self.assertEqual(len(self.store.runs()), 2)
 
-    def test_readoption_after_stopped_exhausted_run_keeps_budget(self):
+    def test_readoption_keeps_exhausted_budget(self):
         self.configure(max_revisions=1)
         # Rejects the existing head and its revision.
         self.open_pr(reject=2)
@@ -333,7 +334,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(review["prior_runs"][0], id=run["id"], handoffs=1, decisions=["stop"])
         self.assertEqual((set(review["rejected_shas"]), self.agents.calls), (set(run["rejected_shas"]), calls))
 
-    def test_readoption_after_closed_run_continues_its_budget(self):
+    def test_readoption_continues_budget(self):
         self.configure(max_revisions=2)
         self.open_pr(reject=True)
         run = self.reviewed()
@@ -347,7 +348,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.refuses(NO_BUDGET, self.editing_findings)
         self.assert_fields(self.editing(), round=2, revision_limit=2)
 
-    def test_closed_merged_and_incompatible_base_are_handled_before_mutation(self):
+    def test_closed_or_other_base_before_mutation(self):
         self.open_pr()
         self.refuses_closed()
         git(self.remote, "branch", "release", "main")
@@ -358,7 +359,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_reviewed(self.ticks(run, 3), head)
         self.assertEqual(self.pull(8)["base"], "release")
 
-    def test_closed_or_merged_pr_with_deleted_base_is_handled_explicitly(self):
+    def test_closed_pr_with_deleted_base(self):
         git(self.remote, "branch", "release", "main")
         self.open_pr(8, "release-fix", base="release")
         snapshot = self.pull(8)["frozen_base"]
@@ -370,8 +371,7 @@ class PullRequestTests(support.PullRequestFixture):
     @scenarios((7, "feature", "main", ["human", "unknown"], "unknown contributors"),
                (8, "mixed", "main", ["openai", "anthropic"], "both model families"),
                (9, "release-fix", "release", ["human"], "never retargets"))
-    def test_revision_after_review_only_rejection_is_refused_before_editing(
-            self, number, branch, base, contributors, message):
+    def test_refused_revision_never_edits(self, number, branch, base, contributors, message):
         git(self.remote, "branch", "release", "main")
         head = self.open_pr(number, branch, base=base, reject=True)
         run = self.reviewed(str(number), contributors=contributors)
@@ -394,7 +394,7 @@ class PullRequestTests(support.PullRequestFixture):
                          (head, "", head))
 
     @scenarios("success", "pending")
-    def test_readiness_records_successful_pending_and_failed_ci(self, state):
+    def test_readiness_records_ci_states(self, state):
         head, run = self.readiness_run()
         self.github.check_state = state
         ready = state == "success"
@@ -418,7 +418,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertIn(CI_FAILED.format("failure"), report["limitations"])
 
     @scenarios("base", "configuration", "pins")
-    def test_ci_observations_stay_historical_after_movement_or_fresh_validation(self, change):
+    def test_ci_observations_become_historical(self, change):
         if change == "base":
             head, run = self.readiness_run()
             self.github.check_state = "pending"
@@ -444,7 +444,7 @@ class PullRequestTests(support.PullRequestFixture):
     @scenarios(("comment", "-review-", "head"), ("status", "success", "base"), ("comment", "-ready", "head"),
                ("ci", "", "local"), ("ci", "", "dirty"),
                *(("run", "status", kind) for kind in ("head", "base", "configuration", "local", "dirty")))
-    def test_movement_around_readiness_writes_lookup_or_drafting_is_never_saved_as_ready(self, method, trigger, kind):
+    def test_movement_around_readiness_never_ready(self, method, trigger, kind):
         head, run = self.readiness_run()
         if method == "run":
             # Custom wording makes the ready comment a model draft.
@@ -468,7 +468,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.invalidation(run)["head"], head)
         if method != "status":
             self.assert_no_success()
-        # A success already written before the movement is revoked.
+        # A success written before the movement is revoked.
         self.assertNotEqual([s for c, s in self.github.statuses if c == head][-1:], ["success"])
         if method in {"ci", "run"}:
             self.assertFalse([c for c in comment.call_args_list if c.args[2].endswith(("-ready", head))])
@@ -496,7 +496,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(run, stage="stopped" if kind == "configuration" else "stale", validated_sha=None)
 
     @scenarios("head", "base", "identity", "configuration", "pins", "local", "worker", "ready")
-    def test_pr_show_verifies_the_complete_binding_without_a_tick(self, change):
+    def test_pr_show_verifies_binding(self, change):
         if change == "ready":
             head, run = self.readiness_run()
             run = self.ticks(run)
@@ -515,7 +515,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_limited(report, "not verified" if change == "worker" else "historical")
         self.assertEqual(self.reload(run), run)
 
-    def test_concurrent_head_change_requires_deliberate_update(self):
+    def test_concurrent_head_change_needs_update(self):
         _, run = self.under_review()
         self.assertEqual(run["stage"], "review")
         external = self.push_external()
@@ -534,7 +534,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_reviewed(self.revalidate(run), external)
         self.assertEqual(self.remote_head(), external)
 
-    def test_base_movement_after_stopped_review_retires_evidence_and_is_never_merged(self):
+    def test_base_movement_retires_without_merge(self):
         old = self.remote_head("main")
         head, run = self.stopped_review()
         base = self.advance_base()
@@ -553,7 +553,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_reviewed(run, head, base_sha=base)
         self.assertTrue(self.report(run)["current_evidence"])
 
-    def test_head_moved_before_publication_is_never_overwritten(self):
+    def test_moved_head_never_overwritten(self):
         run = self.at_publish()
         local = run["sha"]
         external = self.push_external()
@@ -584,10 +584,9 @@ class PullRequestTests(support.PullRequestFixture):
         return result
 
     @scenarios(None, "comment", "push")
-    def test_publishing_a_locally_reviewed_revision_posts_its_review(self, crash):
+    def test_publishing_local_review(self, crash):
         head = self.open_pr(reject=1)
-        self.github.permissions["example/demo"] = True
-        run = self.ticks(self.adopt_pr("revise", grants=["edit", "github"]), 6)
+        run = self.ticks(self.writable(grants=["edit", "github"]), 6)
         sha, key = run["sha"], self.marker(run, run["sha"], 1)
         self.assert_reviewed(run, sha)
         run = self.select(run, ["publish"], ["push", "github"])
@@ -607,7 +606,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_contains(self.github.comments[key], f"initial PR `{head}`", f"coordinator commit `{sha}`")
         self.assertEqual(self.report(run)["authorship"]["subsequent"][0]["trailer_families"], [FAMILIES[run["author"]]])
 
-    def test_repair_provenance_is_bound_to_each_commit(self):
+    def test_repair_provenance_per_commit(self):
         run = self.repair_handoff(grants=["github"])
         head, family = run["sha"], FAMILIES[run["author"]]
         external = self.push_external(message=trailed("Repair", family))
@@ -617,14 +616,14 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertIn(f"external repair `{external}`: declared human; Agent-Family trailers {family}",
                       self.github.comments[self.marker(run, external, 1)])
         local = self.local_commit(run)
-        self.assert_withheld(self.ticks(self.select(run, ["validate", "review"], contributors=["unknown"]), 2), local)
+        self.assert_withheld(self.revalidate(run, contributors=["unknown"]), local)
         authorship = self.report(run)["authorship"]
         self.assert_fields(authorship["initial"], commit=head, declared=["human"], trailer_families=[])
         self.assertEqual([(e["kind"], e["commit"], e["declared"], e["trailer_families"], bool(e["commit_authors"]))
                           for e in authorship["subsequent"]], [("external_repair", external, ["human"], [family], True),
                                                                ("local_commit", local, ["unknown"], [], True)])
 
-    def test_head_advanced_during_permission_lookup_is_never_pushed(self):
+    def test_permission_lookup_movement_not_pushed(self):
         run = self.at_publish()
         head = self.remote_head()
         with self.moving(self.github, "push_access", lambda: self.local_commit(run)):
@@ -635,7 +634,7 @@ class PullRequestTests(support.PullRequestFixture):
 
     @scenarios(*(("review", kind, grants) for kind in ("local", "dirty") for grants in ([], ["github"])),
                ("ready", "local", None), ("ready", "dirty", None))
-    def test_local_change_during_review_or_after_readiness_retires_evidence_until_declared(self, when, kind, grants):
+    def test_local_change_retires_until_declared(self, when, kind, grants):
         if when == "ready":
             head, run = self.readiness_run()
             run = self.ticks(run)
@@ -655,7 +654,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_awaiting(run, reviewed_sha=None, validated_sha=None, evidence_context=baseline)
         self.assertTrue(run["pending_contribution"])
         self.assert_retired(self.report(run), head, run["base_sha"], LOCAL_CHANGE, reviewed=head)
-        self.refuses("contributor declarations", self.select, run, ["validate", "review"])
+        self.refuses("contributor declarations", self.select, run, RECHECK)
         if kind == "local":
             run = self.revalidate(run, contributors=["human"])
             self.assert_reviewed(run, self.workspace_head(run))
@@ -680,7 +679,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(run, author=author, reviewer=reviewer)
         self.assertTrue(run["independence"]["established"])
 
-    def test_validation_reports_commands_omitted_after_early_failure(self):
+    def test_validation_reports_omitted_commands(self):
         self.configure(tests=["false", "true", "echo skipped"])
         head = self.open_pr()
         run = self.reviewed(grants=["github"])
@@ -696,7 +695,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertIn("exit 1", body)
 
     @scenarios(None, "base", "configuration", "pins")
-    def test_queued_review_comment_is_retried_or_withheld_after_changes(self, change):
+    def test_queued_review_comment_after_changes(self, change):
         head, run = self.under_review(grants=["github"])
         with patch.object(self.github, "comment", side_effect=TeamError("GitHub unavailable")), \
                 self.assertRaises(TeamError):
@@ -768,7 +767,7 @@ class PullRequestTests(support.PullRequestFixture):
             self.assert_retired(report, head, run["base_sha"], "")
             self.assertEqual(self.pull()["state"], "closed")
 
-    def test_movement_during_first_outbox_write_withholds_later_evidence(self):
+    def test_outbox_movement_withholds_later_evidence(self):
         head, run = self.under_review(True, grants=["github"])
         with self.writes("comment", lambda key: "-review-" in key, self.push_external):
             run = self.ticks(run)
@@ -781,7 +780,7 @@ class PullRequestTests(support.PullRequestFixture):
             self.assertIn("PR head moved", reason)
 
     @scenarios("configuration", "local", "dirty", "head", "base")
-    def test_rejecting_review_with_moved_inputs_is_history_only(self, kind):
+    def test_moved_rejection_is_history_only(self, kind):
         self.configure(max_revisions=0)
         base = self.remote_head("main")
         head, run = self.under_review(True, grants=["github"])
@@ -797,7 +796,7 @@ class PullRequestTests(support.PullRequestFixture):
             self.assert_reviewed(self.revalidate(run), head)
 
     @scenarios(*((updating, point) for updating in (True, False) for point in INTERRUPTIONS))
-    def test_close_refuses_interrupted_swap_and_recovery_keeps_closed_runs(self, updating, point):
+    def test_close_refuses_interrupted_swap(self, updating, point):
         run, _, external, recover = self.swap_fixture(updating)
         self.interrupt(point, recover)
         stage = self.reload(run)["stage"]
@@ -812,7 +811,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(self.reload(run), stage="closed", pending_swap=None)
 
     @scenarios("failed", "crash", "moved")
-    def test_post_push_status_survives_failures_crashes_and_movement(self, case):
+    def test_post_push_status_survives(self, case):
         run = self.at_publish()
         real_status, real_save = self.github.status, self.store.save
 
@@ -869,7 +868,7 @@ class PullRequestTests(support.PullRequestFixture):
 
     @scenarios(*((change, "update") for change in ("head", "base", "identity", "configuration", "local")),
                ("local", "resume"))
-    def test_persisted_rejection_with_changed_inputs_is_retired_on_recovery(self, change, entry):
+    def test_stale_persisted_rejection_retired(self, change, entry):
         head = self.open_pr(reject=True)
         run = self.ticks(self.editing(), 2)
         with patch.object(self.team, "record_review", side_effect=TeamError("Interrupted")):
@@ -888,7 +887,7 @@ class PullRequestTests(support.PullRequestFixture):
         if change in {"head", "base"}:
             self.assert_awaiting(run)
 
-    def test_review_history_keeps_a_rejection_followed_by_validation_failure(self):
+    def test_review_history_keeps_both_rejections(self):
         self.configure(max_revisions=1, tests=["! grep -q fixed feature.txt"])
         head = self.open_pr(reject=1)
         run = self.until_handoff(self.editing())
@@ -898,10 +897,10 @@ class PullRequestTests(support.PullRequestFixture):
             self.assert_review(review, head, False, "changes_requested", run["base_sha"], run["reviewer"])
             self.assert_fields(review, candidate_verdict="changes_requested", validation_failed=False)
 
-    def test_local_continuation_and_validation_drift_keep_complete_prior_evidence(self):
+    def test_continuation_and_drift_keep_evidence(self):
         head, run = self.stopped_review()
         local = self.local_commit(run)
-        run = self.select(run, ["validate", "review"], contributors=["human"])
+        run = self.select(run, RECHECK, contributors=["human"])
         self.assert_review(self.report(run)["review"], head, False, agent=run["reviewer"])
         run = self.ticks(run, 2)
         report = self.report(run)
@@ -920,7 +919,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.roles(), ["review", "review"])
 
     @scenarios("identity", "repository")
-    def test_same_sha_head_identity_change_retires_evidence(self, change):
+    def test_head_identity_change_retires_evidence(self, change):
         head, run = self.stopped_review(grants=["github"])
         self.change(change)
         run = self.ticks(run)
@@ -933,7 +932,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.refuses("adopt the PR again", self.update, run)
 
     @scenarios("repository", "identity")
-    def test_repair_adoption_refuses_changed_head_identity(self, change):
+    def test_repair_refuses_changed_head_identity(self, change):
         run = self.repair_handoff()
         before = self.workspace_head(run)
         self.change(change)
@@ -943,14 +942,14 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.workspace_head(after), before)
         self.assertEqual(list(self.store.run_root(after).glob("refresh-*")), [])
 
-    def test_continuation_after_update_stops_on_rejection_without_revision(self):
+    def test_update_continuation_stops_on_rejection(self):
         head = self.open_pr()
         run = self.ticks(self.writable(), 3)
         self.assert_reviewed(run, head)
         external = self.push_external()
         self.assertEqual(self.ticks(run)["stage"], "stale")
         self.update(run)
-        run = self.select(run, ["validate", "review"])
+        run = self.select(run, RECHECK)
         self.assert_fields(run, pr_followup=None, released_pr_followup=FOLLOWUP)
         self.agents.reject = True
         run = self.ticks(run, 4)
@@ -963,8 +962,7 @@ class PullRequestTests(support.PullRequestFixture):
     def test_failing_head_is_reviewed_before_any_edit(self, mode, grants):
         head = self.open_pr()
         self.configure(tests=["grep -q fixed feature.txt"])
-        self.github.permissions["example/demo"] = True
-        run = self.ticks(self.adopt_pr(mode, grants=grants), 2)
+        run = self.ticks(self.writable(mode, grants), 2)
         self.assert_fields(run, stage="review", validated_sha=None)
         self.assertEqual((run["tests"][0]["exit_code"], run.get("rejected_shas", []), self.agents.calls), (1, [], []))
         run = self.ticks(run)
@@ -988,44 +986,41 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(review["candidate_findings"][0]["severity"], "validation")
         self.assertFalse(report["validation"]["passed_for_candidate"] or report["independent_review_success"])
 
-    @scenarios(("unknown", ["human"]), ("gemini", ["human"]), (None, ["unknown"]))
-    def test_unresolved_trailers_in_external_repair_withhold_independence(self, value, declared):
-        run = self.repair_handoff()
-        self.assertTrue(run["independence"]["established"])
-        external = self.push_external(message=trailed("Repair", value))
-        run = self.adopt_repair(run, declared)
-        self.assertEqual(run["sha"], external)
-        self.assert_not_independent(run, value or "unknown contributors")
+    @scenarios(("external_repair", "unknown", ["human"]), ("external_repair", "gemini", ["human"]),
+               ("external_repair", None, ["unknown"]), ("local_commit", "gemini", ["human"]))
+    def test_unresolved_trailers_withhold_independence(self, kind, value, declared):
         unresolved = [value] if value else []
-        self.assertEqual((run["adopted_pr"]["unresolved_trailers"], run["adoptions"][-1]["unresolved_trailers"]),
-                         (unresolved, unresolved))
-        self.assertEqual(run["contributors"], sorted({"human", *declared}))
-        self.refuses_revision("Independent review cannot be established", run)
-        self.agents.reject = False
-        run = self.revalidate(run, contributors=declared)
-        self.assert_withheld(run, external, unresolved)
-        self.assertNotIn("implement", self.roles())
-        authorship = self.report(run)["authorship"]
-        self.assert_fields(authorship["initial"], declared=["human"], unresolved_trailers=[])
-        self.assert_fields(authorship["subsequent"][-1], kind="external_repair", commit=external, declared=declared,
-                           unresolved_trailers=unresolved)
-
-    def test_unresolved_trailers_in_local_continuation_withhold_independence(self):
-        head = self.open_pr()
-        run = self.ticks(self.editing(), 3)
-        self.assert_reviewed(run, head)
-        local = self.local_commit(run, trailed("Local change", "gemini"))
-        run = self.select(run, ["validate", "review"], contributors=["human"])
-        self.assert_not_independent(run)
-        self.assert_fields(run, unresolved_trailers=["gemini"], reviewed_sha=None)
-        self.assertEqual(run["adopted_pr"]["unresolved_trailers"], ["gemini"])
-        self.assert_withheld(self.ticks(run, 2), local)
-        self.assertEqual(self.remote_head(), head)
-        self.assert_fields(self.report(run)["authorship"]["subsequent"][-1], kind="local_commit", commit=local,
-                           declared=["human"], unresolved_trailers=["gemini"])
+        if kind == "local_commit":
+            head = self.open_pr()
+            run = self.ticks(self.editing(), 3)
+            self.assert_reviewed(run, head)
+            commit = self.local_commit(run, trailed("Local change", value))
+            run = self.select(run, RECHECK, contributors=declared)
+            self.assert_not_independent(run)
+            self.assert_fields(run, unresolved_trailers=unresolved, reviewed_sha=None)
+            self.assertEqual(run["adopted_pr"]["unresolved_trailers"], unresolved)
+            self.assert_withheld(self.ticks(run, 2), commit)
+            self.assertEqual(self.remote_head(), head)
+        else:
+            run = self.repair_handoff()
+            self.assertTrue(run["independence"]["established"])
+            commit = self.push_external(message=trailed("Repair", value))
+            run = self.adopt_repair(run, declared)
+            self.assertEqual(run["sha"], commit)
+            self.assert_not_independent(run, value or "unknown contributors")
+            self.assertEqual((run["adopted_pr"]["unresolved_trailers"], run["adoptions"][-1]["unresolved_trailers"]),
+                             (unresolved, unresolved))
+            self.assertEqual(run["contributors"], sorted({"human", *declared}))
+            self.refuses_revision("Independent review cannot be established", run)
+            self.agents.reject = False
+            self.assert_withheld(self.revalidate(run, contributors=declared), commit, unresolved)
+            self.assertNotIn("implement", self.roles())
+            self.assert_fields(self.report(run)["authorship"]["initial"], declared=["human"], unresolved_trailers=[])
+        self.assert_fields(self.report(run)["authorship"]["subsequent"][-1], kind=kind, commit=commit,
+                           declared=declared, unresolved_trailers=unresolved)
 
     @scenarios(*((command, point) for command in ("pr update RUN_ID", "adopt RUN_ID") for point in INTERRUPTIONS))
-    def test_interrupted_update_or_repair_adoption_recovers_recorded_inputs(self, command, point):
+    def test_interrupted_swap_recovers_inputs(self, command, point):
         updating = command == "pr update RUN_ID"
         run, head, external, recover = self.swap_fixture(updating)
         self.interrupt(point, recover)
@@ -1052,7 +1047,7 @@ class PullRequestTests(support.PullRequestFixture):
                          ([(external, ["human"])], 1))
         self.assert_error(self.ticks(run), "stale", "agent-team adopt")
 
-    def test_supplied_findings_are_revised_with_fresh_evidence(self):
+    def test_supplied_findings_get_fresh_evidence(self):
         head = self.open_pr()
         run = self.writable("findings", findings=FIX)
         self.assertEqual(run["operations"], FOLLOWUP)
@@ -1063,7 +1058,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual((run["validated_sha"], run["reviewed_sha"], self.remote_head()), (run["sha"],) * 3)
         self.assertTrue(self.pull()["draft"])
 
-    def test_findings_mode_counts_its_first_edit_against_the_budget(self):
+    def test_findings_first_edit_uses_budget(self):
         self.configure(max_revisions=0)
         self.open_pr()
         self.refuses(NO_BUDGET, self.editing_findings)
@@ -1078,13 +1073,13 @@ class PullRequestTests(support.PullRequestFixture):
         self.refuses_revision(NO_BUDGET, run)
         self.assertEqual(self.roles().count("implement"), 1)
 
-    def test_evidence_is_invalidated_by_configuration_change(self):
+    def test_configuration_change_invalidates_evidence(self):
         head, run = self.stopped_review()
         self.change("configuration")
         self.refuses("evidence invalidated", self.select, run, ["review"])
         self.assert_fields(self.reload(run), validated_sha=None, reviewed_sha=None)
 
-    def test_exhausted_review_hands_off_and_repair_is_adopted_without_base_merge(self):
+    def test_exhausted_repair_adopted_without_merge(self):
         run = self.repair_handoff()
         external = self.push_external()
         self.advance_base()
@@ -1094,18 +1089,18 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.remote_head(), external)
 
     @scenarios(0, 2)
-    def test_every_author_entry_needs_a_reserved_unused_round(self, limit):
+    def test_author_entry_needs_reserved_round(self, limit):
         self.configure(max_revisions=limit)
         head = self.open_pr()
         run = self.ticks(self.writable(), 3)
         self.assert_reviewed(run, head, round=0)
-        for operations in (["implement", "validate", "review"], REVISION):
+        for operations in (["implement", *RECHECK], REVISION):
             self.refuses("No revision round is reserved", self.select, run, operations, ["edit"])
         self.store.save(run, round=limit + 1, reserved_round=limit + 1, needs_revision=True)
         self.refuses(NO_BUDGET, self.select, run, ["implement", "validate"], ["edit"])
         self.assertEqual((self.roles(), self.remote_head()), (["review"], head))
 
-    def test_supplied_findings_stop_on_fresh_unrelated_findings(self):
+    def test_findings_stop_on_unrelated_findings(self):
         self.configure(max_revisions=3)
         self.open_pr(reject=1)
         self.agents.findings = [[{"severity": "P2", "location": "other.txt:3", "evidence": "Unrelated",
@@ -1126,7 +1121,7 @@ class PullRequestTests(support.PullRequestFixture):
     @scenarios((["openai"], ["human"], "cannot review independently"),
                (["human", "unknown"], ["human"], "unknown contributors"),
                (["openai"], ["anthropic"], "both model families"))
-    def test_readoption_carries_prior_provenance_forward(self, first, second, message):
+    def test_readoption_carries_provenance(self, first, second, message):
         self.open_pr()
         run = self.reviewed(contributors=first)
         self.store.save(run, stage="closed")
@@ -1141,7 +1136,7 @@ class PullRequestTests(support.PullRequestFixture):
             self.assertIn(message, again["independence"]["reason"])
 
     @scenarios(True, False)
-    def test_large_pr_is_reviewed_only_with_a_proven_complete_patch(self, compact_fits):
+    def test_large_pr_needs_complete_patch(self, compact_fits):
         lines = [f"line {n}" for n in range(300)]
         self.commit("main", "main", "big.txt", "\n".join(lines) + "\n", "Add big file")
         self.open_pr()
@@ -1166,7 +1161,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.report(run)["review"]["patch"], run["review_record"]["patch"])
         self.assertIn("complete context-free patch", review_comment(head, run["review_record"]))
 
-    def test_interrupted_readiness_success_is_revoked_after_base_movement(self):
+    def test_interrupted_ready_success_revoked(self):
         head, run = self.readiness_run()
         with self.writes("status", lambda state: state == "success", self.crash), self.assertRaises(Interrupted):
             self.ticks(run)
@@ -1176,7 +1171,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.github.statuses[-1], (head, "pending"))
 
     @scenarios("rename-1", "metadata", "tampered")
-    def test_interrupted_initial_preparation_recovers_the_installed_checkout(self, point):
+    def test_interrupted_preparation_recovers(self, point):
         head = self.open_pr()
         run = self.adopt_pr()
         self.interrupt("metadata" if point == "metadata" else "rename-1", lambda: self.ticks(run))
@@ -1191,7 +1186,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_reviewed(run, head, installing=None)
         self.assertEqual(self.roles(), ["review"])
 
-    def test_exhausted_fork_revision_is_repaired_locally_without_push_or_base_merge(self):
+    def test_exhausted_fork_repaired_locally(self):
         self.configure(max_revisions=1)
         base, head = self.remote_head("main"), self.open_pr(8, "fork-feature", head_repo=FORK, reject=2)
         run = self.until_handoff(self.adopt_pr("revise", "8", grants=ALL))
