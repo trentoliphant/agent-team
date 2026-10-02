@@ -8,6 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from agent_team import evidence
 from agent_team.agents import Agents, FAMILIES, REVIEW_SCHEMA, subscription_status, validate_report
 from agent_team.coordinator import Coordinator, GUIDANCE
 from agent_team.process import execute, git, worker_env, TeamError, QuotaError
@@ -1923,6 +1924,81 @@ class WorkflowTests(unittest.TestCase):
         self.github.check_state = "failure"
         self.assertEqual(self.tick()["stage"], "blocked")
         self.assertTrue(self.github.pull["draft"])
+
+    def test_ready_ci_change_is_saved_before_a_failed_status_write(self):
+        run = self.tick(6)
+        self.assertEqual(run["stage"], "ready")
+        sha, base = run["sha"], run["base_sha"]
+        self.assertEqual([(c["operation"], c["state"], c["readiness_changed"]) for c in run["ci_checks"]],
+                         [("ci", "success", True)])
+        working = self.github.status
+        for observed in ("pending", "failure"):
+            with self.subTest(observed=observed):
+                attempts = []
+
+                def failing(repo, status_sha, state, description):
+                    # The observation and the queued write are durable before GitHub is called.
+                    saved = self.store.get(run["id"])
+                    attempts.append(saved)
+                    self.assertEqual(saved["stage"], "ci")
+                    self.assertEqual(saved["ci_checks"][-1]["state"], observed)
+                    self.assertEqual(saved["outbox"][0]["description"], "CI changed; waiting for checks")
+                    raise TeamError("status write failed")
+
+                self.github.check_state = observed
+                self.github.status = failing
+                with self.assertRaises(TeamError):
+                    self.tick()
+                self.assertEqual(len(attempts), 1)
+                saved = self.store.get(run["id"])
+                self.assertEqual(saved["stage"], "ci")
+                record = saved["ci_checks"][-1]
+                self.assertEqual({k: record[k] for k in ("sha", "base", "operation", "state", "companions",
+                                                          "generation", "readiness_changed")},
+                                 {"sha": sha, "base": base, "operation": "reconcile", "state": observed,
+                                  "companions": [], "generation": 0, "readiness_changed": False})
+                self.assertIsInstance(record["at"], float)
+                self.assertEqual(saved["outbox"], [{"type": "status", "sha": sha, "state": "pending",
+                                                    "description": "CI changed; waiting for checks"}])
+                # The queued write is retried first; CI then decides the stage without readiness.
+                self.github.status = working
+                run = self.tick()
+                self.assertEqual(self.store.get(run["id"])["outbox"], [])
+                self.assertIn((sha, "pending", "CI changed; waiting for checks"), self.github.status_descriptions)
+                if observed == "pending":
+                    self.assertEqual(run["stage"], "ci")
+                    self.github.check_state = "success"
+                    run = self.tick()
+                    self.assertEqual(run["stage"], "ready")
+                else:
+                    self.assertEqual(run["stage"], "blocked")
+                    self.assertEqual(self.github.statuses[-1], (sha, "failure"))
+        history = [(c["operation"], c["state"]) for c in self.store.get(run["id"])["ci_checks"]]
+        self.assertEqual(history, [("ci", "success"), ("reconcile", "pending"), ("ci", "pending"),
+                                   ("ci", "success"), ("reconcile", "failure"), ("ci", "failure")])
+        self.assertNotIn("merge", [role for _, role in self.agents.calls])
+
+    def test_transient_ready_ci_failure_stays_in_history_after_success(self):
+        run = self.tick(6)
+        # Ready monitoring reads a failure; the CI stage in the same tick then reads success.
+        states = iter(["failure"])
+        self.github.ci = lambda repo, sha: next(states, "success")
+        run = self.tick()
+        self.assertEqual(run["stage"], "ready")
+        self.assertEqual(self.github.status_descriptions[-2:],
+                         [(run["sha"], "pending", "CI changed; waiting for checks"),
+                          (run["sha"], "success", "Cross-family review and configured tests passed; human merge only")])
+        for _ in range(2):
+            # Unchanged ready observations are not repeated.
+            self.assertEqual(self.tick()["stage"], "idle")
+        run = self.store.get(run["id"])
+        self.assertEqual([(c["operation"], c["state"]) for c in run["ci_checks"]],
+                         [("ci", "success"), ("reconcile", "failure"), ("ci", "success")])
+        history = evidence.ci_history(run)
+        self.assertTrue(all(c["current"] for c in history))
+        self.assertEqual(evidence.current_ci(history)["state"], "success")
+        self.assertEqual(history[1]["state"], "failure")
+        self.assertEqual(self.github.statuses[-1], (run["sha"], "success"))
 
     def test_same_family_review_rejected(self):
         run = self.tick(4)

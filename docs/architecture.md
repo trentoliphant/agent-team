@@ -289,6 +289,15 @@ Repositories with no GitHub checks still require local validation and agent
 review. Branch protection remains the authoritative merge-time CI gate, including
 checks that appear after the coordinator's poll.
 
+Each changed CI observation is appended to the run's `ci_checks` with its exact
+head, base, validated companion pins, evidence generation, operation, and time.
+When a ready run sees CI change, the observation, the return to `ci`, and the
+queued pending status are saved before GitHub is called. A failed status write
+therefore loses no evidence and is retried, and a transient failure stays in the
+history after CI passes. `agent_team/evidence.py` holds pure, standard-library
+helpers that build and render these CI records and review, rejected-review, and
+historical evidence from plain dictionaries.
+
 This release does not provide a web UI, multi-host leases,
 GitHub Projects synchronization, automatic semantic issue deduplication,
 general-purpose plugin loading, autonomous prioritization, or automatic merge.
