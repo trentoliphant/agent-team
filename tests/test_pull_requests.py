@@ -39,8 +39,6 @@ def unavailable(*_, **__):
 
 
 class FeatureGitHub(support.PullGitHub):
-    """Production PR parsing and push checks."""
-
     def pr(self, repo, number):
         return GitHub.pr(self, repo, number) if number in self.pulls else super().pr(repo, number)
 
@@ -672,9 +670,11 @@ class PullRequestTests(support.PullRequestFixture):
         run = self.readiness_run()[1]
         self.pull()["draft"] = False
         self.store.save(run, readiness_intent="0" * 40)
-        with self.moving(self.github, "comment", self.crash, lambda *a: "-ready" in a[2]), suppress(Interrupted):
-            self.ticks(run)
-        self.assertFalse(self.reload(run)["ci_checks"][-1]["readiness_changed"])
+        with patch.object(self.github, "mark_ready") as mark:
+            run = self.ticks(run)
+        self.assert_fields(run, stage="ready", readiness_intent=None)
+        self.assertEqual((mark.call_count, run["ci_checks"][-1]["readiness_changed"],
+                          self.report(run)["ci_checks"][-1]["readiness_changed"]), (0, False, False))
 
     @scenarios(*(("review", kind, grants) for kind in ("local", "dirty") for grants in ([], ["github"])),
                ("ready", "local", None), ("ready", "dirty", None))
@@ -744,6 +744,7 @@ class PullRequestTests(support.PullRequestFixture):
             self.ticks(run)
         run = self.reload(run)
         self.assertEqual((run["stage"], len(run["outbox"])), ("stopped", 1))
+        self.store.save(run, readiness_intent=head)
         self.change(change)
         with self.pinned(change):
             run = self.ticks(run)
@@ -757,8 +758,8 @@ class PullRequestTests(support.PullRequestFixture):
             self.assert_error(run, "stale", "PR base changed")
             return
         reason = REASONS[change]
-        self.assertEqual((run["stage"], run["next_stage"], self.github.comments,
-                          run["unpublished_evidence"][0]["withheld_reason"]), ("stopped", "validate", {}, reason))
+        self.assertEqual((run["stage"], run["next_stage"], self.github.comments, run.get("readiness_intent"),
+                          run["unpublished_evidence"][0]["withheld_reason"]), ("stopped", "validate", {}, None, reason))
         report = self.report(run)
         self.assert_review(report["review"], head, False)
         self.assertEqual(self.assert_retired(report, head, run["base_sha"], reason)["reason"], reason)

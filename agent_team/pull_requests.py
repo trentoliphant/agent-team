@@ -48,9 +48,7 @@ def declared_contributors(contributors):
 
 
 def closure(pr):
-    if pr.get("merged"):
-        return "merged"
-    return None if pr["state"] == "open" else "closed"
+    return "merged" if pr.get("merged") else None if pr["state"] == "open" else "closed"
 
 
 def heads(pr):
@@ -124,7 +122,6 @@ class PullRequests:
         self.team = team
 
     def inspect(self, project, cwd, number):
-        """Fetch a PR head, even a fork's."""
         git = core.git
         base = git(cwd, "rev-parse", "HEAD")
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
@@ -172,7 +169,7 @@ class PullRequests:
         owner = next((r for r in runs if r.get("pr") == number and r["stage"] not in TERMINAL), None)
         if owner:
             raise TeamError(f"PR #{number} is already tracked by run {owner['id']}; continue that run instead")
-        if any(r["stage"] in ACTIVE or r["stage"] in RECOVERY or r.get("in_flight") for r in runs):
+        if any(r["stage"] in ACTIVE | RECOVERY or r.get("in_flight") for r in runs):
             raise TeamError("Resolve existing work or continue its tracked run")
         pr = team.github.pr(project["repo"], number)
         if closure(pr):
@@ -258,11 +255,9 @@ class PullRequests:
 
     def update(self, run_id, contributors):
         team = self.team
-        run = team.store.get(run_id)
+        run = self.adopted(run_id)
         project = team.store.project(run["project"])
-        info = run.get("adopted_pr")
-        if not info:
-            raise TeamError("Run does not track an adopted pull request")
+        info = run["adopted_pr"]
         if run.get("pending_swap"):
             return team.finish_journaled(project, run)
         if run["stage"] in TERMINAL:
@@ -286,9 +281,9 @@ class PullRequests:
         if core.head_moved(info, pr):
             raise TeamError("PR head repository or branch changed; close this run and adopt the PR again")
         cwd = team.store.workspace(run)
-        if cwd.exists() and not run.get("git_metadata"):
-            raise TeamError("Initial preparation was interrupted; finish it with agent-team resume RUN_ID first")
         if cwd.exists():
+            if not run.get("git_metadata"):
+                raise TeamError("Initial preparation was interrupted; finish it with agent-team resume RUN_ID first")
             core.assert_metadata(cwd, run["git_metadata"])
             if core.git(cwd, "status", "--porcelain"):
                 raise TeamError("The checkout has uncommitted work; inspect it before adopting a changed PR "
@@ -341,11 +336,15 @@ class PullRequests:
                        partial_result="Changed PR inputs adopted deliberately; select the next operation")
         return team.swap(project, run, fresh, changes, "pr update RUN_ID", True, preserved)
 
-    def report(self, run_id):
-        store = self.team.store
-        run = store.get(run_id)
+    def adopted(self, run_id):
+        run = self.team.store.get(run_id)
         if not run.get("adopted_pr"):
             raise TeamError("Run does not track an adopted pull request")
+        return run
+
+    def report(self, run_id):
+        store = self.team.store
+        run = self.adopted(run_id)
         try:
             with store.repository_lock(run["project"]):
                 return self.summary(store.get(run_id), True)
@@ -372,11 +371,9 @@ class PullRequests:
             core.assert_metadata(cwd, run["git_metadata"])
             path.write_text(core.git(cwd, "format-patch", "--stdout", f"{published}..{sha}") + "\n")
         access = run.get("push_access") or info["push_access"]
-        reason = run.get("local_handoff_reason")
-        if not reason and not access["allowed"]:
-            reason = access["reason"]
-        elif not reason and "push" not in (run.get("grants") or []):
-            reason = "the push grant was not given"
+        reason = run.get("local_handoff_reason") or (
+            access["reason"] if not access["allowed"] else
+            "the push grant was not given" if "push" not in (run.get("grants") or []) else None)
         return {"commit": sha, "builds_on": published, "checkout": str(cwd),
                 "patch": str(path) if path.exists() else None,
                 "reason": reason or "publication to the PR branch was not selected", "replacement_pr": "not created"}
@@ -385,7 +382,6 @@ class PullRequests:
         info = run["adopted_pr"]
         project = self.team.store.project(run["project"])
         sha = run.get("sha")
-        history = run.get("revision_history", [])
         reason = core.withheld(run)
         retirement = run.get("evidence_retired")
         current = run["stage"] not in {"stale", "closed", "merged"} and not retirement
@@ -397,7 +393,7 @@ class PullRequests:
         historical = [historical_evidence(e) for e in run.get("evidence_invalidations", []) if e.get("evidence")]
         latest = next((h for h in reversed(historical) if h["review"]), None)
         review = latest and latest["review"]
-        entries = [e for e in history if e["kind"] == "review"]
+        entries = [e for e in run.get("revision_history", []) if e["kind"] == "review"]
         reviews = [rejected_review(e, current and e["sha"] == sha and e.get("base") == run["base_sha"]) for e in entries]
         if run.get("review_record") and run.get("review_sha") == sha:
             review = review_report(run["review_record"], sha, run["base_sha"], current)
@@ -432,7 +428,7 @@ class PullRequests:
              f"not pass (state: {(latest_check or {}).get('state')})."),
             (run["stage"] != "ready", f"Agent Team marked the PR ready for {marked[-1]['head']}; that readiness is "
              "not current." if marked else
-             "Marking the PR ready was not confirmed; resume reconciles it." if run.get("readiness_intent") == run["sha"] else
+             "Marking the PR ready was not confirmed; resume reconciles it." if run.get("readiness_intent") == sha else
              "Readiness was not assessed; Agent Team did not change draft or readiness state."),
             (handoff, f"The revision is local only ({(handoff or {}).get('reason')}). Apply the patch or push the "
              "commit yourself; no replacement PR was created."),

@@ -225,7 +225,7 @@ def retire_evidence(run, reason, force=True, **entry):
                                     "review_withheld") if run.get(k)}
     changes = dict(validated_sha=None, validated_tree=None, validated_context=None, attempted_context=None,
                    reviewed_sha=None, review_sha=None, review_record=None, review_withheld=None,
-                   evidence_retired={"reason": reason, "at": time.time()},
+                   readiness_intent=None, evidence_retired={"reason": reason, "at": time.time()},
                    evidence_generation=run.get("evidence_generation", 0) + 1)
     failure = run.get("validation_failure")
     if failure and failure["sha"] not in run.get("rejected_shas", []):
@@ -1878,18 +1878,18 @@ class Coordinator:
         pr = self.github.pr(project["repo"], run["pr"])
         if moved(pr):
             return
-        changed = run["ci_checks"][:-1] + [dict(run["ci_checks"][-1], readiness_changed=True)]
         if pr.get("draft"):
             self.store.save(run, readiness_intent=run["sha"])
             self.github.mark_ready(project["repo"], run["pr"])
-        if run.get("readiness_intent") == run["sha"]:
-            self.store.save(run, ci_checks=changed, readiness_intent=None)
+        if run.get("readiness_intent"):
+            last = dict(run["ci_checks"][-1], readiness_changed=run["readiness_intent"] == run["sha"])
+            self.store.save(run, readiness_intent=None, ci_checks=run["ci_checks"][:-1] + [last])
         if moved():
             return
         self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready", ready)
         if moved():
             return
-        self.store.save(run, stage="ready", ci_checks=changed)
+        self.store.save(run, stage="ready")
 
     def discover(self, name, agent, focus):
         project = self.store.project(name)
