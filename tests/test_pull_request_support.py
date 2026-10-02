@@ -5,10 +5,10 @@ from unittest.mock import patch
 from agent_team import coordinator
 from agent_team.process import git, TeamError
 
-# A module import, so discovery does not collect the fixture class here.
+# Module imports, so discovery collects neither the fixture class nor WorkflowTests here.
 from tests import support_pull_requests as support
+from tests import test_coordinator
 from tests.support_pull_requests import COMMIT, FORK, Interrupted, scenarios, trailed
-from tests.test_coordinator import WorkflowTests
 
 
 class Target:
@@ -24,10 +24,13 @@ class Target:
 
 class FixtureProofTests(support.PullRequestFixture):
     def test_fixture_defines_no_tests_and_borrows_no_workflow_tests(self):
-        self.assertFalse(issubclass(support.PullRequestFixture, WorkflowTests))
+        self.assertFalse(issubclass(support.PullRequestFixture, test_coordinator.WorkflowTests))
         self.assertEqual([n for n in dir(support.PullRequestFixture) if n.startswith("test")], [])
         self.assertNotIn("push_access", vars(support.PullGitHub))
         self.assertIs(self.provider, support.PullGitHub)
+        # Discovery collects only this module's own proofs, never a duplicate suite.
+        cases = [n for n, v in globals().items() if isinstance(v, type) and issubclass(v, unittest.TestCase)]
+        self.assertEqual(cases, ["FixtureProofTests"])
 
     def test_scenarios_rebuild_a_fresh_fixture_per_case(self):
         seen = []
