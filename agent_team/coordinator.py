@@ -1663,8 +1663,11 @@ class Coordinator:
         baseline = metadata(cwd)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Review checkout changed; inspect before retry")
-        # Three dots: changes since the merge base, so a PR behind its base is not shown reverting the base.
-        diff, patch_evidence = review_patch(git, cwd, run["base_sha"], run["sha"])
+        # An existing PR uses three dots: changes since the merge base, so a PR behind its base is not
+        # shown reverting the base. Otherwise two dots: the candidate is compared with the recorded base
+        # commit itself, as before.
+        diff, patch_evidence = review_patch(git, cwd, run["base_sha"], run["sha"],
+                                            separator="..." if run.get("adopted_pr") else "..")
         prompt = (GUIDANCE + self.style(project, "review") +
                   "Your summary and findings are published as the review comment.\n"
                   f"\nIndependently review {subject(run)}: "

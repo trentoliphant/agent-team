@@ -14,6 +14,7 @@ this package or needs its workflow files.
 | `github.py` | GitHub API reads and coordinator-owned writes through `gh` |
 | `writing.py` | Writing-standard precedence, validation, and prompt text (style only); the coordinator applies the `status` policy to its status comments |
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
+| `patches.py` | Complete, budget-bounded review patches and their completeness proof |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 | `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
 | `pull_requests.py` | Existing-PR adoption, deliberate updates, and read-only `pr show` reports |
@@ -155,14 +156,29 @@ source, and coordinator validation results, not the author's private transcript.
 Reviewer modifications invalidate the report. A passing report with findings is
 rejected as ambiguous.
 
-The review diff has a 180,000-character budget. If the full diff is larger, the
-reviewer gets a context-free diff (`--unified=0`) only after the coordinator has
-proven it has the same files, file metadata, changed lines, and no-newline
-markers as the full diff. The reviewer is told that context was left out and
-that it must read the full source. The review record shows the patch format,
-its size and hash, and the result of the equivalence check. If the context-free
-diff is still too large, or equivalence cannot be proven, the review is refused.
-Diffs are never truncated, sliced, or filtered.
+The review budget is 180,000 characters. The diff from the base SHA to the
+candidate is sent in full when it fits. For an existing PR the diff is taken from
+the merge base of the base SHA and the candidate (`base...candidate`), so a PR that
+is behind its base is not shown reverting the base. Otherwise the coordinator generates a
+context-free diff (`--unified=0`). It uses that diff only if it fits and its raw bytes
+parse to the same per-file headers (mode, rename, binary, and index lines) and the
+same changed lines, line numbers, and no-newline markers as the full diff. Hunk
+lengths come from hunk headers, so content that looks like diff syntax stays content.
+Both formats are parsed before use. Each file section must be complete: metadata in
+Git's order with no missing or contradictory parts, names that agree with it, and
+exactly the body it implies (none for mode-only, 100%-similar rename/copy, or empty
+created/deleted files; a rename/copy below 100% needs an index line and a body; otherwise a binary notice or `---`/`+++` with hunks). Hunks must
+change something, have valid ranges, and be in order without overlap; unchanged lines
+between hunks must line up on both sides. No-newline markers must follow the last line
+of their side. The context-free patch may not contain unchanged lines. Both must
+be valid UTF-8, so the reviewer receives the exact bytes that were hashed and
+verified; non-UTF-8 text changes are refused rather than replaced. A malformed, mismatched, or still oversized patch blocks the review; the coordinator
+never truncates a patch, drops files, or raises the budget. The review record keeps
+the patch format, range, sizes, SHA-256, and file and changed-line counts. When the
+compact patch is used, the reviewer prompt and the published review comment state
+that surrounding context was omitted and that the reviewer must inspect the full
+source in the checkout. The review record also keeps the result of the equivalence
+check. Diffs are never truncated, sliced, or filtered.
 
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without
