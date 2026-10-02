@@ -34,7 +34,7 @@ REASONS = {"configuration": "Validation configuration changed", "pins": "Compani
            "local": LOCAL_CHANGE, "dirty": LOCAL_CHANGE, "head": "PR head moved", "base": "PR base changed"}
 
 
-def unavailable(*_):
+def unavailable(*_, **__):
     raise TeamError("GitHub unavailable")
 
 
