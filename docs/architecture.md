@@ -161,7 +161,10 @@ context-free diff (`--unified=0`). It uses that diff only if it fits and its raw
 parse to the same per-file headers (mode, rename, binary, and index lines) and the
 same changed lines, line numbers, and no-newline markers as the full diff. Hunk
 lengths come from hunk headers, so content that looks like diff syntax stays content.
-A malformed, mismatched, or still oversized patch blocks the review; the coordinator
+Both formats are parsed before use: every line must be a known Git header, a hunk
+line, or an exact no-newline marker placed after the last line of its side. Both must
+be valid UTF-8, so the reviewer receives the exact bytes that were hashed and
+verified; non-UTF-8 text changes are refused rather than replaced. A malformed, mismatched, or still oversized patch blocks the review; the coordinator
 never truncates a patch, drops files, or raises the budget. The review record keeps
 the patch format, range, sizes, SHA-256, and file and changed-line counts. When the
 compact patch is used, the reviewer prompt and the published review comment state

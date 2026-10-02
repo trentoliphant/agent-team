@@ -142,6 +142,11 @@ class ReviewPatchTests(unittest.TestCase):
             "short hunk": compact[:compact.rindex(b"\n", 0, len(compact) - 1) + 1],
             "stray line": compact + b"trailing junk\n",
             "no final newline": compact[:-1],
+            "unknown header line": compact.replace(b"\nindex ", b"\nbogus header\nindex ", 1),
+            "malformed hunk header": compact.replace(b"\n@@ -", b"\n@@ -x", 1),
+            "bogus marker": compact.replace(b"\n+--- a/fake.txt\n", b"\n+--- a/fake.txt\n\\ bogus marker\n", 1),
+            "marker before more lines": compact.replace(b"\n+--- a/fake.txt\n", b"\n+--- a/fake.txt" + marker + b"\n",
+                                                        1),
         }
         for name, bad in cases.items():
             with self.subTest(case=name):
@@ -151,6 +156,43 @@ class ReviewPatchTests(unittest.TestCase):
         # The unaltered patch passes through the same runner, so each refusal is due to its alteration.
         self.assertEqual(review_patch(fake_git({False: default, True: compact}), self.repo, base, head,
                                       limit=limit)[1]["format"], "compact")
+
+    def test_malformed_default_patch_fails_closed(self):
+        base, head = self.scattered()
+        default = raw_diff(self.repo, base, head)
+        marker = b"\\ No newline at end of file\n"
+        self.assertIn(b"\n line 1\n line 2\n", default)  # context in the middle of a hunk
+        cases = {
+            "not a patch": b"not a patch\n",
+            "bogus marker after context": default.replace(b"\n line 1\n", b"\n line 1\n\\ bogus marker\n", 1),
+            "marker after mid-hunk context": default.replace(b"\n line 1\n", b"\n line 1\n" + marker, 1),
+            "repeated marker after mid-hunk change": default.replace(b"\n+edited 360\n",
+                                                                     b"\n+edited 360\n" + marker * 2, 1),
+            "unknown header line": default.replace(b"\nindex ", b"\nbogus header\nindex ", 1),
+            "missing hunks": default[:default.index(b"\n@@") + 1],
+            "malformed hunk header": default.replace(b"\n@@ -", b"\n@@ -x", 1),
+        }
+        for name, bad in cases.items():
+            with self.subTest(case=name):
+                self.assertNotEqual(bad, default)
+                with self.assertRaisesRegex(TeamError, "Diff could not be parsed .*review refused"):
+                    review_patch(fake_git({False: bad, True: b""}), self.repo, base, head)
+        self.assertEqual(review_patch(fake_git({False: default, True: b""}), self.repo, base, head)[1]["format"],
+                         "default")
+
+    def test_invalid_utf8_is_refused_not_replaced(self):
+        base = self.commit({"big.txt": "\n".join(self.lines) + "\n", "latin.txt": b"keep\n\xff\n"}, "Base")
+        edited = [f"edited {n}" if n % 40 == 0 else line for n, line in enumerate(self.lines)]
+        head = self.commit({"big.txt": "\n".join(edited) + "\n", "latin.txt": b"keep\n\xfe\n"}, "Edit")
+        default, compact = self.diffs(base, head)
+        self.assertIn(b"\n-\xff\n+\xfe\n", compact)  # a text diff, not a binary one
+        for limit in (None, len(compact)):
+            with self.subTest(limit=limit), self.assertRaisesRegex(TeamError, "Diff is not valid UTF-8"):
+                review_patch(git, self.repo, base, head, limit=limit)
+        # A context-free patch with bytes the reviewer cannot receive unchanged is refused too.
+        valid = default.replace(b"\xff", b"?").replace(b"\xfe", b"!")
+        with self.assertRaisesRegex(TeamError, "Context-free patch is not valid UTF-8"):
+            review_patch(fake_git({False: valid, True: compact}), self.repo, base, head, limit=len(compact))
 
     def test_hunk_lengths_come_from_headers(self):
         removed = (b"diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1,2 +1 @@\n"
