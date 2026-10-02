@@ -9,6 +9,7 @@ import tempfile
 from .agents import Agents, FAMILIES
 from . import companions
 from .github import GitHub
+from .patches import COMPACT_NOTICE, review_patch
 from .process import execute, git, clone_repository, TeamError, QuotaError, worker_env, git_env, metadata, assert_metadata
 from .state import ACTIVE, RECOVERY, CapacityWait, issue_fingerprint
 from .writing import DEFAULTS, effective, guidance
@@ -62,6 +63,12 @@ def review_comment(sha, record):
              f"model requested {record['requested_model']}, observed {observed}.", ""]
     if record.get("companions"):
         lines += [f"Reviewed with companion pins: {companions.text(record['companions'])}.", ""]
+    if (record.get("patch") or {}).get("format") == "compact":
+        patch = record["patch"]
+        lines += [f"The full diff ({patch['default_characters']} characters) exceeded the review budget, so the "
+                  f"reviewer received a complete context-free patch (`--unified=0`, {patch['files']} files, "
+                  f"{patch['changed_lines']} changed lines), verified against the full diff, and was told "
+                  "to inspect the full source.", ""]
     lines.append(report["summary"])
     for number, finding in enumerate(report["findings"], 1):
         lines += ["", f"**{number}. {finding['severity']}: {finding['location']}**", "",
@@ -1295,9 +1302,8 @@ class Coordinator:
         baseline = metadata(cwd)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Review checkout changed; inspect before retry")
-        diff = git(cwd, "diff", "--no-ext-diff", run["base_sha"], run["sha"])
-        if len(diff) > 180000:
-            raise TeamError("Diff exceeds review budget; split the PR")
+        # Two dots: the candidate is compared with the recorded base commit itself, as before.
+        diff, patch_evidence = review_patch(git, cwd, run["base_sha"], run["sha"], separator="..")
         prompt = (GUIDANCE + self.style(project, "review") +
                   "Your summary and findings are published as the review comment.\n"
                   f"\nIndependently review {('issue #' + str(run['issue'])) if run['issue'] is not None else 'scoped task'}: "
@@ -1310,6 +1316,7 @@ class Coordinator:
                   "Inspect source and applicable instructions. Check correctness, missing acceptance criteria, "
                   "regressions, and inadequate tests. Do not modify files. Do not assume passing tests prove correctness. "
                   "Return changes_requested for actionable findings, otherwise pass with an empty findings list.\n"
+                  + (COMPACT_NOTICE if patch_evidence["format"] == "compact" else "") +
                   f"Diff:\n{diff}")
         record = self.call_agent(run["reviewer"], "review", prompt, cwd,
                                  self.store.artifacts(run) / f"review-{run['round']}", project,
@@ -1318,6 +1325,7 @@ class Coordinator:
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Reviewer modified candidate; evidence rejected")
         companions.verify(root, pins, baselines)
+        record = dict(record, patch=patch_evidence)
         return dict(record, companions=pins) if pins else record
 
     def review(self, project, run):
