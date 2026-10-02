@@ -440,7 +440,7 @@ class PullRequests:
                 "authorship": {"declared": info["declared"], "trailer_families": info["trailer_families"],
                                "unresolved_trailers": info.get("unresolved_trailers", []),
                                "contributing_families": sorted(core.contributing_families(run)),
-                               "inherited": info.get("inherited_provenance"),
+                               "inherited": info.get("inherited_provenance"), **core.pr_provenance(run),
                                "github_identities": info["github_identities"],
                                "note": "GitHub identities are not treated as model authorship"},
                 "roles": {"reviser": agent(run["author"])

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.cli import parser
-from agent_team.coordinator import LOCAL_CHANGE, pull_number, review_comment
+from agent_team.coordinator import FAMILIES, LOCAL_CHANGE, pull_number, review_comment
 from agent_team.github import GitHub
 from agent_team.patches import COMPACT_NOTICE
 from agent_team.process import git, TeamError
@@ -582,6 +582,43 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual((self.remote_head(), run["adopted_pr"]["pushed"]), (run["sha"], [run["sha"]]))
         self.assert_status(run["sha"], "pending", PUSHED)
 
+    @scenarios(False, True)
+    def test_publishing_a_locally_reviewed_revision_posts_its_review(self, crash):
+        head = self.open_pr(reject=1)
+        self.github.permissions["example/demo"] = True
+        run = self.ticks(self.adopt_pr("revise", grants=["edit", "github"]), 6)
+        sha, key = run["sha"], self.marker(run, run["sha"], 1)
+        self.assert_reviewed(run, sha)
+        run = self.select(run, ["publish"], ["push", "github"])
+        with self.writes("comment", lambda k: crash and "-review-" in k, self.crash), \
+                self.assertRaises(Interrupted) if crash else nullcontext():
+            self.ticks(run)
+        if crash and self.ticks(run)["stage"] == "blocked":
+            self.team.resume(run["id"])
+        run = self.ticks(run)
+        self.assert_reviewed(run, sha, published_sha=sha, outbox=[])
+        self.assertEqual(self.remote_head(), sha)
+        self.assert_status(sha, "pending", "Review reported; readiness not checked")
+        self.assert_contains(self.github.comments[key], f"initial PR `{head}`", f"coordinator commit `{sha}`")
+        self.assertEqual(self.report(run)["authorship"]["subsequent"][0]["trailer_families"], [FAMILIES[run["author"]]])
+
+    def test_repair_provenance_is_bound_to_each_commit(self):
+        run = self.repair_handoff(grants=["github"])
+        head, family = run["sha"], FAMILIES[run["author"]]
+        external = self.push_external(message=trailed("Repair", family))
+        self.agents.reject = False
+        run = self.revalidate(self.adopt_repair(run))
+        self.assert_reviewed(run, external)
+        self.assertIn(f"external repair `{external}`: declared human; Agent-Family trailers {family}",
+                      self.github.comments[self.marker(run, external, 1)])
+        local = self.local_commit(run)
+        self.assert_withheld(self.ticks(self.select(run, ["validate", "review"], contributors=["unknown"]), 2), local)
+        authorship = self.report(run)["authorship"]
+        self.assert_fields(authorship["initial"], commit=head, declared=["human"], trailer_families=[])
+        self.assertEqual([(e["kind"], e["commit"], e["declared"], e["trailer_families"], bool(e["commit_authors"]))
+                          for e in authorship["subsequent"]], [("external_repair", external, ["human"], [family], True),
+                                                               ("local_commit", local, ["unknown"], [], True)])
+
     def test_head_advanced_during_permission_lookup_is_never_pushed(self):
         run = self.at_publish()
         head = self.remote_head()
@@ -963,6 +1000,10 @@ class PullRequestTests(support.PullRequestFixture):
         run = self.revalidate(run, contributors=declared)
         self.assert_withheld(run, external, unresolved)
         self.assertNotIn("implement", self.roles())
+        authorship = self.report(run)["authorship"]
+        self.assert_fields(authorship["initial"], declared=["human"], unresolved_trailers=[])
+        self.assert_fields(authorship["subsequent"][-1], kind="external_repair", commit=external, declared=declared,
+                           unresolved_trailers=unresolved)
 
     def test_unresolved_trailers_in_local_continuation_withhold_independence(self):
         head = self.open_pr()
@@ -975,6 +1016,8 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(run["adopted_pr"]["unresolved_trailers"], ["gemini"])
         self.assert_withheld(self.ticks(run, 2), local)
         self.assertEqual(self.remote_head(), head)
+        self.assert_fields(self.report(run)["authorship"]["subsequent"][-1], kind="local_commit", commit=local,
+                           declared=["human"], unresolved_trailers=["gemini"])
 
     @scenarios(*((command, point) for command in ("pr update RUN_ID", "adopt RUN_ID") for point in INTERRUPTIONS))
     def test_interrupted_update_or_repair_adoption_recovers_recorded_inputs(self, command, point):

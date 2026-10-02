@@ -172,6 +172,31 @@ def adoption_provenance(run, declared, families, unresolved):
                else f" Independent review: {reviewer}, which did not contribute."))
 
 
+def contributed(info, kind, commit, declared, cwd, *span):
+    """Adds a commit-bound later contribution; run["provenance"] keeps the initial one."""
+    found, unresolved = split_trailers(git(cwd, "log", "--format=%(trailers:key=Agent-Family,valueonly)", *span))
+    entry = {"kind": kind, "commit": commit, "declared": sorted(declared), "trailer_families": found,
+             "unresolved_trailers": unresolved, "at": time.time(),
+             "commit_authors": sorted(set(git(cwd, "log", "--format=%an", *span).split("\n")) - {""})}
+    return dict(info, declared=sorted(set(info["declared"]) | set(declared)), contributions=info.get(
+        "contributions", []) + [entry], trailer_families=sorted(set(info["trailer_families"]) | set(found)))
+
+
+def pr_provenance(run):
+    first, info = run.get("provenance") or {}, run["adopted_pr"]
+    return {"initial": dict({k: first.get(k) for k in ("declared", "trailer_families", "unresolved_trailers")},
+                            commit=first.get("selected_revision"), commit_authors=info["github_identities"]["commit_authors"]),
+            "subsequent": info.get("contributions", [])}
+
+
+def provenance_text(run):
+    p, j = pr_provenance(run), lambda v: ", ".join(v or []) or "none"
+    return "Provenance (GitHub identities are not model authorship):\n" + "\n".join(
+        f"- {e.get('kind', 'initial PR').replace('_', ' ')} `{e['commit']}`: declared {j(e['declared'])}; Agent-Family "
+        f"trailers {j(e['trailer_families'])}; unresolved {j(e['unresolved_trailers'])}; Git authors {j(e['commit_authors'])}"
+        for e in [p["initial"], *p["subsequent"]])
+
+
 def configuration(project):
     config = {k: project.get(k) for k in ("repo", "base", "tests", "timeout", "codex_model", "claude_model")}
     config.update({k: project[k] for k in ("companions", "companion_manifest") if project.get(k)})
@@ -262,7 +287,7 @@ def adopted_scope(run, withheld_reason):
         f"against base `{info['base_ref']}` at `{run['base_sha']}`.{contained}", "",
         "Configured validation: " + (validation_text(run["tests"], run.get("validation_plan")) if validated or failed
                                      else "not performed for this commit"),
-        "", "GitHub CI checks: not checked by this review.", "", independence, "",
+        "", "GitHub CI checks: not checked by this review.", "", provenance_text(run), "", independence, "",
         "This standalone review is not a readiness verdict. Agent Team did not change draft state, "
         "retarget, merge the base, or merge."])
 
@@ -932,7 +957,11 @@ class Coordinator:
             families, unresolved = self.contributor_check(run, contributors, adopting=not bool(context["dirty"]),
                                                           local_changes=bool(context["dirty"]))(
                 self.store.workspace(run), context["head"], run["base_sha"])
-            self.store.save(run, **self.reassess(run, contributors, families, unresolved),
+            recorded = self.reassess(run, contributors, families, unresolved)
+            if run.get("adopted_pr") and previous and context["head"] != previous["head"]:
+                recorded["adopted_pr"] = contributed(recorded["adopted_pr"], "local_commit", context["head"], contributors,
+                                                     self.store.workspace(run), context["head"], "^" + previous["head"])
+            self.store.save(run, **recorded,
                             contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
                             pending_contribution=None,
                             commit_contributors=sorted(set(run.get("commit_contributors") or []) | set(contributors)),
@@ -1422,11 +1451,17 @@ class Coordinator:
                         for c in (run.get("commit_contributors") or [FAMILIES[run['author']]])) +
                 f"Agent-Team-Run: {run['id']}")
         sha = git(author, "rev-parse", "HEAD")
+        info, recorded = run.get("adopted_pr"), {}
+        if info and run.get("commit_contributors") and sha not in [run.get("published_sha")] + [
+                c["commit"] for c in info.get("contributions", [])]:
+            # Saved with the candidate, also after a crash that followed the commit.
+            recorded["adopted_pr"] = contributed(info, "coordinator_commit", sha, run["commit_contributors"],
+                                                 author, sha, f"^{sha}^")
         if run.get("needs_revision") and sha == run.get("published_sha"):
             raise TeamError("Revision produced no new commit; rejected evidence cannot be replaced by a reroll")
         if sha in run.get("rejected_shas", []):
             raise TeamError("Candidate is a previously rejected commit; rejected evidence cannot be replaced by a reroll")
-        self.store.save(run, sha=sha, commit_contributors=None)
+        self.store.save(run, sha=sha, commit_contributors=None, **recorded)
         # Outside the author root, so companions and the candidate sit side by side under fresh basenames.
         root, cwd = self.store.layout(run, f"validation-{run['round']}-{time.time_ns()}")
         cwd.parent.mkdir(parents=True, exist_ok=True)
@@ -1643,12 +1678,15 @@ class Coordinator:
         self.store.save(run, stage=self.successor(run, "publish", "review"))
 
     def pushed(self, run, sha):
-        """Save the pushed commit with its status queued so a crash cannot skip it."""
-        info = run["adopted_pr"]
-        status = self.bound(dict(run, sha=sha, published_sha=sha), {
-            "type": "status", "sha": sha, "state": "pending", "description": "Revision pushed; independent review pending"})
+        """Save the pushed commit with its status, and a review already done for it, queued so a crash cannot skip them."""
+        info, new = run["adopted_pr"], dict(run, sha=sha, published_sha=sha)
+        done = run.get("review_sha") == sha and sha in {run.get("reviewed_sha"), (run.get("review_withheld") or {}).get("sha")}
+        # The review's original marker keeps the comment idempotent.
+        writes = [self.review_write(new, run["review_record"])] * bool(done) + [self.bound(new, {
+            "type": "status", "sha": sha, "state": "pending", "description": "Review reported; readiness not checked"
+            if done else "Revision pushed; independent review pending"})]
         return dict(published_sha=sha, pending_push_sha=None, local_handoff_reason=None,
-                    adopted_pr=dict(info, pushed=info.get("pushed", []) + [sha]), **self.queue_writes(run, status))
+                    adopted_pr=dict(info, pushed=info.get("pushed", []) + [sha]), **self.queue_writes(run, *writes))
 
     def independent_review(self, project, run):
         root, cwd = self.store.layout(run, f"review-{run['round']}-{time.time_ns()}")
@@ -2198,6 +2236,10 @@ class Coordinator:
         if run.get("adopted_pr"):
             changes = {**retire_evidence(run, "Adopted external repair"), **changes}
         changes.update(self.reassess(dict(run, **changes), declared, families, unresolved))
+        if run.get("adopted_pr"):
+            # contributor_check verified the repair extends the published candidate.
+            changes["adopted_pr"] = contributed(changes["adopted_pr"], "external_repair", changes["published_sha"],
+                                                declared, fresh, changes["published_sha"], "^" + run["published_sha"])
         adoption = {"head": changes["published_sha"], "sha": changes["sha"], "base_sha": changes["base_sha"],
                     "declared": declared, "families": sorted(families), "unresolved_trailers": unresolved,
                     "round": changes["round"], "at": time.time()}
@@ -2281,6 +2323,9 @@ class Coordinator:
                     "families": sorted(families), "unresolved_trailers": unresolved, "round": round_,
                     "local": True, "at": time.time()}
         provenance = self.reassess(run, declared, families, unresolved)
+        if info:
+            provenance["adopted_pr"] = contributed(provenance["adopted_pr"], "local_repair", candidate, declared,
+                                                   fresh, candidate, "^" + repair["candidate"])
         merged = (f" Base `{base_sha}` was not merged." if info else
                   f" Candidate `{sha}` merges current base `{base_sha}`." if sha != candidate
                   else f" It is up to date with base `{base_sha}`.")
