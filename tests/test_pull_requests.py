@@ -212,14 +212,18 @@ class PullRequestTests(unittest.TestCase):
             run = self.ticks(run, 1)
         return run
 
-    def moving(self, owner, method, move, when=lambda *args: True):
-        """Move inputs inside a matching call, before it proceeds."""
+    def moving(self, owner, method, move, when=lambda *args: True, after=False):
+        """Move inputs inside a matching call, before it proceeds or, if `after`, once it returns."""
         real = getattr(owner, method)
 
         def wrapped(*args, **kwargs):
-            if when(*args):
+            matched = when(*args)
+            if matched and not after:
                 move()
-            return real(*args, **kwargs)
+            result = real(*args, **kwargs)
+            if matched and after:
+                move()
+            return result
 
         return patch.object(owner, method, side_effect=wrapped)
 
@@ -228,7 +232,7 @@ class PullRequestTests(unittest.TestCase):
             return self.ticks(run, 1)
 
     def writes(self, method, when, action):
-        return self.moving(self.github, method, action, lambda _, target, key, *a: when(key))
+        return self.moving(self.github, method, action, lambda _, target, key, *a: when(key), after=True)
 
     def interrupt(self, point, action):
         class Interrupted(Exception):
@@ -626,7 +630,7 @@ class PullRequestTests(unittest.TestCase):
                 self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
             key = 1 if method in {"ci", "run"} else 2
             with self.moving(self.agents if method == "run" else self.github, method, lambda: self.change(kind, run),
-                             lambda *args: trigger in args[key]), \
+                             lambda *args: trigger in args[key], after=method in {"comment", "status"}), \
                     patch.object(self.github, "comment", wraps=self.github.comment) as comment:
                 run = self.ticks(run, 1)
             ready = trigger == "-ready"

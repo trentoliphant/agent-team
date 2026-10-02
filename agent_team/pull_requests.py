@@ -1,4 +1,4 @@
-"""Existing pull requests behind `agent-team pr`. Git and clone calls go through the coordinator module."""
+"""Existing pull requests behind `agent-team pr`."""
 from pathlib import Path
 import shutil
 import tempfile
@@ -89,7 +89,6 @@ def rejected_review(entry, current):
 
 
 def pr_roles(families, reviewer):
-    """(reviser, reviewer), or None for rotation."""
     other = {"codex": "claude", "claude": "codex"}
     if len(families) == 1:
         author = {family: agent for agent, family in FAMILIES.items()}[next(iter(families))]
@@ -100,7 +99,6 @@ def pr_roles(families, reviewer):
 
 
 def pr_inheritance(project, prior, mode, number):
-    """Budget and provenance inherited from earlier runs of the PR."""
     limit_of = lambda r: core.revision_limit(project, r)
     exhausted = [r for r in prior if r.get("handoffs") and r["handoffs"][-1]["round"] >= limit_of(r)]
     if mode != "review" and exhausted:
@@ -144,7 +142,6 @@ class PullRequests:
                 "commit_authors": sorted({line.strip() for line in authors.splitlines() if line.strip()})}
 
     def fetch(self, project, number, base_ref, expected, fresh, moved, branch=None):
-        """Clone and inspect the PR, refusing with `moved` unless it is at `expected`."""
         core.clone_repository(project["repo"], fresh, base_ref, project["timeout"])
         found = self.inspect(project, fresh, number)
         if (found["head"], found["base"]) != tuple(expected):
@@ -155,7 +152,6 @@ class PullRequests:
         return found
 
     def adopt(self, name, reference, mode, contributors, grants=(), reviewer=None, findings=(), plan_only=False):
-        """Track an existing PR in a durable run."""
         team = self.team
         project = team.store.project(name)
         number = pull_number(project, reference)
@@ -240,7 +236,6 @@ class PullRequests:
         if findings:
             body += "\nOperator-supplied findings:\n" + listed + "\n"
         issue = {"number": None, "title": f"PR #{number}: {pr['title']}"[:150], "body": body}
-        # Roles are saved by the creating transaction.
         run = team.store.create(project, issue, dict(
             **dict(zip(("author", "reviewer"), roles or ())),
             selection=True, operations=operations, stop_after=operations[-1], grants=grants, effect_plan=effects,
@@ -267,7 +262,6 @@ class PullRequests:
         return run
 
     def update(self, run_id, contributors):
-        """Deliberately adopt a changed PR head or base, preserving the old checkout."""
         team = self.team
         run = team.store.get(run_id)
         project = team.store.project(run["project"])
@@ -344,7 +338,6 @@ class PullRequests:
         return team.swap(project, run, fresh, changes, "pr update RUN_ID", True, preserved)
 
     def report(self, run_id):
-        """Local findings, checks, and any local handoff. Read-only."""
         store = self.team.store
         run = store.get(run_id)
         if not run.get("adopted_pr"):
@@ -366,7 +359,6 @@ class PullRequests:
         return (False, change[1]) if change else (True, None)
 
     def handoff(self, run, locked):
-        """An unpushed validated revision as a commit and patch."""
         info, store = run["adopted_pr"], self.team.store
         sha, published = run.get("sha"), run.get("published_sha")
         cwd = store.workspace(run)
