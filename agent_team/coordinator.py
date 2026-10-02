@@ -8,6 +8,8 @@ import tempfile
 
 from .agents import Agents, FAMILIES
 from . import companions
+from . import evidence
+from .evidence import ci_observation, observation_changed
 from .github import GitHub
 from .patches import COMPACT_NOTICE, review_patch
 from .process import execute, git, clone_repository, TeamError, QuotaError, worker_env, git_env, metadata, assert_metadata
@@ -1239,10 +1241,21 @@ class Coordinator:
         if run["stage"] == "ready" and self.pins_changed(project, run):
             self.invalidate_pins(project, run)
             return False
-        if run["stage"] == "ready" and self.github.ci(project["repo"], expected) != "success":
-            if self.has_effect(run, "github"):
-                self.github.status(project["repo"], expected, "pending", "CI changed; waiting for checks")
-            self.store.save(run, stage="ci", notification_pending=True)
+        if run["stage"] == "ready":
+            state = self.github.ci(project["repo"], expected)
+            # The observation and the status write are saved before the write is attempted, so a
+            # failed write cannot lose pending or failing CI, and a later success keeps it as history.
+            observation = ci_observation(run, state, "reconcile", sha=expected)
+            changes = dict(ci_checks=run.get("ci_checks", []) + [observation]) if observation_changed(
+                run.get("ci_checks"), observation) else {}
+            if state != "success":
+                changes.update(self.queue_writes(run, {"type": "status", "sha": expected, "state": "pending",
+                                                       "description": "CI changed; waiting for checks"}),
+                               stage="ci", notification_pending=True)
+            if changes:
+                self.store.save(run, **changes)
+            if state != "success":
+                self.flush(project, run)
         return True
 
     def suite(self, project, run):
@@ -1828,11 +1841,8 @@ class Coordinator:
             return
         context = self.evidence_context(project, run)
         state = self.github.ci(project["repo"], run["sha"])
-        self.store.save(run, ci_checks=run.get("ci_checks", []) + [{
-            "at": time.time(), "sha": run["sha"], "base": run["base_sha"],
-            "context": context, "companions": run.get("validated_companions") or [],
-            "generation": run.get("evidence_generation", 0), "state": state, "readiness_changed": False}],
-            stage=self.successor(run, "checks", "ci"))
+        self.store.save(run, ci_checks=run.get("ci_checks", []) + [ci_observation(run, state, "checks", context=context)],
+                        stage=self.successor(run, "checks", "ci"))
 
     def ci(self, project, run):
         self.compatible_validation(project, run)
@@ -1850,14 +1860,10 @@ class Coordinator:
             self.renew_pins(project, run)
             return
         state = self.github.ci(project["repo"], run["sha"])
-        observation = {"sha": run["sha"], "base": run["base_sha"], "operation": "ci", "state": state,
-                       "companions": run.get("validated_companions") or [], "readiness_changed": False,
-                       "generation": run.get("evidence_generation", 0)}
-        last = (run.get("ci_checks") or [{}])[-1]
-        if {k: last.get(k) for k in observation} != observation:
+        observation = ci_observation(run, state, "ci")
+        if observation_changed(run.get("ci_checks"), observation, evidence.RECORD):
             self.store.save(run, ci_checks=run.get("ci_checks", []) + [dict(
-                observation, at=time.time(),
-                context=self.evidence_context(project, run) if run.get("selection") else None)])
+                observation, context=self.evidence_context(project, run) if run.get("selection") else None)])
         if state == "failure":
             raise TeamError("GitHub CI failed; inspect checks and resume after correction")
         if state == "pending":
