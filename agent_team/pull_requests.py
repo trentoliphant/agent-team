@@ -124,7 +124,7 @@ class PullRequests:
         self.team = team
 
     def inspect(self, project, cwd, number):
-        """Fetch a PR head, even a fork's, via the base pull ref."""
+        """Fetch a PR head, even a fork's, via the pull ref."""
         git = core.git
         base = git(cwd, "rev-parse", "HEAD")
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
@@ -287,7 +287,7 @@ class PullRequests:
             raise TeamError("PR head repository or branch changed; close this run and adopt the PR again")
         cwd = team.store.workspace(run)
         if cwd.exists() and not run.get("git_metadata"):
-            # The installation journal is verified only by the preparation stage.
+            # Only preparation verifies the installation journal.
             raise TeamError("Initial preparation was interrupted; finish it with agent-team resume RUN_ID first")
         if cwd.exists():
             core.assert_metadata(cwd, run["git_metadata"])
@@ -461,5 +461,5 @@ class PullRequests:
                 "limitations": limitations}
 
 
-# Imported last to break the import cycle.
+# Last, to break an import cycle.
 from . import coordinator as core  # noqa: E402

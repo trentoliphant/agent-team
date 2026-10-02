@@ -222,7 +222,7 @@ def require_no_swap(run):
 
 
 def local_candidate(run):
-    """Unpublished candidate, including a revision of an adopted PR that could not be pushed."""
+    """Unpublished candidate, including an unpushable adopted-PR revision."""
     return not run.get("published_sha") or bool(run.get("adopted_pr")) and run["sha"] != run["published_sha"]
 
 
@@ -570,7 +570,7 @@ class Coordinator:
         changes, revoke = {}, []
         if (run.get("evidence_retired") or {}).get("reason") != reason:
             changes = retire_evidence(run, reason)
-        # A journaled success may be published before the ready save; revoke it through the outbox.
+        # The outbox revokes a success journaled before the ready save.
         if (run["stage"] == "ready" or run.get("readiness_status")) and self.has_effect(run, "github"):
             revoke = [{"type": "status", "sha": run.get("readiness_status") or run.get("published_sha") or run["sha"],
                        "state": "pending", "description": "Evidence inputs changed; readiness invalidated"}]
@@ -1297,7 +1297,7 @@ class Coordinator:
         provenance = dict(run.get("provenance", {}))
         contributors = set(run.get("contributors", []))
         if info and cwd.exists():
-            # Installed before the metadata save: verify the journaled metadata before Git runs there.
+            # Installed before the metadata save; verify it before running Git there.
             assert_metadata(cwd, run["installing"])
             if (git(cwd, "rev-parse", "HEAD"), git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
                     git(cwd, "status", "--porcelain")) != (info["head_sha"], run["branch"], ""):
@@ -1335,7 +1335,7 @@ class Coordinator:
             base = git(cwd, "rev-parse", "HEAD")
             git(cwd, "switch", "-c", run["branch"])
         head, recorded = git(cwd, "rev-parse", "HEAD"), metadata(cwd)
-        # One save, so an interruption repeats preparation instead of leaving partial state.
+        # One save: an interruption repeats preparation.
         self.store.save(run, base_sha=base, sha=head, git_metadata=recorded, input_revision=head, installing=None,
                         stage=run.get("operations", ["implement"])[0], **({"evidence_context": self.evidence_context(
                             project, dict(run, git_metadata=recorded, base_sha=base))} if run.get("selection") else {}))
@@ -1550,7 +1550,7 @@ class Coordinator:
                         **self.queue_writes(run, *writes))
 
     def compatible_validation(self, project, run, attempted=False):
-        """Check the candidate still matches its (if `attempted`, failed) validation."""
+        """Check the candidate still matches its validation (failed, if `attempted`)."""
         if not run.get("selection"):
             return
         # Before the context check, so a verdict gathered with other pins is kept as superseded history.
@@ -1643,7 +1643,7 @@ class Coordinator:
         self.store.save(run, stage=self.successor(run, "publish", "review"))
 
     def pushed(self, run, sha):
-        """Save the pushed commit with its status queued, so a crash or lost response cannot skip it."""
+        """Save the pushed commit with its status queued so a crash cannot skip it."""
         info = run["adopted_pr"]
         status = self.bound(dict(run, sha=sha, published_sha=sha), {
             "type": "status", "sha": sha, "state": "pending", "description": "Revision pushed; independent review pending"})
@@ -1840,7 +1840,7 @@ class Coordinator:
                             heading=comment["heading"])
         if moved():
             return
-        # Journaled first: any later binding failure revokes this success (adopted_pr_moved).
+        # Journaled first; a later binding failure revokes it.
         self.store.save(run, readiness_status=run["sha"])
         self.github.status(project["repo"], run["sha"], "success", "Cross-family review and configured tests passed; human merge only")
         pr = self.github.pr(project["repo"], run["pr"])
@@ -2301,7 +2301,7 @@ class Coordinator:
                        **self.queue_writes(run, self.bound(dict(run, sha=sha), write)))
         if run.get("selection"):
             changes.update(stage="stopped", next_stage="validate", review_sha=None, validated_context=None)
-        # Journaled like remote adoption: an interruption is finished by adopting again.
+        # Journaled; adopting again finishes an interruption.
         self.swap(project, run, fresh, changes, "adopt RUN_ID", bool(run.get("selection")))
         self.notify(project, run)
         return run
