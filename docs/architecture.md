@@ -161,8 +161,13 @@ context-free diff (`--unified=0`). It uses that diff only if it fits and its raw
 parse to the same per-file headers (mode, rename, binary, and index lines) and the
 same changed lines, line numbers, and no-newline markers as the full diff. Hunk
 lengths come from hunk headers, so content that looks like diff syntax stays content.
-Both formats are parsed before use: every line must be a known Git header, a hunk
-line, or an exact no-newline marker placed after the last line of its side. Both must
+Both formats are parsed before use. Each file section must be complete: metadata in
+Git's order with no missing or contradictory parts, names that agree with it, and
+exactly the body it implies (none for mode-only, pure rename/copy, or empty
+created/deleted files; otherwise a binary notice or `---`/`+++` with hunks). Hunks must
+change something, have valid ranges, and be in order without overlap; unchanged lines
+between hunks must line up on both sides. No-newline markers must follow the last line
+of their side. The context-free patch may not contain unchanged lines. Both must
 be valid UTF-8, so the reviewer receives the exact bytes that were hashed and
 verified; non-UTF-8 text changes are refused rather than replaced. A malformed, mismatched, or still oversized patch blocks the review; the coordinator
 never truncates a patch, drops files, or raises the budget. The review record keeps
