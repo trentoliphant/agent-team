@@ -66,6 +66,15 @@ class ReviewRecordTests(unittest.TestCase):
         self.assertFalse(history["validation_failed"])
         self.assertEqual(history["validation_checks"], [])
 
+    def test_historical_evidence_with_cleared_validation_failure_is_not_a_failure(self):
+        # supersede clears the field with validation_failure=None; that is not a recorded failure.
+        entry = {"reason": "PR head changed", "at": 2.0, "head": "a" * 40, "base": "b" * 40,
+                 "evidence": {"validated_sha": "a" * 40, "validation_failure": None, "tests": TESTS}}
+        history = evidence.historical_evidence(entry)
+        self.assertFalse(history["validation_failed"])
+        self.assertEqual(history["tests"], TESTS)
+        self.assertEqual(history["validation_checks"], [dict(TESTS[0], performed=True)])
+
     def test_rejected_review_uses_saved_report_or_recorded_feedback(self):
         entry = {"sha": "a" * 40, "base": "b" * 40, "feedback": "raw feedback", "findings": [FINDING],
                  "review": {"agent": "claude"}, "tests": TESTS, "validation_plan": PLAN}
@@ -105,21 +114,24 @@ class CiRecordTests(unittest.TestCase):
                 self.assertTrue(evidence.observation_changed([first], dict(first, **{key: value})))
 
     def test_history_is_current_only_for_exact_head_base_generation_and_pins(self):
-        checks = [evidence.ci_observation(run(), "failure", "reconcile", at=1.0),
+        checks = [evidence.ci_observation(run(), "failure", "reconcile", at=1.0, context={"dirty": ""}),
                   evidence.ci_observation(run(), "success", "ci", at=2.0)]
-        history = evidence.ci_history(run(ci_checks=checks))
-        self.assertEqual(history, [
+        expected = [
             {"operation": "reconcile", "head": "a" * 40, "base": "b" * 40, "state": "failure", "at": 1.0,
-             "readiness_changed": False, "current": True},
+             "readiness_changed": False, "companions": PINS, "generation": 2, "context": {"dirty": ""},
+             "current": True},
             {"operation": "ci", "head": "a" * 40, "base": "b" * 40, "state": "success", "at": 2.0,
-             "readiness_changed": False, "current": True}])
-        self.assertEqual(evidence.current_ci(history)["state"], "success")
+             "readiness_changed": False, "companions": PINS, "generation": 2, "context": None,
+             "current": True}]
+        history = evidence.ci_history(run(ci_checks=checks))
+        self.assertEqual(history, expected)
+        self.assertEqual(evidence.current_ci(history), expected[1])
         for changed in ({"sha": "d" * 40}, {"base_sha": "e" * 40}, {"evidence_generation": 3},
                         {"validated_companions": []}):
             with self.subTest(changed=changed):
                 moved = evidence.ci_history(run(ci_checks=checks, **changed))
-                self.assertEqual([c["state"] for c in moved], ["failure", "success"])
-                self.assertFalse(any(c["current"] for c in moved))
+                # Stale observations keep their complete binding evidence; only currency changes.
+                self.assertEqual(moved, [dict(c, current=False) for c in expected])
                 self.assertIsNone(evidence.current_ci(moved))
         self.assertFalse(any(c["current"] for c in evidence.ci_history(run(ci_checks=checks), current=False)))
 
@@ -127,7 +139,15 @@ class CiRecordTests(unittest.TestCase):
         legacy = {"sha": "a" * 40, "base": "b" * 40, "state": "pending", "companions": PINS}
         history = evidence.ci_history(run(ci_checks=[legacy], evidence_generation=0))
         self.assertEqual(history, [{"operation": "checks", "head": "a" * 40, "base": "b" * 40, "state": "pending",
-                                    "at": None, "readiness_changed": False, "current": True}])
+                                    "at": None, "readiness_changed": False, "companions": PINS, "generation": 0,
+                                    "context": None, "current": True}])
+
+    def test_history_keeps_extra_recorded_fields(self):
+        observation = dict(evidence.ci_observation(run(), "success", "ci", at=3.0), readiness_changed=True,
+                           note="kept")
+        entry = evidence.ci_history(run(ci_checks=[observation], sha="d" * 40))[0]
+        self.assertEqual((entry["note"], entry["readiness_changed"], entry["current"]), ("kept", True, False))
+        self.assertNotIn("sha", entry)
 
 
 if __name__ == "__main__":

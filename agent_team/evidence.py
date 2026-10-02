@@ -34,7 +34,7 @@ def historical_evidence(entry):
             "verdict": record["report"]["verdict"] if record else None,
             "review": review_report(record, evidence.get("review_sha"), entry["base"], False) if record else None,
             "independent_review_success": bool(evidence.get("reviewed_sha")),
-            "validation_failed": "validation_failure" in evidence, "tests": evidence.get("tests", []),
+            "validation_failed": bool(evidence.get("validation_failure")), "tests": evidence.get("tests", []),
             "validation_checks": validation_checks(evidence.get("tests", []), evidence.get("validation_plan"))}
 
 
@@ -67,10 +67,14 @@ def observation_changed(checks, observation, keys=BINDING):
 
 def ci_history(run, current=True):
     """Recorded CI observations, each marked current only for the run's exact head, base, generation
-    and pins. Older observations, including transient failures, stay listed as history."""
+    and pins. Older observations, including transient failures, stay listed as history with every
+    recorded field, so stale entries still show the pins, generation and context they were bound to."""
     sha, pins, generation = run.get("sha"), run.get("validated_companions") or [], run.get("evidence_generation", 0)
-    return [{"operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
+    return [{**{k: v for k, v in c.items() if k != "sha"},
+             "operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
              "state": c["state"], "at": c.get("at"), "readiness_changed": c.get("readiness_changed", False),
+             "companions": c.get("companions") or [], "generation": c.get("generation", 0),
+             "context": c.get("context"),
              "current": bool(current and c["sha"] == sha and c["base"] == run.get("base_sha")
                              and c.get("generation", 0) == generation and (c.get("companions") or []) == pins)}
             for c in run.get("ci_checks", [])]
