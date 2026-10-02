@@ -155,6 +155,15 @@ source, and coordinator validation results, not the author's private transcript.
 Reviewer modifications invalidate the report. A passing report with findings is
 rejected as ambiguous.
 
+The review diff has a 180,000-character budget. If the full diff is larger, the
+reviewer gets a context-free diff (`--unified=0`) only after the coordinator has
+proven it has the same files, file metadata, changed lines, and no-newline
+markers as the full diff. The reviewer is told that context was left out and
+that it must read the full source. The review record shows the patch format,
+its size and hash, and the result of the equivalence check. If the context-free
+diff is still too large, or equivalence cannot be proven, the review is refused.
+Diffs are never truncated, sliced, or filtered.
+
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without
 blocking new issue intake. `refresh`

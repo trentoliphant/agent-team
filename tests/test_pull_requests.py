@@ -6,8 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.cli import parser
-from agent_team.coordinator import Coordinator, pull_number
+from agent_team.coordinator import Coordinator, pull_number, review_comment
 from agent_team.github import GitHub
+from agent_team.patches import COMPACT_NOTICE
 from agent_team.process import git, TeamError
 
 # A module import keeps discovery from running WorkflowTests here again.
@@ -1142,6 +1143,34 @@ class PullRequestTests(unittest.TestCase):
             run = self.ticks(run, 1)
             self.assertEqual(run["stage"], "stale")
             self.assertIn("agent-team adopt", run["error"])
+
+    def test_large_pr_is_reviewed_only_with_a_proven_complete_patch(self):
+        lines = [f"line {n}" for n in range(300)]
+        for compact_fits in self.scenarios(True, False):
+            self.commit("main", "main", "big.txt", "\n".join(lines) + "\n", "Add big file")
+            self.open_pr()
+            edited = [f"edited {n}" if n % 50 == 0 else line for n, line in enumerate(lines)]
+            head = self.commit("feature", "feature", "big.txt", "\n".join(edited) + "\n", "Edit big file")
+            span = f"{self.remote_head('main')}...{head}"
+            # `git` strips the final newline the review patch keeps.
+            default, compact = (len(git(self.remote, "diff", *options, span)) + 1 for options in ([], ["--unified=0"]))
+            with patch("agent_team.patches.REVIEW_BUDGET", compact if compact_fits else compact - 1):
+                run = self.tick_raising(self.adopt_pr(), 3)
+            if not compact_fits:
+                # Never truncated: the review is refused before any reviewer runs.
+                self.assert_fields(run, stage="blocked", reviewed_sha=None, review_record=None)
+                self.assertIn("exceeds review budget even without context", run["error"])
+                self.assertEqual(self.agents.calls, [])
+                continue
+            self.assert_fields(run, stage="stopped", reviewed_sha=head)
+            self.assert_fields(run["review_record"]["patch"], format="compact", complete=True, files=2,
+                               changed_lines=13, characters=compact, default_characters=default, range=span)
+            prompt = self.agents.prompts["review"]
+            self.assertIn(COMPACT_NOTICE, prompt)
+            self.assertIn("-line 50\n+edited 50\n", prompt)
+            self.assertNotIn("\n line 51\n", prompt)
+            self.assertEqual(self.report(run)["review"]["patch"], run["review_record"]["patch"])
+            self.assertIn("complete context-free patch", review_comment(head, run["review_record"]))
 
     def test_cli_parses_existing_pr_operations(self):
         args = parser().parse_args(["pr", "review", "demo", "7", "--contributor", "unknown"])

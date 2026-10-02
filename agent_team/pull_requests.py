@@ -9,7 +9,6 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-from . import coordinator as core
 from .agents import FAMILIES
 from .process import TeamError
 from .state import ACTIVE, RECOVERY, TERMINAL, CoordinatorBusy, issue_fingerprint
@@ -68,7 +67,7 @@ def review_report(record, commit, base, current):
     report = record["report"]
     return {"commit": commit, "base": base, "current": current, "verdict": report["verdict"],
             "summary": report["summary"], "findings": report["findings"],
-            "reviewer": {k: record.get(k) for k in REVIEWER}}
+            "reviewer": {k: record.get(k) for k in REVIEWER}, "patch": record.get("patch")}
 
 
 def historical_evidence(entry):
@@ -505,3 +504,7 @@ class PullRequests:
                 "revision": {"round": run["round"], "limit": core.revision_limit(project, run),
                              "rejected": run.get("rejected_shas", [])},
                 "limitations": limitations}
+
+
+# Imported last: the coordinator imports this module's names, so either module can be imported first.
+from . import coordinator as core  # noqa: E402
