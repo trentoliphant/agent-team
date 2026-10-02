@@ -26,6 +26,7 @@ STOP_POINTS = ("implement", "validate", "publish", "review", "ci")
 CONTRIBUTORS = ("openai", "anthropic", "human")
 PR_CONTRIBUTORS = CONTRIBUTORS + ("unknown",)
 LOCAL_CHANGE = "Local candidate changed after validation"
+BASE_OBJECT_REF = "refs/agent-team/base"
 MATCHES = {
     "first": "first rejection; no earlier findings to compare",
     "repeated": "repeated: an earlier round made the same request at the same location",
@@ -1699,6 +1700,13 @@ class Coordinator:
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                  str(self.store.workspace(run)), str(cwd)], env=git_env(), timeout=project["timeout"])
         git(cwd, "checkout", "--detach", run["sha"])
+        try:
+            git(cwd, "cat-file", "-e", f"{run['base_sha']}^{{commit}}")
+        except TeamError:
+            # Clones copy only branches; an adopted but unmerged base is kept under its own ref.
+            git(cwd, "fetch", "--no-tags", str(self.store.workspace(run)), BASE_OBJECT_REF)
+            if git(cwd, "rev-parse", "FETCH_HEAD") != run["base_sha"]:
+                raise TeamError("Recorded base commit is unavailable for review; refresh the run (previous work retained)")
         # The review stage checked these are still the current pins.
         pins = run.get("validated_companions") or []
         baselines = companions.populate(root, pins, project["timeout"])
@@ -2298,6 +2306,8 @@ class Coordinator:
         git(fresh, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
             "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/heads/{base_ref(project, run)}")
         base_sha = git(fresh, "rev-parse", "FETCH_HEAD")
+        # An unmerged base is not reachable from the candidate; this ref keeps the exact object for review.
+        git(fresh, "update-ref", BASE_OBJECT_REF, base_sha)
         # Base commits are not part of the repair, so their trailers are excluded.
         trailers = git(fresh, "log", "--format=%(trailers:key=Agent-Family,valueonly)", candidate,
                        f"^{run['base_sha']}", f"^{base_sha}")

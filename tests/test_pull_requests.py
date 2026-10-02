@@ -1268,6 +1268,12 @@ class PullRequestTests(support.PullRequestFixture):
         self.agents.reject = False
         run = self.revalidate(run)
         self.assert_reviewed(run, repaired, base_sha=base)
+        # Review received the exact adopted base, while the candidate still does not contain it.
+        self.assertIn(f"Base {base}; candidate {repaired}.", self.agents.prompts["review"])
+        workspace = self.store.workspace(run)
+        self.assertEqual((self.workspace_head(run), git(workspace, "rev-parse", "refs/agent-team/base")),
+                         (repaired, base))
+        self.assertNotEqual(git(workspace, "merge-base", base, repaired), base)
         report = self.report(run)
         self.assert_limited(report, "base was not merged")
         self.assertEqual(report["local_handoff"]["commit"], repaired)
