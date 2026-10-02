@@ -6,6 +6,7 @@ import time
 from urllib.parse import urlsplit
 
 from .agents import FAMILIES
+from . import evidence
 from .process import TeamError
 from .state import ACTIVE, RECOVERY, TERMINAL, CoordinatorBusy, issue_fingerprint
 
@@ -18,7 +19,6 @@ PR_MODES = {
 }
 PR_GRANTS = ("edit", "push", "github")
 IDENTITY = ("number", "url", "head_repo", "head_ref", "base_ref", "state", "draft")
-REVIEWER = ("agent", "family", "cli_version", "requested_model", "observed_models")
 REFUSED_REVISION = "Independent review cannot be established ({}); revision refused. Use review mode"
 
 
@@ -53,36 +53,6 @@ def closure(pr):
 
 def heads(pr):
     return pr["head"]["sha"], pr["base"]["sha"]
-
-
-def review_report(record, commit, base, current):
-    report = record["report"]
-    return {"commit": commit, "base": base, "current": current, "verdict": report["verdict"],
-            "summary": report["summary"], "findings": report["findings"],
-            "reviewer": {k: record.get(k) for k in REVIEWER}, "patch": record.get("patch")}
-
-
-def historical_evidence(entry):
-    evidence = entry["evidence"]
-    record = evidence.get("review_record")
-    return {"reason": entry["reason"], "at": entry["at"], "head": entry["head"], "base": entry["base"],
-            "validated": evidence.get("validated_sha"), "reviewed": evidence.get("review_sha"),
-            "verdict": record["report"]["verdict"] if record else None,
-            "review": review_report(record, evidence.get("review_sha"), entry["base"], False) if record else None,
-            "independent_review_success": bool(evidence.get("reviewed_sha")),
-            "validation_failed": "validation_failure" in evidence, "tests": evidence.get("tests", []),
-            "validation_checks": core.validation_checks(evidence.get("tests", []), evidence.get("validation_plan"))}
-
-
-def rejected_review(entry, current):
-    report = entry.get("review_report") or {"verdict": "changes_requested", "summary": entry["feedback"],
-                                            "findings": entry["findings"]}
-    return {"commit": entry["sha"], "base": entry.get("base"), "current": current,
-            "verdict": report["verdict"], "summary": report["summary"], "reviewer": entry.get("review"),
-            "findings": report["findings"], "candidate_verdict": "changes_requested",
-            "candidate_findings": entry["findings"], "candidate_feedback": entry["feedback"],
-            "validation_failed": bool(entry.get("validation_failed")),
-            "validation_checks": core.validation_checks(entry["tests"], entry.get("validation_plan"))}
 
 
 def pr_roles(families, reviewer):
@@ -262,6 +232,9 @@ class PullRequests:
             return team.finish_journaled(project, run)
         if run["stage"] in TERMINAL:
             raise TeamError(f"Run is {run['stage']}; adopt the PR in a new run if needed")
+        if run["stage"] == "repair" and run.get("repair_checkout") and core.local_candidate(run):
+            declared_contributors(contributors)
+            return self.repair_base(project, run)
         if core.recovering(run) or run["stage"] in {"handoff", "repair"} or (
                 run["stage"] == "blocked" and run.get("resume_stage") in {"handoff", "repair"}):
             raise TeamError("After the revision limit, record a decision with decide and adopt repairs with adopt")
@@ -336,6 +309,50 @@ class PullRequests:
                        partial_result="Changed PR inputs adopted deliberately; select the next operation")
         return team.swap(project, run, fresh, changes, "pr update RUN_ID", True, preserved)
 
+    def repair_base(self, project, run):
+        """Deliberately adopt a moved PR base while an unpublished candidate is repaired locally, as
+        after an exhausted fork that cannot be pushed. Only the recorded base changes. The repair
+        checkout and its uncommitted work, the candidate and author checkout, the published head, PR
+        identity, grants, provenance, and the exhausted budget and history are kept. Nothing is
+        merged or pushed. Base commits are not contributions, so provenance is not reassessed; the
+        later repair adoption needs fresh validation and review against the adopted base."""
+        info, retained = run["adopted_pr"], " (repair checkout retained)"
+        checkout = Path(run["repair_checkout"]["path"])
+        if not checkout.is_dir():
+            raise TeamError("Repair checkout is missing; stop or rescope the run (previous work retained)")
+        core.assert_metadata(checkout, run["repair_checkout"]["metadata"])
+        pr = self.team.github.pr(project["repo"], info["number"])
+        for refused, message in (
+                (closure(pr), f"PR was {closure(pr)}; Agent Team never reopens pull requests"),
+                (pr["base"]["ref"] != info["base_ref"] or info["base_ref"] != project["base"],
+                 f"PR targets {pr['base']['ref']} and the registered base is {project['base']}, but the run "
+                 f"adopted {info['base_ref']}; Agent Team never retargets PRs"),
+                (core.head_moved(info, pr), "PR head repository or branch changed; close this run and adopt the PR again"),
+                (pr["head"]["sha"] != run["published_sha"],
+                 f"PR head moved to {pr['head']['sha']}; only a changed base is adopted during local repair"),
+                (pr["base"]["sha"] == run["base_sha"], "PR head and base are unchanged; nothing to adopt")):
+            if refused:
+                raise TeamError(message + retained)
+        with tempfile.TemporaryDirectory(prefix="agent-team-pr-") as temporary:
+            found = self.fetch(project, info["number"], info["base_ref"], heads(pr), Path(temporary) / "input",
+                               "PR moved during update; retry" + retained)
+            try:
+                core.git(Path(temporary) / "input", "merge-base", "--is-ancestor", run["base_sha"], found["base"])
+                advanced = True
+            except TeamError:
+                advanced = False
+        update = {"at": time.time(), "kind": "base_during_local_repair", "declared": [], "trailer_families": [],
+                  "before": {"head": info["head_sha"], "base": info["base_sha"], "candidate": run["sha"]},
+                  "after": {"head": found["head"], "base": found["base"]}, "base_fast_forward": advanced,
+                  "unpushed_local_commit": run["sha"], "repair_checkout": str(checkout),
+                  "repair_head": core.git(checkout, "rev-parse", "HEAD"), "merged": False}
+        retired = core.retire_evidence(run, "Deliberate adoption of changed PR base during local repair")
+        self.team.store.save(run, **retired, base_sha=found["base"],
+                             adopted_pr=dict(info, **core.pr_inputs(found), updates=info.get("updates", []) + [update]),
+                             error=f"Awaiting direct repair; base {found['base']} adopted without merging. Adopt "
+                                   "the repair with agent-team adopt RUN_ID; it needs fresh validation and review")
+        return run
+
     def adopted(self, run_id):
         run = self.team.store.get(run_id)
         if not run.get("adopted_pr"):
@@ -390,26 +407,25 @@ class PullRequests:
             verified, why = (self.currency(project, run) if locked
                              else (None, "a coordinator worker holds the repository"))
             currency, current = {"verified": verified, "reason": why}, verified is True
-        historical = [historical_evidence(e) for e in run.get("evidence_invalidations", []) if e.get("evidence")]
+        historical = [evidence.historical_evidence(e) for e in run.get("evidence_invalidations", [])
+                      if e.get("evidence")]
         latest = next((h for h in reversed(historical) if h["review"]), None)
         review = latest and latest["review"]
         entries = [e for e in run.get("revision_history", []) if e["kind"] == "review"]
-        reviews = [rejected_review(e, current and e["sha"] == sha and e.get("base") == run["base_sha"]) for e in entries]
+        reviews = [evidence.rejected_review(e, current and e["sha"] == sha and e.get("base") == run["base_sha"])
+                   for e in entries]
         if run.get("review_record") and run.get("review_sha") == sha:
-            review = review_report(run["review_record"], sha, run["base_sha"], current)
+            review = evidence.review_report(run["review_record"], sha, run["base_sha"], current)
         elif entries and not (latest and latest["at"] > entries[-1].get("at", 0)):
             review = reviews[-1]
         handoff = self.handoff(run, locked)
-        generation, pins = run.get("evidence_generation", 0), run.get("validated_companions") or []
-        checks = [{"operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
-                   "state": c["state"], "at": c.get("at"), "readiness_changed": c.get("readiness_changed", False),
-                   "current": current and c["sha"] == sha and c["base"] == run["base_sha"]
-                   and c.get("generation", 0) == generation and (c.get("companions") or []) == pins}
-                  for c in run.get("ci_checks", [])]
-        latest_check = next((c for c in reversed(checks) if c["current"]), None)
+        pins = run.get("validated_companions") or []
+        # Every recorded CI observation stays listed; only those bound to the current inputs count.
+        checks = evidence.ci_history(run, current)
+        latest_check = evidence.current_ci(checks)
         marked = [c for c in checks if c["readiness_changed"]]
         unpublished = run.get("unpublished_evidence", [])
-        plan = core.validation_checks(run.get("tests", []), run.get("validation_plan")) if current else []
+        plan = evidence.validation_checks(run.get("tests", []), run.get("validation_plan")) if current else []
         omitted = [c["command"] for c in plan if not c["performed"]]
         limitations = [text for applies, text in (
             (currency["verified"] is None,
@@ -455,7 +471,9 @@ class PullRequests:
                                "companions": pins},
                 "review": review, "review_history": reviews,
                 "independent_review_success": bool(current and run.get("reviewed_sha") == sha and not reason),
-                "historical_evidence": historical, "ci_checks": checks or "not checked", "current_ci": latest_check,
+                "historical_evidence": historical,
+                "superseded_evidence": [evidence.superseded(e) for e in run.get("superseded_evidence", [])],
+                "ci_checks": checks or "not checked", "current_ci": latest_check,
                 "push": run.get("push_access") or info["push_access"], "local_handoff": handoff,
                 "unpublished_evidence": unpublished,
                 **{k: run.get(k, []) for k in ("performed_operations", "omitted_operations", "unperformed_operations")},

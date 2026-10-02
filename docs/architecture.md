@@ -272,6 +272,14 @@ the issue, and the PR body lists adopted repairs and their contributors. A crash
 after the checkout swap but before the save leaves the run in `repair`; adopting
 again is safe.
 
+An adopted PR never merges its base, so a local repair refuses a moved PR base.
+`pr update` then adopts only the base: it verifies the exact PR head and base in
+a separate clone, refuses closure, retargeting, head identity changes, and head
+movement, and records the new base and merge base. It retires earlier evidence
+as history. It leaves the repair checkout and its uncommitted work, the
+candidate, the published head, grants, provenance, budget, and history
+unchanged. The later `adopt` validates and reviews against the adopted base.
+
 Candidate SHA and tree are checked again before publication. Git configuration,
 excludes, and local attributes are fingerprinted; changes stop orchestration
 before further coordinator Git calls. Revision requests that produce no new

@@ -9,7 +9,7 @@ import tempfile
 from .agents import Agents, FAMILIES
 from . import companions
 from . import evidence
-from .evidence import ci_observation, observation_changed
+from .evidence import ci_observation, observation_changed, validation_checks
 from .github import GitHub
 from .patches import COMPACT_NOTICE, review_patch
 from .process import execute, git, clone_repository, TeamError, QuotaError, worker_env, git_env, metadata, assert_metadata
@@ -48,12 +48,6 @@ def report_text(record):
 
 def code(text):
     return f"`` {text} ``" if "`" in text else f"`{text}`"
-
-
-def validation_checks(tests, planned=None):
-    planned = planned or [t["command"] for t in tests]
-    return [dict(tests[i], performed=True) if i < len(tests) else {"command": c, "performed": False}
-            for i, c in enumerate(planned)]
 
 
 def validation_text(tests, planned=None):
@@ -1298,7 +1292,8 @@ class Coordinator:
         if self.pending_validation_failure(run):
             kept.append({"kind": "validation", "tests": run["validation_failure"]["tests"],
                          "feedback": run["validation_failure"]["feedback"]})
-        history = [dict(e, sha=run["sha"], companions=run.get("validated_companions") or [], at=time.time())
+        history = [dict(e, sha=run["sha"], base=run.get("base_sha"), companions=run.get("validated_companions") or [],
+                        at=time.time())
                    for e in kept]
         return dict(superseded_evidence=run.get("superseded_evidence", []) + history, review_record=None,
                     review_sha=None, reviewed_sha=None,
@@ -2284,7 +2279,10 @@ class Coordinator:
         info = run.get("adopted_pr")
         change = info and self.adopted_pr_change(project, run, run["published_sha"])
         if change:
-            raise TeamError(f"{change[1]}; inspect the PR before adopting the local repair (previous work retained)")
+            fix = (" and adopt the changed base with agent-team pr update RUN_ID --contributor ..."
+                   if change[1].startswith("PR base") else "")
+            raise TeamError(f"{change[1]}; inspect the PR{fix} before adopting the local repair "
+                            "(previous work retained)")
         cwd = self.store.workspace(run)
         fresh = self.store.run_root(run) / f"adopt-{time.time_ns()}"
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",

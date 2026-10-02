@@ -1211,6 +1211,96 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(self.report(run)["local_handoff"]["commit"], repaired)
         self.assert_untouched(head, 8, "fork-feature")
 
+    @scenarios(None, "head", "identity", "retarget")
+    def test_exhausted_fork_repair_adopts_moved_base(self, movement):
+        self.configure(max_revisions=1)
+        old, head = self.remote_head("main"), self.open_pr(8, "fork-feature", head_repo=FORK, reject=2)
+        run = self.team.decide(self.until_handoff(self.adopt_pr("revise", "8", grants=ALL))["id"], "repair")
+        rejected, checkout = run["sha"], Path(run["repair_checkout"]["path"])
+        (checkout / "repair.txt").write_text("repair\n")
+        git(checkout, "add", ".")
+        git(checkout, *COMMIT, "commit", "-m", "Repair")
+        repaired = self.head_of(checkout)
+        base = self.advance_base()
+        self.refuses("pr update RUN_ID", self.adopt_repair, run)
+        (checkout / "draft.txt").write_text("unfinished\n")
+        if movement == "head":
+            self.push_external("fork-feature")
+        elif movement == "identity":
+            git(self.remote, "branch", "other-branch", "fork-feature")
+            self.pull(8)["branch"] = "other-branch"
+        elif movement == "retarget":
+            git(self.remote, "branch", "release", "main")
+            self.pull(8)["base"] = "release"
+        before = self.reload(run)
+        if movement:
+            self.refuses({"head": "PR head moved", "identity": "head repository or branch changed",
+                          "retarget": "never retargets"}[movement], self.update, run)
+        else:
+            self.update(run)
+        after = self.reload(run)
+        # The repair checkout, its uncommitted work, the candidate, budget and history are untouched.
+        self.assertEqual((self.head_of(checkout), (checkout / "draft.txt").read_text(), self.workspace_head(after)),
+                         (repaired, "unfinished\n", rejected))
+        kept = ("stage", "sha", "published_sha", "pr", "round", "revision_limit", "handoffs", "decisions",
+                "rejected_shas", "repair_checkout", "grants", "contributors", "provenance", "independence",
+                "revision_history")
+        self.assertEqual({k: after.get(k) for k in kept}, {k: before.get(k) for k in kept})
+        if movement:
+            self.assertEqual(after, before)
+            return
+        self.assert_fields(after, base_sha=base, validated_sha=None, reviewed_sha=None)
+        self.assert_fields(after["adopted_pr"], number=8, head_repo=FORK, head_ref="fork-feature", head_sha=head,
+                           base_sha=base, base_contained=False)
+        self.assert_fields(after["adopted_pr"]["updates"][-1], merged=False, base_fast_forward=True,
+                           repair_head=repaired, before={"head": head, "base": old, "candidate": rejected},
+                           after={"head": head, "base": base})
+        invalidation = self.invalidation(after)
+        self.assertEqual((invalidation["head"], invalidation["base"]), (rejected, old))
+        self.assertIn("base during local repair", invalidation["reason"])
+        self.refuses("unchanged", self.update, after)
+        self.refuses("Commit or remove", self.adopt_repair, after)
+        (checkout / "draft.txt").unlink()
+        run = self.adopt_repair(after)
+        self.assert_awaiting(run, sha=repaired, base_sha=base, published_sha=head, validated_sha=None,
+                             reviewed_sha=None)
+        self.assertEqual((run["round"], run["adoptions"][-1]["base_sha"]), (before["round"] + 1, base))
+        self.agents.reject = False
+        run = self.revalidate(run)
+        self.assert_reviewed(run, repaired, base_sha=base)
+        report = self.report(run)
+        self.assert_limited(report, "base was not merged")
+        self.assertEqual(report["local_handoff"]["commit"], repaired)
+        self.assert_untouched(head, 8, "fork-feature")
+
+    def test_failed_reconciliation_notification_keeps_ci(self):
+        head, run = self.readiness_run()
+        self.assertEqual(self.ticks(run)["stage"], "ready")
+        self.github.check_state = "failure"
+        with self.moving(self.github, "status", unavailable,
+                         lambda *args: args[-1] == "CI changed; waiting for checks"):
+            run = self.tick_raising(run)
+        # The failure was recorded before the notification failed, so it is reported as current.
+        self.assert_fields(run, stage="ci")
+        self.assertEqual(run["outbox"][0]["description"], "CI changed; waiting for checks")
+        report = self.report(run)
+        self.assert_fields(report["current_ci"], operation="reconcile", state="failure", head=head,
+                           base=run["base_sha"], generation=run.get("evidence_generation", 0))
+        self.assertEqual([(c["operation"], c["state"], c["readiness_changed"]) for c in report["ci_checks"]],
+                         [("ci", "success", True), ("reconcile", "failure", False)])
+        self.assert_contains(report["limitations"], CI_FAILED.format("failure"), STALE_READY.format(head))
+        # A later success keeps the transient failure as history.
+        self.github.check_state = "success"
+        run = self.ticks(run)
+        self.assert_fields(run, stage="ready", outbox=[])
+        self.assert_status(head, "pending", "CI changed; waiting for checks")
+        self.assertEqual(self.github.statuses[-1], (head, "success"))
+        report = self.report(run)
+        self.assertEqual([(c["operation"], c["state"]) for c in report["ci_checks"]],
+                         [("ci", "success"), ("reconcile", "failure"), ("ci", "success")])
+        self.assert_fields(report["current_ci"], operation="ci", state="success", head=head)
+        self.assertFalse(any("CI checks" in item for item in report["limitations"]))
+
     def test_cli_parses_existing_pr_operations(self):
         parse = parser().parse_args
         args = parse(["pr", "review", "demo", "7", "--contributor", "unknown"])

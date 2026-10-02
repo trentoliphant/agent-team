@@ -296,6 +296,9 @@ agent-team pr show RUN_ID
 ```
 
 Declare contributors truthfully, never from usernames. Report `pr show`; a
-review is not readiness. Inspect `stale` changes before `pr update`. Never open
+review is not readiness. Inspect `stale` changes before `pr update`. During a
+local repair of an unpushable fork, `pr update` adopts only a moved base; the
+repair checkout, candidate, and budget stay, and `adopt` then needs fresh
+validation and review. Never open
 a replacement PR, force-push, merge, reopen, retarget, or change draft state.
 Unknown or mixed authorship withholds independent success.
