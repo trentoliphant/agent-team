@@ -35,10 +35,8 @@ switching identities mid-run if you want to retain a single status comment.
 
 ## Existing pull requests
 
-`agent-team pr` fetches heads through the base repository's `refs/pull/N/head`,
-so accessible fork PRs can be reviewed. Push requirements are in the README.
-Comments and statuses need the `github` grant. Adoption never edits the PR
-title, description, labels, draft state, or base.
+`agent-team pr` fetches `refs/pull/N/head`, so accessible forks can be reviewed.
+Adoption never edits PR titles, descriptions, labels, draft state, or bases.
 
 ## Human merge authority
 

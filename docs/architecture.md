@@ -17,7 +17,7 @@ this package or needs its workflow files.
 | `patches.py` | Complete, budget-bounded review patches and their completeness proof |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 | `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
-| `pull_requests.py` | Existing-PR adoption, deliberate updates, and read-only `pr show` reports |
+| `pull_requests.py` | Existing-PR adoption, updates, and `pr show` |
 
 Each project registers one repository. It may also declare public companion
 repositories that its validation needs (see the README). Companions are read-only
@@ -157,9 +157,7 @@ Reviewer modifications invalidate the report. A passing report with findings is
 rejected as ambiguous.
 
 The review budget is 180,000 characters. The diff from the base SHA to the
-candidate is sent in full when it fits. For an existing PR the diff is taken from
-the merge base of the base SHA and the candidate (`base...candidate`), so a PR that
-is behind its base is not shown reverting the base. Otherwise the coordinator generates a
+candidate is sent in full when it fits. Otherwise the coordinator generates a
 context-free diff (`--unified=0`). It uses that diff only if it fits and its raw bytes
 parse to the same per-file headers (mode, rename, binary, and index lines) and the
 same changed lines, line numbers, and no-newline markers as the full diff. Hunk
@@ -177,8 +175,7 @@ never truncates a patch, drops files, or raises the budget. The review record ke
 the patch format, range, sizes, SHA-256, and file and changed-line counts. When the
 compact patch is used, the reviewer prompt and the published review comment state
 that surrounding context was omitted and that the reviewer must inspect the full
-source in the checkout. The review record also keeps the result of the equivalence
-check. Diffs are never truncated, sliced, or filtered.
+source in the checkout. PR diffs start at the merge base (`base...candidate`).
 
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without
@@ -324,17 +321,12 @@ author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
 evidence only for a published candidate and with the content grant.
 
-`pr review|revise|findings` adopts a PR as an issue-less selected run whose
-published commit is the PR head. A rejection within budget enters `pr_followup`
-(revise mode only) until `select --run`. Author passes need `reserved_round ==
-round` and a round not in `authored_rounds`. A failed validation of the unedited
-head stays in `attempted_context` until review. Unestablished independence
-records `review_withheld`, not `reviewed_sha`. Every invalidation snapshots the
-evidence to `evidence_invalidations`, sets `evidence_retired`, and bumps
-`evidence_generation`, which CI observations must match. Bound queued writes
-move to `unpublished_evidence`. `pr show` rechecks the binding under the
-repository lock and never saves. Re-adoption inherits budget and provenance
-(`prior_runs`). `pr update` and `adopt` journal `pending_swap` before any rename.
+`agent-team pr` creates an issue-less selected run published at the PR head;
+revise-mode rejections set `pr_followup`. Author passes need an unused
+`reserved_round`. Withheld independence records `review_withheld`, not
+`reviewed_sha`. Invalidation snapshots `evidence_invalidations` and bumps
+`evidence_generation`, which CI must match. `pr show` rechecks under the
+repository lock without saving. `pr update` and `adopt` journal `pending_swap`.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

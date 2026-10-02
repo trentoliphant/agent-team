@@ -228,8 +228,8 @@ and ready label remain required. Tasks never require synthetic issues. Existing
 branches/commits require every contributor to be declared. Choose one operation
 or an ordered sequence; local review may omit publication. Individual publication,
 review, and CI reuse a tracked run's compatible evidence. Without such evidence,
-select validation first. For a PR opened outside Agent Team, use `agent-team pr`
-(below); never create a replacement PR or author pass instead.
+select validation first. Use `agent-team pr` (below) for outside PRs, never a
+replacement PR or author pass.
 After a compatible local review, `publish ci` publishes and checks readiness
 without repeating review. Publication posts the stored review on the PR;
 readiness requires its comment write to succeed. Inspect each continuation's grants and effects to
@@ -284,9 +284,7 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 ## Existing pull requests
 
-Confirm the PR's registered repository and the authorized operation and effects
-(`--plan` previews). Alternatives: review only; review with fixes; supplied
-findings; continuation after an external push (`stale`).
+Confirm the repository, operation, and grants (`--plan` previews):
 
 ```sh
 agent-team pr review example 42 --contributor human
@@ -300,16 +298,10 @@ agent-team run example --run RUN_ID --watch
 agent-team pr show RUN_ID
 ```
 
-`pr review` stops after findings, with no edits, pushes, base merges, or repair;
-`--grant github` publishes them. `pr revise` fixes findings on the PR branch
-within the budget; `pr findings` revises only supplied ones; both need fresh
-exact-commit review. A later `select --run` does only what it names. Declare
-every contributor truthfully (`human`, `openai`, `anthropic`, `unknown`),
-including your family; never infer one from a username. With `unknown`, both
-families, or an unsupported trailer, independent-review success is withheld and
-revision refused; report it, never change declarations. From `pr show`, report
-head, base, roles, validation, findings, checks run and omitted, and any local
-patch handoff (no push access). A standalone review is not a readiness verdict.
-After `stale`, inspect the change before `pr update` and reselect validation.
-Never open a replacement PR, force-push, merge the base, reopen, retarget,
-change draft state, or merge.
+`pr review` only reports findings; `pr revise` and `pr findings` fix them within
+the budget. Declare every contributor truthfully, including your own family,
+never from a username; report withheld independent review. From `pr show`,
+report roles, findings, checks run and omitted, and any local patch handoff; a
+review alone is not readiness. After `stale`, inspect the change before `pr
+update`. Never open a replacement PR, force-push, merge the base, reopen,
+retarget, change draft state, or merge.
