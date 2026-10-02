@@ -1,5 +1,4 @@
-"""Existing pull requests behind `agent-team pr`: adoption, deliberate updates, and read-only reports.
-Git and clone calls go through the coordinator module, so one patch point covers every workflow."""
+"""Existing pull requests behind `agent-team pr`. Git and clone calls go through the coordinator module."""
 from pathlib import Path
 import shutil
 import tempfile
@@ -25,7 +24,6 @@ REFUSED_REVISION = ("Independent review cannot be established ({}), so revision 
 
 
 def pull_number(project, value):
-    """A PR number, or a github.com PR URL for the registered repository."""
     text = str(value).strip()
     if text.isdigit():
         number = int(text)
@@ -61,7 +59,6 @@ def heads(pr):
 
 
 def review_report(record, commit, base, current):
-    """A reviewer's complete report, named with its commit and base."""
     report = record["report"]
     return {"commit": commit, "base": base, "current": current, "verdict": report["verdict"],
             "summary": report["summary"], "findings": report["findings"],
@@ -81,7 +78,6 @@ def historical_evidence(entry):
 
 
 def rejected_review(entry, current):
-    """The reviewer's report as given, and the candidate's combined rejection."""
     report = entry.get("review_report") or {"verdict": "changes_requested", "summary": entry["feedback"],
                                             "findings": entry["findings"]}
     return {"commit": entry["sha"], "base": entry.get("base"), "current": current,
@@ -93,7 +89,7 @@ def rejected_review(entry, current):
 
 
 def pr_roles(families, reviewer):
-    """(reviser, reviewer), or None for rotation. A single contributing family never reviews."""
+    """(reviser, reviewer), or None for rotation."""
     other = {"codex": "claude", "claude": "codex"}
     if len(families) == 1:
         author = {family: agent for agent, family in FAMILIES.items()}[next(iter(families))]
@@ -104,7 +100,7 @@ def pr_roles(families, reviewer):
 
 
 def pr_inheritance(project, prior, mode, number):
-    """Budget and provenance inherited from earlier runs of the PR; readoption never resets either."""
+    """Budget and provenance inherited from earlier runs of the PR."""
     limit_of = lambda r: core.revision_limit(project, r)
     exhausted = [r for r in prior if r.get("handoffs") and r["handoffs"][-1]["round"] >= limit_of(r)]
     if mode != "review" and exhausted:
@@ -112,7 +108,7 @@ def pr_inheritance(project, prior, mode, number):
                         "does not reset the budget. Review mode is still available; further revision needs "
                         "an operator repair outside Agent Team")
     limit = max((limit_of(r) for r in prior), default=project["max_revisions"])
-    # A findings revision edits immediately, so it spends its round before the budget check.
+    # A findings revision spends its round before the budget check.
     round_ = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
     if mode != "review" and round_ > limit:
         raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
@@ -130,13 +126,11 @@ def pr_inheritance(project, prior, mode, number):
 
 
 class PullRequests:
-    """The adopted-PR lifecycle; stateless."""
-
     def __init__(self, team):
         self.team = team
 
     def inspect(self, project, cwd, number):
-        """Fetch a PR head via the base repository's pull ref, which also serves forks."""
+        """Fetch a PR head via the base repository's pull ref, which serves forks."""
         git = core.git
         base = git(cwd, "rev-parse", "HEAD")
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
@@ -150,8 +144,7 @@ class PullRequests:
                 "commit_authors": sorted({line.strip() for line in authors.splitlines() if line.strip()})}
 
     def fetch(self, project, number, base_ref, expected, fresh, moved, branch=None):
-        """Clone and inspect the PR, refusing with `moved` unless it is at `expected`. With `branch`,
-        the head is checked out as-is."""
+        """Clone and inspect the PR, refusing with `moved` unless it is at `expected`."""
         core.clone_repository(project["repo"], fresh, base_ref, project["timeout"])
         found = self.inspect(project, fresh, number)
         if (found["head"], found["base"]) != tuple(expected):
@@ -162,7 +155,7 @@ class PullRequests:
         return found
 
     def adopt(self, name, reference, mode, contributors, grants=(), reviewer=None, findings=(), plan_only=False):
-        """Track an existing PR in a durable run without an issue, implementation, or new PR."""
+        """Track an existing PR in a durable run."""
         team = self.team
         project = team.store.project(name)
         number = pull_number(project, reference)
@@ -247,7 +240,7 @@ class PullRequests:
         if findings:
             body += "\nOperator-supplied findings:\n" + listed + "\n"
         issue = {"number": None, "title": f"PR #{number}: {pr['title']}"[:150], "body": body}
-        # Explicit roles are saved by the creating transaction, never left to rotation.
+        # Roles are saved by the creating transaction.
         run = team.store.create(project, issue, dict(
             **dict(zip(("author", "reviewer"), roles or ())),
             selection=True, operations=operations, stop_after=operations[-1], grants=grants, effect_plan=effects,
@@ -267,7 +260,6 @@ class PullRequests:
                                       "limitations": "Existing work; implementation was not performed by Agent Team"}},
             adopted_pr=info, independence=independence, pr=number, sha=found["head"],
             published_sha=found["head"], base_sha=found["base"], validated_sha=None, validated_tree=None,
-            # Only review-and-revise repairs fresh findings automatically.
             pr_followup=followup if mode == "revise" else None, needs_revision=mode == "findings",
             feedback=("Operator-supplied findings to address; no coordinator review has verified them:\n"
                       + listed) if findings else ""))
@@ -275,7 +267,7 @@ class PullRequests:
         return run
 
     def update(self, run_id, contributors):
-        """Deliberately adopt a changed PR head or base as-is, preserving the old checkout."""
+        """Deliberately adopt a changed PR head or base, preserving the old checkout."""
         team = self.team
         run = team.store.get(run_id)
         project = team.store.project(run["project"])
@@ -319,7 +311,6 @@ class PullRequests:
         if found["head"] in run.get("rejected_shas", []):
             raise TeamError("PR head is a rejected commit; push a new commit first (previous work retained)")
         families = core.contributing_families(run, declared) | set(found["trailer_families"])
-        # New declarations never clear inherited provenance.
         provenance = team.reassess(run, declared, found["trailer_families"], found["unresolved_trailers"])
         independence, unresolved = provenance["independence"], provenance["unresolved_trailers"]
         if independence["established"] and FAMILIES[run["reviewer"]] in families:
@@ -330,7 +321,6 @@ class PullRequests:
         update = {"at": time.time(), "declared": declared, "trailer_families": found["trailer_families"],
                   "before": {"head": info["head_sha"], "base": info["base_sha"], "candidate": run.get("sha")},
                   "after": {"head": found["head"], "base": found["base"]},
-                  # Kept in the preserved checkout, never pushed over the PR.
                   "unpushed_local_commit": run.get("sha") if run.get("sha") not in {None, run.get("published_sha")} else None}
         new_info = dict(info, **core.pr_inputs(found), declared=sorted(set(info["declared"]) | set(declared)),
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
@@ -344,7 +334,6 @@ class PullRequests:
             return run
         preserved =team.store.run_root(run) / f"author-preserved-{time.time_ns()}"
         update["preserved"] = str(preserved)
-        # Unaddressed supplied findings remain the scope.
         pending = (bool(run.get("needs_revision")) and info["mode"] == "findings"
                    and "revision" not in run.get("performed_operations", []))
         retired = core.retire_evidence(run, "Deliberate adoption of changed PR head or base",
@@ -352,11 +341,10 @@ class PullRequests:
         changes = dict(common, git_metadata=core.metadata(fresh), **retired, needs_revision=pending, stage="stopped",
                        next_stage="revision" if pending else "validate",
                        partial_result="Changed PR inputs adopted deliberately; select the next operation")
-        # Journaled before any rename, so an interruption is finished, not repeated.
         return team.swap(project, run, fresh, changes, "pr update RUN_ID", True, preserved)
 
     def report(self, run_id):
-        """Local findings, performed and omitted checks, and any local handoff. Read-only, under the lock."""
+        """Local findings, checks, and any local handoff. Read-only."""
         store = self.team.store
         run = store.get(run_id)
         if not run.get("adopted_pr"):
@@ -378,7 +366,7 @@ class PullRequests:
         return (False, change[1]) if change else (True, None)
 
     def handoff(self, run, locked):
-        """An unpushed validated revision as a commit and patch; never a replacement PR."""
+        """An unpushed validated revision as a commit and patch."""
         info, store = run["adopted_pr"], self.team.store
         sha, published = run.get("sha"), run.get("published_sha")
         cwd = store.workspace(run)
@@ -386,7 +374,6 @@ class PullRequests:
             return None
         path = store.artifacts(run) / f"pr-{info['number']}-{published[:12]}-{sha[:12]}.patch"
         if locked:
-            # Git runs in the checkout only while no worker can change it.
             core.assert_metadata(cwd, run["git_metadata"])
             path.write_text(core.git(cwd, "format-patch", "--stdout", f"{published}..{sha}") + "\n")
         access = run.get("push_access") or info["push_access"]
@@ -405,7 +392,6 @@ class PullRequests:
         sha = run.get("sha")
         history = run.get("revision_history", [])
         reason = core.withheld(run)
-        # Retired evidence is historical in every stage until new validation.
         retirement = run.get("evidence_retired")
         current = run["stage"] not in {"stale", "closed", "merged"} and not retirement
         currency = {"verified": False, "reason": retirement["reason"] if retirement else f"the run is {run['stage']}"}
@@ -415,10 +401,8 @@ class PullRequests:
                              else (None, "a coordinator worker holds the repository"))
             currency, current = {"verified": verified, "reason": why}, verified is True
         historical = [historical_evidence(e) for e in run.get("evidence_invalidations", []) if e.get("evidence")]
-        # A retired review stays the latest report, not current.
         latest = next((h for h in reversed(historical) if h["review"]), None)
         review = latest and latest["review"]
-        # Every rejecting report stays readable.
         entries = [e for e in history if e["kind"] == "review"]
         reviews = [rejected_review(e, current and e["sha"] == sha and e.get("base") == run["base_sha"]) for e in entries]
         if run.get("review_record") and run.get("review_sha") == sha:
@@ -426,7 +410,7 @@ class PullRequests:
         elif entries and not (latest and latest["at"] > entries[-1].get("at", 0)):
             review = reviews[-1]
         handoff = self.handoff(run, locked)
-        # Only CI observations for the current candidate, base, pins, and evidence generation apply.
+        # Only CI observations for the current evidence apply.
         generation, pins = run.get("evidence_generation", 0), run.get("validated_companions") or []
         checks = [{"operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
                    "state": c["state"], "at": c.get("at"), "readiness_changed": c.get("readiness_changed", False),

@@ -138,14 +138,12 @@ def validation_findings(tests):
 
 
 def contributing_families(run, extra=()):
-    """Model families whose work is in the candidate."""
     authored = not run.get("selection") or run.get("author_record", {}).get("agent") is not None
     return ({FAMILIES[run["author"]]} if authored else set()) | {
         c for c in [*run.get("contributors", []), *extra] if c not in {"human", "unknown"}}
 
 
 def assess_independence(declared, families, unresolved=()):
-    """Whether any agent family can review independently; never guessed."""
     if {"openai", "anthropic"} <= set(families):
         return {"established": False, "reason": "both model families contributed"}
     if "unknown" in declared:
@@ -157,7 +155,6 @@ def assess_independence(declared, families, unresolved=()):
 
 
 def split_trailers(text):
-    """Agent-Family trailer values as (supported, unresolved)."""
     values = {line.strip().casefold() for line in text.splitlines() if line.strip()}
     supported = set(FAMILIES.values())
     return sorted(values & supported), sorted(values - supported)
@@ -179,14 +176,14 @@ def adoption_provenance(run, declared, families, unresolved):
 
 
 def configuration(project):
-    """Trusted configuration that evidence depends on; companion keys only when set."""
+    """Trusted configuration that evidence depends on."""
     config = {k: project.get(k) for k in ("repo", "base", "tests", "timeout", "codex_model", "claude_model")}
     config.update({k: project[k] for k in ("companions", "companion_manifest") if project.get(k)})
     return config
 
 
 def binding(run):
-    """The exact inputs adopted-PR evidence names; rechecked before publishing or reporting it."""
+    """The exact inputs adopted-PR evidence names."""
     validated = run.get("validated_context") or run.get("attempted_context") or {}
     return {"head": run.get("published_sha") or run["sha"], "base": run["base_sha"],
             "configuration": validated.get("configuration"), "companions": run.get("validated_companions") or []}
@@ -198,15 +195,13 @@ def pr_inputs(found):
 
 
 def head_moved(info, pr):
-    """Whether the PR head names another repository or branch, even at the same commit."""
     head = pr["head"].get("repo") or {}
     return ((head.get("full_name") or "").casefold() != info["head_repo"].casefold()
             or pr["head"]["ref"] != info["head_ref"])
 
 
 def retire_evidence(run, reason, force=True, **entry):
-    """Void validation and review, keeping the evidence as history. A new `evidence_generation`
-    makes earlier CI observations historical. `force=False` skips an empty entry."""
+    """Void validation and review, keeping the evidence as history."""
     evidence = {k: run[k] for k in ("validated_sha", "reviewed_sha", "review_sha", "review_record",
                                     "review_withheld") if run.get(k)}
     changes = dict(validated_sha=None, validated_tree=None, validated_context=None, attempted_context=None,
@@ -237,7 +232,6 @@ def current_evidence(run):
 
 
 def base_ref(project, run):
-    """An adopted PR keeps its own base; it is never retargeted."""
     return (run.get("adopted_pr") or {}).get("base_ref") or project["base"]
 
 
@@ -253,7 +247,7 @@ def push_target(run):
 
 
 def adopted_scope(run, withheld_reason):
-    """What a standalone review checked and omitted; never a readiness claim."""
+    """What a standalone review checked and omitted."""
     info = run["adopted_pr"]
     contained = ("" if info["base_contained"] else
                  " The head does not contain this base commit; the base was not merged into the PR.")
@@ -514,9 +508,8 @@ class Coordinator:
         while run.get("outbox"):
             item = run["outbox"][0]
             if run.get("adopted_pr") and item.get("evidence"):
-                # Inputs can change between writes, so each one is rechecked.
                 change = self.evidence_change(project, run, item.get("context") or {"head": item["evidence"]})
-                # Agent Team's own revision awaiting validation (`commit_contributors`) is not a local change.
+                # Agent Team's own unvalidated revision is not a local change.
                 if not change and item["evidence"] == run["sha"] and not run.get("commit_contributors"):
                     change = self.local_change(project, run)
                 if change:
@@ -530,7 +523,7 @@ class Coordinator:
             self.store.save(run, outbox=run["outbox"][1:])
 
     def adopted_pr_change(self, project, run, sha, pr=None, base=None):
-        """(stage, reason) when the PR no longer matches the evidence's commit and base, else None."""
+        """(stage, reason) when the PR no longer matches the evidence, else None."""
         info = run["adopted_pr"]
         pr = pr or self.github.pr(project["repo"], info["number"])
         if closure(pr):
@@ -557,7 +550,6 @@ class Coordinator:
         return change or (("stopped", reason) if reason else None)
 
     def local_change(self, project, run):
-        """Whether the author checkout no longer matches the candidate's recorded validation."""
         failed = (run.get("validation_failure") or {}).get("sha") == run["sha"]
         expected = (run.get("validated_context") if run.get("validated_sha") == run["sha"]
                     else run.get("attempted_context") if failed else None)
@@ -579,7 +571,7 @@ class Coordinator:
         return bool(change)
 
     def adopted_pr_moved(self, project, run, stage, reason):
-        """Withhold queued evidence and retire current evidence. Recovery stages keep decisions and budget."""
+        """Withhold queued evidence and retire current evidence."""
         evidence = [i for i in run.get("outbox", []) if i.get("evidence")]
         changes = {}
         if (run.get("evidence_retired") or {}).get("reason") != reason:
@@ -602,7 +594,6 @@ class Coordinator:
                      else "; earlier evidence is kept as history")
             changes.update(stage="stale", error=f"{reason}{where} (agent-team pr show RUN_ID). {fix}")
         elif not kept and run["stage"] != "stale" and not (run["stage"] == "stopped" and run.get("needs_revision")):
-            # Changed configuration or pins: explicit validation renews the evidence.
             changes.update(stage="stopped", next_stage=run["stage"] if run["stage"] in {"implement", "revision"}
                            else "validate", partial_result=f"{reason}; evidence retired as history. Select "
                            "validation to continue")
@@ -783,7 +774,7 @@ class Coordinator:
                 base, candidate, contributors, detected = self.inspect_input(project, fresh, ref, contributors)
                 input_provenance = {"selected_revision": candidate, "selected_base": base,
                                     "trailer_families": sorted(detected)}
-        # Roles are saved by the creating transaction, so a crash cannot leave rotation roles.
+        # Roles are saved by the creating transaction.
         roles = (dict(author="claude", reviewer="codex") if "anthropic" in contributors else
                  dict(author="codex", reviewer="claude") if "openai" in contributors else {})
         run = self.store.create(project, issue, dict(**roles, selection=True, operations=list(operations),
@@ -873,7 +864,6 @@ class Coordinator:
                 path = cwd / name
                 working.update(name.encode())
                 working.update(os.readlink(path).encode() if path.is_symlink() else path.read_bytes())
-        # Manifest pins are in the tree.
         return {"working": working.hexdigest(), "head": git(cwd, "rev-parse", "HEAD"),
                 "tree": git(cwd, "rev-parse", "HEAD^{tree}"),
                 "dirty": git(cwd, "status", "--porcelain"),
@@ -908,7 +898,6 @@ class Coordinator:
                 operations[0] == "validate" and contributors and run.get("needs_revision")):
             raise TeamError("Continuation must start at the recorded next stage")
         project = self.store.project(run["project"])
-        # The shared guard first, so its reason is reported.
         if {"implement", "revision"} & set(operations):
             self.require_revisable(project, run)
         if "revision" in operations and not run.get("needs_revision"):
@@ -997,7 +986,6 @@ class Coordinator:
         if plan:
             selection_changes["effect_plan"] = plan["selected_effects"]
         if run.get("pr_followup"):
-            # A continuation performs only what it selects; a rejection then stops.
             selection_changes.update(pr_followup=None, released_pr_followup=run["pr_followup"])
         self.store.save(run, **selection_changes, stage=operations[0], stop_after=operations[-1], operations=operations,
                         requested_operations=list(dict.fromkeys(run.get("requested_operations", []) + operations)),
@@ -1311,7 +1299,6 @@ class Coordinator:
         contributors = set(run.get("contributors", []))
         if run.get("adopted_pr"):
             info = run["adopted_pr"]
-            # The adopted head is checked out as-is; the base is never merged.
             with tempfile.TemporaryDirectory(prefix="prepare-", dir=cwd.parent) as temporary:
                 fresh = Path(temporary) / "author"
                 self.pull_requests.fetch(project, info["number"], info["base_ref"], (info["head_sha"], info["base_sha"]),
@@ -1354,8 +1341,7 @@ class Coordinator:
 
     @staticmethod
     def require_revisable(project, run):
-        """Refuse to edit an adopted PR, with the first applicable reason. Each author pass needs its own
-        reserved round; an interrupted or quota-delayed pass may finish it."""
+        """Refuse to edit an adopted PR, with the first applicable reason."""
         info = run.get("adopted_pr")
         for refused, reason in info and (
                 (withheld(run), REFUSED_REVISION.format(withheld(run))),
@@ -1494,7 +1480,6 @@ class Coordinator:
         if run.get("tests") != failure["tests"]:
             self.store.save(run, tests=failure["tests"])
         if self.review_first(run):
-            # Recorded with the review's outcome, so the existing head is reviewed before any edit.
             self.store.save(run, attempted_context=self.evidence_context(project, run), stage="review")
             return
         self.revise(project, run, failure["feedback"], validation_findings(failure["tests"]))
@@ -1531,7 +1516,6 @@ class Coordinator:
         if run["round"] < limit:
             stage = "stopped" if run.get("stop_after") else "implement"
             if run.get("pr_followup"):
-                # Selected review-and-revise fixes findings within the budget.
                 followup = run["pr_followup"]
                 stage = followup[0]
                 changes.update(operations=followup, stop_after=followup[-1], requested_operations=list(
@@ -1619,7 +1603,7 @@ class Coordinator:
         self.github.status(project["repo"], sha, "pending", description)
 
     def publish_adopted(self, project, run, cwd, sha):
-        """Fast-forward the PR's own head branch to `sha`. Never creates or edits a PR."""
+        """Fast-forward the PR's own head branch to `sha`."""
         info = run["adopted_pr"]
         if self.pins_changed(project, run):
             self.renew_pins(project, run)
@@ -1640,15 +1624,14 @@ class Coordinator:
             git(cwd, "merge-base", "--is-ancestor", run["published_sha"], sha)
             access = self.github.push_access(project, pr)
             if not access["allowed"]:
-                # Local handoff; never a replacement PR.
                 self.store.save(run, push_access=access, local_handoff_reason=access["reason"],
                                 stage=self.successor(run, "publish", "review"))
                 return
-            # The checkout may have moved during the permission lookup; nothing is pushed then.
+            # The checkout may have moved during the permission lookup.
             if self.recheck_adopted(project, run):
                 return
             self.store.save(run, sha=sha, pending_push_sha=sha, push_access=access)
-            # A plain push of the validated commit, never HEAD, never overwrites external commits.
+            # A plain push of the validated commit, never HEAD.
             git(cwd, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
                 "push", f"https://github.com/{info['head_repo']}.git", f"{sha}:refs/heads/{info['head_ref']}")
             self.store.save(run, published_sha=sha, pending_push_sha=None, local_handoff_reason=None,
@@ -1668,7 +1651,7 @@ class Coordinator:
         baseline = metadata(cwd)
         if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Review checkout changed; inspect before retry")
-        # Three dots for an existing PR, so a PR behind its base is not shown reverting it.
+        # Three dots, so a PR behind its base is not shown reverting it.
         diff, patch_evidence = review_patch(git, cwd, run["base_sha"], run["sha"],
                                             separator="..." if run.get("adopted_pr") else "..")
         prompt = (GUIDANCE + self.style(project, "review") +
@@ -1699,13 +1682,11 @@ class Coordinator:
         if self.finalize_rejection(project, run) or run["stage"] in {"closed", "merged"}:
             return
         if run["stage"] != "review":
-            # Changed inputs retired the saved verdict; re-entry stays explicit.
             raise ReentryRequired(run.get("error") or run["partial_result"], run["stage"] == "stale")
         attempted = self.review_first(run) and self.pending_validation_failure(run)
         self.compatible_validation(project, run, attempted)
         if run.get("selection") and not attempted and run.get("validated_sha") != run["sha"]:
             raise TeamError("Independent review requires compatible exact-commit validation")
-        # Withheld independence: the review reports findings only.
         if not withheld(run) and FAMILIES[run["reviewer"]] in contributing_families(run):
             raise TeamError("Reviewer must come from a family that did not contribute to the candidate")
         if run["sha"] in run.get("rejected_shas", []):
@@ -1757,7 +1738,6 @@ class Coordinator:
             self.revise(project, run, feedback, findings, record,
                         writes=[comment, status] if run.get("published_sha") == run["sha"] else [])
         elif withheld(run):
-            # A pass without established independence is never a review success.
             self.store.save(run, review_withheld={"sha": run["sha"], "reason": withheld(run)},
                             stage=self.successor(run, "review", "ci"), **self.queue_writes(run, comment))
         else:
@@ -1772,12 +1752,11 @@ class Coordinator:
             return False
         failed = self.pending_validation_failure(run) and not self.review_first(run)
         record = run.get("review_record")
-        # Only an actual pending rejection; a passing review is invalidated by the caller's own path.
+        # Only an actual pending rejection.
         stored = record and run.get("review_sha") == run["sha"] and run["sha"] not in run.get("rejected_shas", [])
         rejecting = stored and (record["report"]["verdict"] != "pass" or self.pending_validation_failure(run))
         change = (failed or rejecting) and run.get("adopted_pr") and self.binding_change(project, run)
         if change:
-            # History only: no round is consumed and no repair starts.
             self.adopted_pr_moved(project, run, *change)
             return False
         if (failed or stored) and self.pins_changed(project, run):
@@ -1826,7 +1805,6 @@ class Coordinator:
             self.renew_pins(project, run)
             return
         state = self.github.ci(project["repo"], run["sha"])
-        # A repeated pending poll is kept once.
         observation = {"sha": run["sha"], "base": run["base_sha"], "operation": "ci", "state": state,
                        "companions": run.get("validated_companions") or [], "readiness_changed": False,
                        "generation": run.get("evidence_generation", 0)}
@@ -1860,7 +1838,6 @@ class Coordinator:
         changed = run["ci_checks"][:-1] + [dict(run["ci_checks"][-1], readiness_changed=True)]
         if pr.get("draft"):
             self.github.mark_ready(project["repo"], run["pr"])
-            # Recorded at once, so a later stop reports the draft change.
             self.store.save(run, ci_checks=changed)
         if moved():
             return
@@ -1917,7 +1894,6 @@ class Coordinator:
         fresh = self.store.run_root(run) / f"refresh-{time.time_ns()}"
         moved = "Remote moved during refresh; retry (previous work retained)"
         if info:
-            # A fork head is fetched too; the base is never merged.
             found = self.pull_requests.fetch(project, info["number"], info["base_ref"],
                                              (pr["head"]["sha"], pr["base"]["sha"]), fresh, moved, run["branch"])
             candidate, base_sha = found["head"], found["base"]
@@ -1948,7 +1924,7 @@ class Coordinator:
         return self.finish_swap(project, run)
 
     def finish_swap(self, project, run):
-        """Finish a journaled swap idempotently with exactly its recorded inputs; nothing is fetched or deleted."""
+        """Finish a journaled swap idempotently with exactly its recorded inputs."""
         pending = run["pending_swap"]
         changes = pending["changes"]
         cwd = self.store.workspace(run)
@@ -1965,7 +1941,7 @@ class Coordinator:
         if git(cwd, "rev-parse", "HEAD") != changes["sha"] or git(cwd, "status", "--porcelain"):
             raise TeamError("Journaled checkout changed; inspect it before recovery")
         context = self.evidence_context(project, dict(run, **changes)) if pending["context"] else run.get("evidence_context")
-        # The replaced checkout, including undeclared local work, is preserved; the fresh one is the baseline.
+        # The replaced checkout, including local work, is preserved.
         cleared = {"pending_contribution": None} if pending["context"] else {}
         self.store.save(run, **changes, **cleared, evidence_context=context, pending_swap=None)
         return run
@@ -2001,7 +1977,7 @@ class Coordinator:
 
     @staticmethod
     def reassess(run, declared, families, unresolved):
-        """Recompute independence after a contribution; once withheld, it is never restored."""
+        """Recompute independence; once withheld, it is never restored."""
         info = run.get("adopted_pr")
         unresolved = sorted(set(run.get("unresolved_trailers", [])) | set((info or {}).get("unresolved_trailers", []))
                             | set(unresolved))
