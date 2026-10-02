@@ -62,6 +62,11 @@ def closure(pr):
     return None if pr["state"] == "open" else "closed"
 
 
+def heads(pr):
+    """A PR's (head, base) commits as GitHub reports them."""
+    return pr["head"]["sha"], pr["base"]["sha"]
+
+
 def review_report(record, commit, base, current):
     """A reviewer's complete report, named with the commit and base it was gathered for."""
     report = record["report"]
@@ -152,12 +157,16 @@ class PullRequests:
                 "trailer_families": families, "unresolved_trailers": unresolved,
                 "commit_authors": sorted({line.strip() for line in authors.splitlines() if line.strip()})}
 
-    def fetch(self, project, pr, number, fresh, moved):
-        """Clone the PR's base into `fresh` and inspect its head, refusing with `moved` if either changed."""
-        core.clone_repository(project["repo"], fresh, pr["base"]["ref"], project["timeout"])
+    def fetch(self, project, number, base_ref, expected, fresh, moved, branch=None):
+        """Clone `base_ref` into `fresh` and inspect the PR head, refusing with `moved` unless the head and base
+        are the `expected` pair. With `branch`, the head is checked out as-is: the base is never merged."""
+        core.clone_repository(project["repo"], fresh, base_ref, project["timeout"])
         found = self.inspect(project, fresh, number)
-        if found["head"] != pr["head"]["sha"] or found["base"] != pr["base"]["sha"]:
+        if (found["head"], found["base"]) != tuple(expected):
             raise TeamError(moved)
+        if branch:
+            core.git(fresh, "checkout", "--detach", found["head"])
+            core.git(fresh, "switch", "-c", branch)
         return found
 
     def adopt(self, name, reference, mode, contributors, grants=(), reviewer=None, findings=(), plan_only=False):
@@ -199,7 +208,7 @@ class PullRequests:
             raise TeamError(f"PR targets {pr['base']['ref']}, not registered base {project['base']}. Revision is "
                             "refused before any change; Agent Team never retargets PRs. Use review mode instead")
         with tempfile.TemporaryDirectory(prefix="agent-team-pr-") as temporary:
-            found = self.fetch(project, pr, number, Path(temporary) / "input",
+            found = self.fetch(project, number, pr["base"]["ref"], heads(pr), Path(temporary) / "input",
                                "PR head or base moved during adoption; retry")
         if any(found["head"] in r.get("rejected_shas", []) for r in runs):
             raise TeamError("PR head was rejected by an earlier run; continue that run and its budget")
@@ -313,19 +322,16 @@ class PullRequests:
                                 "(previous work retained)")
         fresh = team.store.run_root(run) / f"pr-update-{time.time_ns()}"
         fresh.parent.mkdir(parents=True, exist_ok=True)
-        found = self.fetch(project, pr, info["number"], fresh, "PR moved during update; retry (previous work retained)")
+        found = self.fetch(project, info["number"], pr["base"]["ref"], heads(pr), fresh,
+                           "PR moved during update; retry (previous work retained)", run["branch"])
         if found["head"] == info["head_sha"] and found["base"] == info["base_sha"] and run["stage"] != "blocked":
             raise TeamError("PR head and base are unchanged; nothing to adopt")
         if found["head"] in run.get("rejected_shas", []):
             raise TeamError("PR head is a rejected commit; push a new commit first (previous work retained)")
-        all_declared = sorted(set(info["declared"]) | set(declared))
         families = core.contributing_families(run, declared) | set(found["trailer_families"])
-        unresolved = sorted(set(info.get("unresolved_trailers", [])) | set(found["unresolved_trailers"]))
         # Recorded contributors include provenance inherited from earlier runs; new declarations never clear it.
-        independence = core.assess_independence(set(all_declared) | set(run.get("contributors", [])),
-                                                families, unresolved)
-        if independence["established"] and core.withheld(run):
-            independence = run["independence"]
+        provenance = team.reassess(run, declared, found["trailer_families"], found["unresolved_trailers"])
+        independence, unresolved = provenance["independence"], provenance["unresolved_trailers"]
         if independence["established"] and FAMILIES[run["reviewer"]] in families:
             independence = {"established": False, "reason": "the assigned reviewer's family contributed"}
         if info["mode"] != "review" and not independence["established"]:
@@ -336,10 +342,10 @@ class PullRequests:
                   "after": {"head": found["head"], "base": found["base"]},
                   # A local revision that was never pushed is kept in the preserved checkout, never pushed over the PR.
                   "unpushed_local_commit": run.get("sha") if run.get("sha") not in {None, run.get("published_sha")} else None}
-        new_info = dict(info, **core.pr_inputs(found), declared=all_declared,
+        new_info = dict(info, **core.pr_inputs(found), declared=sorted(set(info["declared"]) | set(declared)),
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
                         unresolved_trailers=unresolved, updates=info.get("updates", []) + [update])
-        common = dict(adopted_pr=new_info, independence=independence, base_sha=found["base"], sha=found["head"],
+        common = dict(provenance, adopted_pr=new_info, independence=independence, base_sha=found["base"], sha=found["head"],
                       published_sha=found["head"], pending_push_sha=None, error=None, resume_stage=None,
                       in_flight=False, contributors=sorted(set(run.get("contributors", [])) | set(declared) | families))
         if not cwd.exists():
@@ -347,9 +353,7 @@ class PullRequests:
             shutil.rmtree(fresh)
             team.store.save(run, **common, stage="prepare")
             return run
-        core.git(fresh, "checkout", "--detach", found["head"])
-        core.git(fresh, "switch", "-c", run["branch"])
-        preserved = team.store.run_root(run) / f"author-preserved-{time.time_ns()}"
+        preserved =team.store.run_root(run) / f"author-preserved-{time.time_ns()}"
         update["preserved"] = str(preserved)
         # Supplied findings that no revision has addressed yet remain the requested scope.
         pending = (bool(run.get("needs_revision")) and info["mode"] == "findings"

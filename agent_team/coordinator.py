@@ -222,8 +222,10 @@ def retire_evidence(run, reason, force=True, **entry):
     return changes
 
 
-def swap_interrupted(run):
-    return f"A checkout swap was interrupted; finish it with agent-team {run['pending_swap']['command']} first"
+def require_no_swap(run):
+    if run.get("pending_swap"):
+        raise TeamError(f"A checkout swap was interrupted; finish it with agent-team "
+                        f"{run['pending_swap']['command']} first")
 
 
 def current_evidence(run):
@@ -875,8 +877,7 @@ class Coordinator:
             raise TeamError("Declare supported contributors")
         if not operations or any(op not in ENTRY_POINTS for op in operations):
             raise TeamError("Select supported operations explicitly")
-        if run.get("pending_swap"):
-            raise TeamError(swap_interrupted(run))
+        require_no_swap(run)
         selecting = run.get("selection") or grants is not None
         plan = None
         if selecting:
@@ -897,9 +898,7 @@ class Coordinator:
         project = self.store.project(run["project"])
         # The shared adopted-PR guard comes first, so its reason is reported whatever else is missing.
         if {"implement", "revision"} & set(operations):
-            refusal = self.adopted_revision_refusal(project, run)
-            if refusal:
-                raise TeamError(refusal)
+            self.require_revisable(project, run)
         if "revision" in operations and not run.get("needs_revision"):
             raise TeamError("Revision requires recorded rejection feedback")
         issue = self.github.issue(project["repo"], run["issue"]) if run["issue"] is not None else {
@@ -1004,8 +1003,7 @@ class Coordinator:
 
     def resume(self, run_id):
         run = self.store.get(run_id)
-        if run.get("pending_swap"):
-            raise TeamError(swap_interrupted(run))
+        require_no_swap(run)
         if run["stage"] not in {"blocked", "quota_wait"}:
             raise TeamError("Only blocked or quota-waiting runs can be resumed")
         if not self.enforce_boundary(run, run["resume_stage"]):
@@ -1179,12 +1177,11 @@ class Coordinator:
 
     def reconcile(self, project, run):
         pr = self.github.pr(project["repo"], run["pr"])
-        if pr.get("merged") or pr["state"] == "closed":
-            stage = "merged" if pr.get("merged") else "closed"
+        if closure(pr):
             if run.get("adopted_pr"):
-                self.adopted_pr_moved(project, run, stage, f"PR was {stage}")
+                self.adopted_pr_moved(project, run, closure(pr), f"PR was {closure(pr)}")
             else:
-                self.store.save(run, stage=stage, notification_pending=True)
+                self.store.save(run, stage=closure(pr), notification_pending=True)
             return False
         # During publish, local SHA can be ahead of the remote branch.
         expected = run.get("published_sha") or run.get("sha")
@@ -1195,13 +1192,12 @@ class Coordinator:
             # One shared check for adopted PRs: head identity, head, base, then configuration and pins.
             change = self.adopted_pr_change(project, run, expected, pr)
             if change and self.has_effect(run, "github"):
-                if change[1].startswith("PR base"):
-                    self.github.status(project["repo"], expected, "failure",
-                                       "Base changed; integration and review need renewal")
-                else:
-                    self.github.status(project["repo"], pr["head"]["sha"], "pending",
-                                       "PR head changed; review invalidated" if "repository or branch" in change[1]
-                                       else "Changed outside coordinator; review invalidated")
+                base = change[1].startswith("PR base")
+                self.github.status(project["repo"], expected if base else pr["head"]["sha"],
+                                   "failure" if base else "pending",
+                                   "Base changed; integration and review need renewal" if base else
+                                   "PR head changed; review invalidated" if "repository or branch" in change[1]
+                                   else "Changed outside coordinator; review invalidated")
             reason = not change and current_evidence(run) and self.context_change(project, run, binding(run))
             if change or reason:
                 self.adopted_pr_moved(project, run, *(change or ("stopped", reason)))
@@ -1312,13 +1308,9 @@ class Coordinator:
             # The adopted head is checked out as-is: the base is never merged into an existing PR.
             with tempfile.TemporaryDirectory(prefix="prepare-", dir=cwd.parent) as temporary:
                 fresh = Path(temporary) / "author"
-                clone_repository(project["repo"], fresh, info["base_ref"], project["timeout"])
-                found = self.pull_requests.inspect(project, fresh, info["number"])
-                if found["head"] != info["head_sha"] or found["base"] != info["base_sha"]:
-                    raise TeamError("PR head or base moved since adoption; inspect it, then run agent-team pr "
-                                    "update RUN_ID --contributor ... (no checkout was installed)")
-                git(fresh, "checkout", "--detach", found["head"])
-                git(fresh, "switch", "-c", run["branch"])
+                self.pull_requests.fetch(project, info["number"], info["base_ref"], (info["head_sha"], info["base_sha"]),
+                                         fresh, "PR head or base moved since adoption; inspect it, then run agent-team "
+                                         "pr update RUN_ID --contributor ... (no checkout was installed)", run["branch"])
                 fresh.rename(cwd)
             base = info["base_sha"]
         elif run.get("input_ref"):
@@ -1355,32 +1347,28 @@ class Coordinator:
         self.implement(project, run)
 
     @staticmethod
-    def adopted_revision_refusal(project, run):
-        """Why an adopted PR may not be edited, if anything; checked before every author operation."""
+    def require_revisable(project, run):
+        """Refuse to edit an adopted PR, with the first applicable reason; checked before every author operation.
+        Each author pass needs its own round, reserved by a recorded rejection, supplied findings, or an
+        extension. A completed pass consumes it; an interrupted or quota-delayed pass may finish it."""
         info = run.get("adopted_pr")
-        if not info:
-            return None
-        if withheld(run):
-            return REFUSED_REVISION.format(withheld(run))
-        if FAMILIES[run["reviewer"]] in contributing_families(run):
-            return "The assigned reviewer's family contributed; independent review is impossible, so revision is refused"
-        if info["base_ref"] != project["base"]:
-            return (f"PR targets {info['base_ref']}, not registered base {project['base']}. Revision is refused "
-                    "before any change; Agent Team never retargets PRs")
-        if run["round"] > revision_limit(project, run):
-            return "The PR has no revision budget left; record an operator decision instead"
-        # Each author pass needs its own round, reserved by a recorded rejection, supplied findings, or an
-        # extension. A completed pass consumes it; an interrupted or quota-delayed pass may finish it.
-        if (not run.get("needs_revision") or run.get("reserved_round") != run["round"]
-                or run["round"] in run.get("authored_rounds", [])):
-            return ("No revision round is reserved for this PR: an author pass needs recorded rejection feedback "
-                    "or supplied findings within the budget, and each round allows one pass")
-        return None
+        for refused, reason in info and (
+                (withheld(run), REFUSED_REVISION.format(withheld(run))),
+                (FAMILIES[run["reviewer"]] in contributing_families(run), "The assigned reviewer's family "
+                 "contributed; independent review is impossible, so revision is refused"),
+                (info["base_ref"] != project["base"], f"PR targets {info['base_ref']}, not registered base "
+                 f"{project['base']}. Revision is refused before any change; Agent Team never retargets PRs"),
+                (run["round"] > revision_limit(project, run),
+                 "The PR has no revision budget left; record an operator decision instead"),
+                (not run.get("needs_revision") or run.get("reserved_round") != run["round"]
+                 or run["round"] in run.get("authored_rounds", []),
+                 "No revision round is reserved for this PR: an author pass needs recorded rejection feedback "
+                 "or supplied findings within the budget, and each round allows one pass")) or ():
+            if refused:
+                raise TeamError(reason)
 
     def implement(self, project, run):
-        refusal = self.adopted_revision_refusal(project, run)
-        if refusal:
-            raise TeamError(refusal)
+        self.require_revisable(project, run)
         self.require_effect(run, "edit")
         cwd = self.store.workspace(run)
         before = git(cwd, "rev-parse", "HEAD")
@@ -1923,23 +1911,20 @@ class Coordinator:
             raise TeamError("PR head repository or branch changed; close this run and adopt the PR again "
                             "(previous work retained)")
         fresh = self.store.run_root(run) / f"refresh-{time.time_ns()}"
+        moved = "Remote moved during refresh; retry (previous work retained)"
         if info:
-            # An adopted PR's head may live in a fork; read it through the base repository's pull ref.
-            clone_repository(project["repo"], fresh, info["base_ref"], project["timeout"])
-            found = self.pull_requests.inspect(project, fresh, info["number"])
+            # An adopted PR's head may live in a fork and is checked out as-is; the base is never merged.
+            found = self.pull_requests.fetch(project, info["number"], info["base_ref"],
+                                             (pr["head"]["sha"], pr["base"]["sha"]), fresh, moved, run["branch"])
             candidate, base_sha = found["head"], found["base"]
         else:
             clone_repository(project["repo"], fresh, run["branch"], project["timeout"])
             candidate = git(fresh, "rev-parse", "HEAD")
             base_sha = git(fresh, "rev-parse", f"origin/{project['base']}")
         if candidate != pr["head"]["sha"] or base_sha != pr["base"]["sha"]:
-            raise TeamError("Remote moved during refresh; retry (previous work retained)")
+            raise TeamError(moved)
         extra = check(fresh, candidate, base_sha) if check else None
-        if info:
-            # The base is never merged into an adopted PR as a side effect of adopting a repair.
-            git(fresh, "checkout", "--detach", candidate)
-            git(fresh, "switch", "-c", run["branch"])
-        else:
+        if not info:
             git(fresh, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
                 "-c", "commit.gpgsign=false", "merge", "--no-edit", base_sha)
         changes = dict(base_sha=base_sha, sha=git(fresh, "rev-parse", "HEAD"),
@@ -2135,9 +2120,8 @@ class Coordinator:
         """Record the operator's decision at a handoff. Nothing is reset or retried implicitly."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
-        if run.get("pending_swap"):
-            raise TeamError(swap_interrupted(run))
-        allowed = {"handoff": ACTIONS, "repair": ("rescope", "stop")}.get(run["stage"], ())
+        require_no_swap(run)
+        allowed ={"handoff": ACTIONS, "repair": ("rescope", "stop")}.get(run["stage"], ())
         if run["stage"] == "stale" and recovering(run):
             # A recovered run whose head changed may be unadoptable (e.g. the reviewer's family contributed).
             allowed = ("rescope", "stop")
