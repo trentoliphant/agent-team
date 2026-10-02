@@ -73,6 +73,10 @@ class ReviewPatchTests(unittest.TestCase):
                             "tricky.txt": "\n".join(TRICKY) + "\n"}, "Pathological")
         return base, head
 
+    def diffs(self, base, head):
+        """The default and context-free diffs of `base...head`."""
+        return raw_diff(self.repo, base, head), raw_diff(self.repo, base, head, "--unified=0")
+
     def test_default_diff_used_when_within_budget(self):
         base, head = self.scattered()
         text, evidence = review_patch(git, self.repo, base, head)
@@ -83,7 +87,7 @@ class ReviewPatchTests(unittest.TestCase):
 
     def test_compact_diff_used_only_when_proven_complete(self):
         base, head = self.scattered()
-        default, compact = raw_diff(self.repo, base, head), raw_diff(self.repo, base, head, "--unified=0")
+        default, compact = self.diffs(base, head)
         self.assertLess(len(compact), len(default))
         text, evidence = review_patch(git, self.repo, base, head, limit=len(compact))
         self.assertEqual(text, compact.decode())
@@ -98,11 +102,9 @@ class ReviewPatchTests(unittest.TestCase):
 
     def test_pathological_lines_and_newline_markers_are_proven_equivalent(self):
         base, head = self.pathological()
-        default, compact = raw_diff(self.repo, base, head), raw_diff(self.repo, base, head, "--unified=0")
-        self.assertIn(b"\\ No newline at end of file", compact)
-        self.assertIn(b"Binary files", compact)
-        self.assertIn(b"old mode 100644", compact)
-        self.assertIn(b"rename from old-name.txt", compact)
+        default, compact = self.diffs(base, head)
+        for text in (b"\\ No newline at end of file", b"Binary files", b"old mode 100644", b"rename from old-name.txt"):
+            self.assertIn(text, compact)
         files = changes(compact)
         self.assertEqual(files, changes(default))
         # Every tricky line is kept as content of tricky.txt, which is one file with one hunk.
@@ -114,13 +116,13 @@ class ReviewPatchTests(unittest.TestCase):
 
     def test_still_too_large_is_refused(self):
         base, head = self.scattered()
-        compact = raw_diff(self.repo, base, head, "--unified=0")
+        compact = self.diffs(base, head)[1]
         with self.assertRaisesRegex(TeamError, "exceeds review budget even without context"):
             review_patch(git, self.repo, base, head, limit=len(compact) - 1)
 
     def test_mismatch_or_unparsable_compact_patch_fails_closed(self):
         base, head = self.pathological()
-        default, compact = raw_diff(self.repo, base, head), raw_diff(self.repo, base, head, "--unified=0")
+        default, compact = self.diffs(base, head)
         marker = b"\n\\ No newline at end of file"
         self.assertIn(marker, compact)
         self.assertIn(b" x\n end" + marker, default)  # a marker after context only
