@@ -17,7 +17,7 @@ this package or needs its workflow files.
 | `patches.py` | Complete, budget-bounded review patches and their completeness proof |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 | `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
-| `pull_requests.py` | Existing-PR adoption, updates, and `pr show` |
+| `pull_requests.py` | Existing-PR adoption |
 
 Each project registers one repository. It may also declare public companion
 repositories that its validation needs (see the README). Companions are read-only
@@ -320,8 +320,7 @@ issue drafts. Validation can enter from a remote branch or commit without an
 author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
 evidence only for a published candidate and with the content grant. Existing PR
-adoption from outside the coordinator uses `agent-team pr`; withheld independence
-records `review_withheld`, and `pr update` journals `pending_swap`.
+adoption from outside the coordinator uses `agent-team pr`.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

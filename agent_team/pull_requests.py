@@ -1,4 +1,4 @@
-"""Existing pull requests behind `agent-team pr`."""
+"""`agent-team pr` support."""
 from pathlib import Path
 import shutil
 import tempfile
@@ -124,7 +124,7 @@ class PullRequests:
         self.team = team
 
     def inspect(self, project, cwd, number):
-        """Fetch a PR head, even a fork's, via the pull ref."""
+        """Fetch a PR head, even a fork's."""
         git = core.git
         base = git(cwd, "rev-parse", "HEAD")
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
@@ -287,7 +287,6 @@ class PullRequests:
             raise TeamError("PR head repository or branch changed; close this run and adopt the PR again")
         cwd = team.store.workspace(run)
         if cwd.exists() and not run.get("git_metadata"):
-            # Only preparation verifies the installation journal.
             raise TeamError("Initial preparation was interrupted; finish it with agent-team resume RUN_ID first")
         if cwd.exists():
             core.assert_metadata(cwd, run["git_metadata"])
@@ -317,7 +316,6 @@ class PullRequests:
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
                         unresolved_trailers=unresolved, updates=info.get("updates", []) + [update])
         if found["head"] != info["head_sha"]:
-            # A rewritten head is attributed from the base.
             try:
                 core.git(fresh, "merge-base", "--is-ancestor", info["head_sha"], found["head"])
                 since = info["head_sha"]
@@ -355,7 +353,7 @@ class PullRequests:
             return self.summary(run, False)
 
     def currency(self, project, run):
-        """(True, None), (False, reason), or unverifiable (None, reason)."""
+        """(True|False|None if unverifiable, reason)."""
         if run.get("in_flight") or run.get("pending_swap"):
             return None, "an operation is in progress or was interrupted"
         try:

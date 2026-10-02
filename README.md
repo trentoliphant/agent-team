@@ -693,12 +693,10 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 ### Existing pull requests
 
-`agent-team pr` adopts an open PR of a registered repository. `pr review` stops
-after findings; `pr revise` fixes rejections on the PR branch; `pr findings`
-revises only `--finding` items.
+`agent-team pr` adopts an open PR of a registered repository:
 
 ```sh
-# Review only, review with fixes (--plan previews), supplied findings:
+# Review; review with fixes (--plan previews); supplied findings:
 agent-team pr review example 42 --contributor human
 agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
   --contributor human --grant edit --grant push --grant github
@@ -706,12 +704,12 @@ agent-team pr findings example 42 --contributor human --grant edit --grant push 
   --finding 'parser.py:88 drops the last field; keep it and add a test'
 agent-team run example --run RUN_ID --watch
 agent-team pr show RUN_ID
-# After an external push stops the run as stale:
+# After an external push makes the run stale:
 agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
 ```
 
-`pr show` reports findings, roles, and checks run or omitted; a review is not
-readiness. `unknown` or mixed families withhold independent success. Movement
-stops the run as `stale`. Pushes only fast-forward; without push access, `pr
-show` offers a local patch. Nothing reopens, retargets, changes draft, or merges.
+`pr show` reports findings, roles, and checks; a review is not readiness.
+Unknown or mixed authorship withholds independent success. Pushes only
+fast-forward, else `pr show` offers a local patch. Nothing reopens, retargets,
+changes draft, or merges.

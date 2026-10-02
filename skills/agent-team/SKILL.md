@@ -228,8 +228,7 @@ and ready label remain required. Tasks never require synthetic issues. Existing
 branches/commits require every contributor to be declared. Choose one operation
 or an ordered sequence; local review may omit publication. Individual publication,
 review, and CI reuse a tracked run's compatible evidence. Without such evidence,
-select validation first. Use `agent-team pr` (below) for outside PRs, never a
-replacement PR or author pass.
+select validation first. Use `agent-team pr` for outside PRs, not an author pass.
 After a compatible local review, `publish ci` publishes and checks readiness
 without repeating review. Publication posts the stored review on the PR;
 readiness requires its comment write to succeed. Inspect each continuation's grants and effects to
@@ -298,7 +297,6 @@ agent-team run example --run RUN_ID --watch
 agent-team pr show RUN_ID
 ```
 
-Declare every contributor truthfully, never from a username. Report what `pr
-show` says; a review is not readiness. Inspect a `stale` change before `pr
-update`. Never open a replacement PR, force-push, merge, reopen, retarget, or
-change draft state.
+Declare contributors truthfully, never from usernames. Report `pr show`; a
+review is not readiness. Inspect `stale` changes before `pr update`. Never open
+a replacement PR, force-push, merge, reopen, retarget, or change draft state.

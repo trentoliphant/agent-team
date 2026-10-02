@@ -33,11 +33,6 @@ ready-for-maintainer summary are marked comments on the PR. Duplicate suppressio
 only trusts comments written by the coordinator's current GitHub identity. Avoid
 switching identities mid-run if you want to retain a single status comment.
 
-## Existing pull requests
-
-`agent-team pr` fetches `refs/pull/N/head`, so accessible forks can be reviewed.
-It never edits PR metadata, draft state, or bases.
-
 ## Human merge authority
 
 Configure the protected default branch using GitHub repository settings:
