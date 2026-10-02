@@ -128,9 +128,12 @@ class GitHub:
         })
 
     def pr(self, repo, number):
-        """Base `sha` is the live base branch; GitHub's possibly frozen one is `snapshot_sha`."""
+        """Base `sha` is the live base branch; GitHub's possibly frozen one is `snapshot_sha`. A closed or
+        merged PR keeps the snapshot, so a deleted base branch never blocks its explicit handling."""
         pr = self.api(f"repos/{repo}/pulls/{number}")
-        live = self.api(f"repos/{repo}/git/ref/heads/{quote(pr['base']['ref'])}")["object"]["sha"]
+        live = pr["base"]["sha"]
+        if pr.get("state") == "open" and not pr.get("merged"):
+            live = self.api(f"repos/{repo}/git/ref/heads/{quote(pr['base']['ref'])}")["object"]["sha"]
         pr["base"] = dict(pr["base"], snapshot_sha=pr["base"]["sha"], sha=live)
         return pr
 
