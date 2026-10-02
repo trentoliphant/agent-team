@@ -105,7 +105,7 @@ class ReviewRecordTests(unittest.TestCase):
             "commit": "a" * 40, "base": "b" * 40, "current": False, "verdict": "changes_requested",
             "summary": "raw feedback", "reviewer": {"agent": "claude"}, "findings": [FINDING],
             "candidate_verdict": "changes_requested", "candidate_findings": [FINDING],
-            "candidate_feedback": "raw feedback", "validation_failed": False,
+            "candidate_feedback": "raw feedback", "validation_failed": False, "tests": TESTS,
             "validation_checks": [dict(TESTS[0], performed=True), {"command": "make test", "performed": False}],
             "companions": [], "round": None, "kind": None, "published": None, "at": None})
         saved = dict(entry, review_report={"verdict": "pass", "summary": "Fine", "findings": []},
@@ -129,6 +129,32 @@ class ReviewRecordTests(unittest.TestCase):
                           "published": True, "at": 7.0, "summary": feedback, "candidate_feedback": feedback})
         self.assertEqual(report["validation_checks"], [dict(TESTS_NO_OUTPUT[0], performed=True)])
 
+    def test_ordinary_validation_rejection_renders_as_failed_with_complete_diagnostics(self):
+        # `Coordinator.revise` records kind="validation" and the failing tests, but no validation_failed flag.
+        feedback = "Validation failed:\nmake lint\nE501 x.py:3\nE302 y.py:9"
+        tests = [{"command": "make lint", "exit_code": 0}, {"command": "make test", "exit_code": 2}]
+        entry = {"round": 1, "kind": "validation", "sha": "a" * 40, "published": False, "tests": tests,
+                 "findings": [FINDING], "feedback": feedback, "at": 8.0, "companions": PINS}
+        report = evidence.rejected_review(entry, False)
+        self.assertNotIn("validation_failed", entry)
+        self.assertTrue(report["validation_failed"])
+        self.assertEqual(report["tests"], tests)
+        self.assertEqual(report["candidate_feedback"], feedback)
+        self.assertEqual(report["summary"], feedback)
+        self.assertEqual(report["candidate_findings"], [FINDING])
+        self.assertEqual(report["validation_checks"], [dict(t, performed=True) for t in tests])
+        self.assertEqual(report["companions"], PINS)
+
+    def test_review_rejection_failure_flag_is_explicit_only(self):
+        # A review rejection is a validation failure only when the coordinator flagged it as one.
+        entry = {"round": 3, "kind": "review", "sha": "a" * 40, "published": True, "tests": TESTS,
+                 "findings": [FINDING], "feedback": "Needs a fix", "at": 9.0,
+                 "review": {k: RECORD[k] for k in evidence.REVIEWER}}
+        self.assertFalse(evidence.rejected_review(entry, False)["validation_failed"])
+        flagged = evidence.rejected_review(dict(entry, validation_failed=True), False)
+        self.assertTrue(flagged["validation_failed"])
+        self.assertEqual(flagged["reviewer"], entry["review"])
+
 
 class SupersededTests(unittest.TestCase):
     def test_superseded_review_keeps_record_pins_and_binding(self):
@@ -137,6 +163,7 @@ class SupersededTests(unittest.TestCase):
                  "companions": PINS, "at": 4.0}
         rendered = evidence.superseded(entry)
         self.assertFalse(rendered["current"])
+        self.assertFalse(rendered["validation_failed"])
         self.assertEqual(rendered["record"], entry["record"])
         self.assertEqual((rendered["sha"], rendered["at"], rendered["companions"]), ("a" * 40, 4.0, PINS))
         self.assertEqual(rendered["review"], evidence.review_report(entry["record"], "a" * 40, None, False))
@@ -152,7 +179,7 @@ class SupersededTests(unittest.TestCase):
         entry = {"kind": "validation", "tests": TESTS_NO_OUTPUT, "feedback": feedback, "sha": "a" * 40,
                  "companions": PINS, "at": 5.0}
         rendered = evidence.superseded(entry)
-        self.assertEqual(rendered, dict(entry, current=False,
+        self.assertEqual(rendered, dict(entry, current=False, validation_failed=True,
                                         validation_checks=[dict(TESTS_NO_OUTPUT[0], performed=True)]))
 
 

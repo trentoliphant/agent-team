@@ -47,14 +47,17 @@ def historical_evidence(entry):
 def rejected_review(entry, current):
     """A revision-history entry for a rejected candidate. Entries without a saved report fall back to
     the recorded feedback and findings, so older history still renders completely. The round, kind,
-    publication, time and companion pins the rejection was bound to are kept."""
+    publication, time, companion pins and recorded tests the rejection was bound to are kept. An
+    ordinary validation rejection (`kind` "validation") is a validation failure even without an
+    explicit `validation_failed` flag; its diagnostic feedback is `candidate_feedback`."""
     report = entry.get("review_report") or {"verdict": "changes_requested", "summary": entry["feedback"],
                                             "findings": entry["findings"]}
     return {"commit": entry["sha"], "base": entry.get("base"), "current": current,
             "verdict": report["verdict"], "summary": report["summary"], "reviewer": entry.get("review"),
             "findings": report["findings"], "candidate_verdict": "changes_requested",
             "candidate_findings": entry["findings"], "candidate_feedback": entry["feedback"],
-            "validation_failed": bool(entry.get("validation_failed")),
+            "validation_failed": bool(entry.get("validation_failed")) or entry.get("kind") == "validation",
+            "tests": entry["tests"],
             "validation_checks": validation_checks(entry["tests"], entry.get("validation_plan")),
             "companions": entry.get("companions") or [], "round": entry.get("round"),
             "kind": entry.get("kind"), "published": entry.get("published"), "at": entry.get("at")}
@@ -64,7 +67,8 @@ def superseded(entry):
     """A coordinator `superseded_evidence` entry: a review or failed validation of `sha` gathered with
     companion pins that later changed. It is never current; the complete review record, or the
     failed tests and their diagnostic feedback, stay reportable."""
-    rendered = {**entry, "current": False, "companions": entry.get("companions") or []}
+    rendered = {**entry, "current": False, "companions": entry.get("companions") or [],
+                "validation_failed": entry["kind"] == "validation"}
     if entry["kind"] == "review":
         rendered["review"] = dict(review_report(entry["record"], entry["sha"], entry.get("base"), False),
                                   companions=entry["record"].get("companions") or rendered["companions"])
