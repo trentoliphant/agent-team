@@ -734,6 +734,8 @@ checks CI and is not a readiness verdict. Readiness (`select --run RUN_ID
 --operations ci --grant readiness`) needs independent review of the published head and CI for
 the current head and base (`current_ci`); the PR is rechecked before each
 readiness write and save, and `pr show` flags readiness that is no longer current.
+`pr show` rechecks the PR, configuration, pins, and checkout before calling evidence
+current (`currency`); while a worker holds the repository it reports it unverified.
 No `pr` command reopens, retargets, changes draft state, or merges a PR.
 
 Declare every contributor: `human`, `openai`, `anthropic`, or `unknown`; trailer

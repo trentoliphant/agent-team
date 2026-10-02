@@ -304,8 +304,10 @@ enters `pr_followup` (revise mode only) until `select --run`. Author passes need
 `reserved_round == round` and a round not in `authored_rounds`. A failed validation of the unedited
 head stays in `attempted_context` until review; one rejection records both.
 Unestablished independence records `review_withheld`, not `reviewed_sha`.
-Movement, configuration changes, and pin changes retire evidence to `evidence_invalidations`
-and `evidence_retired`, in every stage, and move bound queued writes to `unpublished_evidence`.
+Every invalidation (movement, configuration, pins, local continuation) snapshots the complete
+evidence to `evidence_invalidations`, sets `evidence_retired`, and bumps `evidence_generation`;
+CI observations count only for their generation. Bound queued writes move to `unpublished_evidence`.
+`pr show` rechecks the full binding under the repository lock and never saves.
 Recovery stages keep their stage. Re-adoption inherits round, limit, `rejected_shas`, contributors,
 and unresolved trailers from `prior_runs`. `pr update` and `adopt` journal `pending_swap`
 before any rename, so a rerun completes it with the recorded inputs.
