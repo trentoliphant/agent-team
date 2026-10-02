@@ -12,6 +12,7 @@ RECORD = {"agent": "claude", "family": "anthropic", "cli_version": "2.1", "reque
           "observed_models": ["opus"], "patch": PATCH, "session": "not a reviewer field",
           "report": {"verdict": "changes_requested", "summary": "Needs a fix", "findings": [FINDING]}}
 TESTS = [{"command": "make lint", "exit_code": 1, "output": "lint failed"}]
+TESTS_NO_OUTPUT = [{"command": "make lint", "exit_code": 1}]
 PLAN = ["make lint", "make test"]
 PINS = [{"repo": "example/companion", "rev": "c" * 40}]
 
@@ -37,7 +38,28 @@ class ReviewRecordTests(unittest.TestCase):
             "summary": "Needs a fix", "findings": [FINDING],
             "reviewer": {"agent": "claude", "family": "anthropic", "cli_version": "2.1",
                          "requested_model": "opus", "observed_models": ["opus"]},
-            "patch": PATCH})
+            "patch": PATCH, "companions": []})
+
+    def test_review_report_keeps_reviewed_companion_pins(self):
+        report = evidence.review_report(dict(RECORD, companions=PINS), "a" * 40, "b" * 40, True)
+        self.assertEqual(report["companions"], PINS)
+
+    def test_historical_evidence_keeps_companion_review_and_failure_diagnostics(self):
+        # Ordinary validation records hold only command and exit code; the output is only in feedback.
+        failure = {"sha": "a" * 40, "tests": TESTS_NO_OUTPUT, "feedback": "Validation failed:\nmake lint\nE501 x.py:3"}
+        entry = {"reason": "PR base changed", "at": 3.0, "head": "a" * 40, "base": "b" * 40,
+                 "published": "a" * 40, "companions": PINS,
+                 "evidence": {"review_sha": "a" * 40, "review_record": dict(RECORD, companions=PINS),
+                              "validation_failure": failure, "tests": TESTS_NO_OUTPUT, "validation_plan": PLAN}}
+        history = evidence.historical_evidence(entry)
+        self.assertEqual(history["validation_failure"], failure)
+        self.assertIn("E501 x.py:3", history["validation_failure"]["feedback"])
+        self.assertTrue(history["validation_failed"])
+        self.assertEqual(history["review"]["companions"], PINS)
+        self.assertEqual((history["published"], history["companions"]), ("a" * 40, PINS))
+        self.assertNotIn("evidence", history)
+        self.assertEqual(history["validation_checks"],
+                         [dict(TESTS_NO_OUTPUT[0], performed=True), {"command": "make test", "performed": False}])
 
     def test_historical_evidence_is_never_current_and_keeps_validation(self):
         entry = {"reason": "PR base changed", "at": 12.5, "head": "a" * 40, "base": "b" * 40,
@@ -84,7 +106,8 @@ class ReviewRecordTests(unittest.TestCase):
             "summary": "raw feedback", "reviewer": {"agent": "claude"}, "findings": [FINDING],
             "candidate_verdict": "changes_requested", "candidate_findings": [FINDING],
             "candidate_feedback": "raw feedback", "validation_failed": False,
-            "validation_checks": [dict(TESTS[0], performed=True), {"command": "make test", "performed": False}]})
+            "validation_checks": [dict(TESTS[0], performed=True), {"command": "make test", "performed": False}],
+            "companions": [], "round": None, "kind": None, "published": None, "at": None})
         saved = dict(entry, review_report={"verdict": "pass", "summary": "Fine", "findings": []},
                      validation_failed=True)
         report = evidence.rejected_review(saved, True)
@@ -93,6 +116,44 @@ class ReviewRecordTests(unittest.TestCase):
         self.assertEqual((report["candidate_verdict"], report["candidate_findings"], report["candidate_feedback"]),
                          ("changes_requested", [FINDING], "raw feedback"))
         self.assertTrue(report["validation_failed"])
+
+    def test_rejected_review_keeps_binding_of_a_coordinator_revision_entry(self):
+        # The shape `Coordinator.revise` records for a validation rejection with companion pins.
+        feedback = "Validation failed:\nmake lint\nE501 x.py:3"
+        entry = {"round": 2, "kind": "validation", "sha": "a" * 40, "published": True, "tests": TESTS_NO_OUTPUT,
+                 "findings": [FINDING], "feedback": feedback, "at": 7.0, "companions": PINS}
+        report = evidence.rejected_review(entry, False)
+        self.assertEqual({k: report[k] for k in ("commit", "companions", "round", "kind", "published", "at",
+                                                 "summary", "candidate_feedback")},
+                         {"commit": "a" * 40, "companions": PINS, "round": 2, "kind": "validation",
+                          "published": True, "at": 7.0, "summary": feedback, "candidate_feedback": feedback})
+        self.assertEqual(report["validation_checks"], [dict(TESTS_NO_OUTPUT[0], performed=True)])
+
+
+class SupersededTests(unittest.TestCase):
+    def test_superseded_review_keeps_record_pins_and_binding(self):
+        # The shape `Coordinator.supersede` records when companion pins change.
+        entry = {"kind": "review", "record": dict(RECORD, companions=PINS), "sha": "a" * 40,
+                 "companions": PINS, "at": 4.0}
+        rendered = evidence.superseded(entry)
+        self.assertFalse(rendered["current"])
+        self.assertEqual(rendered["record"], entry["record"])
+        self.assertEqual((rendered["sha"], rendered["at"], rendered["companions"]), ("a" * 40, 4.0, PINS))
+        self.assertEqual(rendered["review"], evidence.review_report(entry["record"], "a" * 40, None, False))
+        self.assertEqual(rendered["review"]["companions"], PINS)
+        self.assertEqual(rendered["review"]["findings"], [FINDING])
+
+    def test_superseded_review_without_record_pins_uses_entry_pins(self):
+        entry = {"kind": "review", "record": RECORD, "sha": "a" * 40, "companions": PINS, "at": 4.0}
+        self.assertEqual(evidence.superseded(entry)["review"]["companions"], PINS)
+
+    def test_superseded_validation_keeps_tests_and_complete_feedback(self):
+        feedback = "Validation failed:\nmake lint\nE501 x.py:3"
+        entry = {"kind": "validation", "tests": TESTS_NO_OUTPUT, "feedback": feedback, "sha": "a" * 40,
+                 "companions": PINS, "at": 5.0}
+        rendered = evidence.superseded(entry)
+        self.assertEqual(rendered, dict(entry, current=False,
+                                        validation_checks=[dict(TESTS_NO_OUTPUT[0], performed=True)]))
 
 
 class CiRecordTests(unittest.TestCase):

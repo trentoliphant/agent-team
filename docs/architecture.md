@@ -295,8 +295,10 @@ When a ready run sees CI change, the observation, the return to `ci`, and the
 queued pending status are saved before GitHub is called. A failed status write
 therefore loses no evidence and is retried, and a transient failure stays in the
 history after CI passes. `agent_team/evidence.py` holds pure, standard-library
-helpers that build and render these CI records and review, rejected-review, and
-historical evidence from plain dictionaries.
+helpers that build and render these CI records and review, rejected-review,
+superseded, and historical evidence from plain dictionaries. Rendered reviews
+keep their companion pins, and historical validation failures keep their
+complete feedback.
 
 This release does not provide a web UI, multi-host leases,
 GitHub Projects synchronization, automatic semantic issue deduplication,
