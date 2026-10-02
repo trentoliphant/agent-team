@@ -130,6 +130,8 @@ class PullRequestTests(unittest.TestCase):
             self.github.pulls[7]["head_repo"] = FORK
         elif kind == "configuration":
             self.store.update_project("demo", tests=["true"])
+        elif kind == "dirty":
+            (self.store.workspace(run) / "local.txt").write_text("operator edit\n")
         elif kind in {"head", "base", "local"}:
             return {"head": self.push_external, "base": self.advance_base,
                     "local": lambda: self.local_commit(run)}[kind]()
@@ -210,27 +212,23 @@ class PullRequestTests(unittest.TestCase):
             run = self.ticks(run, 1)
         return run
 
+    def moving(self, owner, method, move, when=lambda *args: True):
+        """Move inputs inside a matching call, before it proceeds."""
+        real = getattr(owner, method)
+
+        def wrapped(*args, **kwargs):
+            if when(*args):
+                move()
+            return real(*args, **kwargs)
+
+        return patch.object(owner, method, side_effect=wrapped)
+
     def tick_moving_during_review(self, run, move=None):
-        real = self.agents.run
-
-        def moving(agent, role, *args, **kwargs):
-            if role == "review":
-                (move or self.push_external)()
-            return real(agent, role, *args, **kwargs)
-
-        with patch.object(self.agents, "run", side_effect=moving):
+        with self.moving(self.agents, "run", move or self.push_external, lambda _, role, *a: role == "review"):
             return self.ticks(run, 1)
 
     def writes(self, method, when, action):
-        real = getattr(self.github, method)
-
-        def wrapped(repo, target, key, *args, **kwargs):
-            result = real(repo, target, key, *args, **kwargs)
-            if when(key):
-                action()
-            return result
-
-        return patch.object(self.github, method, side_effect=wrapped)
+        return self.moving(self.github, method, action, lambda _, target, key, *a: when(key))
 
     def interrupt(self, point, action):
         class Interrupted(Exception):
@@ -617,15 +615,24 @@ class PullRequestTests(unittest.TestCase):
             self.assert_fields(report["ci_checks"][0], head=head, current=False)
             self.assertIn(HISTORICAL_CI, report["limitations"])
 
-    def test_movement_during_or_after_readiness_writes_is_never_saved_as_ready(self):
-        for write, trigger, move in self.scenarios(("comment", "-review-", "push_external"),
-                                                   ("status", "success", "advance_base"),
-                                                   ("comment", "-ready", "push_external")):
+    def test_movement_around_readiness_writes_lookup_or_drafting_is_never_saved_as_ready(self):
+        for method, trigger, kind in self.scenarios(
+                ("comment", "-review-", "head"), ("status", "success", "base"), ("comment", "-ready", "head"),
+                ("ci", "", "local"), ("ci", "", "dirty"),
+                *(("run", "status", k) for k in ("head", "base", "configuration", "local", "dirty"))):
             head, run = self.readiness_run()
-            with self.writes(write, lambda key: trigger in key, getattr(self, move)):
+            if method == "run":
+                # Custom wording makes the ready comment a model draft.
+                self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
+            key = 1 if method in {"ci", "run"} else 2
+            with self.moving(self.agents if method == "run" else self.github, method, lambda: self.change(kind, run),
+                             lambda *args: trigger in args[key]), \
+                    patch.object(self.github, "comment", wraps=self.github.comment) as comment:
                 run = self.ticks(run, 1)
             ready = trigger == "-ready"
-            self.assert_fields(run, stage="stale", reviewed_sha=None)
+            self.assertEqual(self.roles(), ["review"] + ["status"] * (method == "run"))
+            self.assert_fields(run, stage="stale" if kind in {"head", "base"} else "stopped", reviewed_sha=None,
+                               validated_sha=None)
             self.assertEqual((self.github.pulls[7]["draft"], run["ci_checks"][-1]["readiness_changed"]),
                              (not ready, ready))
             if ready:
@@ -634,29 +641,15 @@ class PullRequestTests(unittest.TestCase):
                               limitations)
                 self.assertFalse(any("did not change draft" in item for item in limitations))
                 continue
-            self.assertIsNone(run["validated_sha"])
             self.assertNotIn((7, f"{run['id']}-ready"), self.github.comments)
             self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
-            if write == "comment":
-                self.assertNotIn((head, "success"), self.github.statuses)
-
-    def test_local_change_during_ci_lookup_publishes_no_readiness(self):
-        for kind in self.scenarios("commit", "dirty"):
-            head, run = self.readiness_run()
-            real = self.github.ci
-
-            def lookup(*args):
-                self.local_commit(run) if kind == "commit" else (self.store.workspace(run) / "x.txt").write_text("x\n")
-                return real(*args)
-
-            with patch.object(self.github, "ci", side_effect=lookup), \
-                    patch.object(self.github, "comment", wraps=self.github.comment) as comment:
-                run = self.ticks(run, 1)
-            self.assertFalse([c for c in comment.call_args_list if c.args[2].endswith(("-ready", head))])
-            self.assert_no_success()
-            self.assert_fields(run, stage="stopped", reviewed_sha=None)
-            self.assertTrue(self.github.pulls[7]["draft"] and run["pending_contribution"])
-            self.assertIn(LOCAL_CHANGE, run["evidence_invalidations"][-1]["reason"])
+            if method != "status":
+                self.assert_no_success()
+            if method in {"ci", "run"}:
+                self.assertFalse([c for c in comment.call_args_list if c.args[2].endswith(("-ready", head))])
+            if kind in {"local", "dirty"}:
+                self.assertTrue(run["pending_contribution"])
+                self.assertIn(LOCAL_CHANGE, run["evidence_invalidations"][-1]["reason"])
 
     def test_moved_inputs_withhold_repair_adoption_writes(self):
         kinds = ("head", "base", "identity", "configuration")
@@ -773,34 +766,43 @@ class PullRequestTests(unittest.TestCase):
 
     def test_head_advanced_during_permission_lookup_is_never_pushed(self):
         run = self.at_publish()
-        head, real = self.remote_head(), self.github.push_access
-
-        def advancing(project, pr):
-            self.local_commit(run)
-            return real(project, pr)
-
-        with patch.object(self.github, "push_access", side_effect=advancing):
+        head = self.remote_head()
+        with self.moving(self.github, "push_access", lambda: self.local_commit(run)):
             run = self.ticks(run, 1)
         self.assert_fields(run, stage="stopped", next_stage="validate", validated_sha=None, pending_push_sha=None)
         self.assertEqual((self.remote_head(), run["adopted_pr"].get("pushed", [])), (head, []))
         self.assertTrue(run["pending_contribution"])
         self.assertIn(LOCAL_CHANGE, run["evidence_invalidations"][-1]["reason"])
 
-    def test_local_change_during_review_retires_evidence_until_contributors_are_declared(self):
-        for kind, grants in self.scenarios(("commit", []), ("commit", ["github"]), ("dirty", []), ("dirty", ["github"])):
-            head = self.open_pr()
-            run = self.reviewed(count=2, grants=grants)
-            baseline = run["evidence_context"]
-            move = ((lambda: self.local_commit(run)) if kind == "commit" else
-                    lambda: (self.store.workspace(run) / "local.txt").write_text("operator edit\n"))
-            run = self.tick_moving_during_review(run, move)
+    def test_local_change_during_review_or_after_readiness_retires_evidence_until_declared(self):
+        for when, kind, grants in self.scenarios(*(("review", k, g) for k in ("local", "dirty") for g in ([], ["github"])),
+                                                 ("ready", "local", None), ("ready", "dirty", None)):
+            if when == "ready":
+                head, run = self.readiness_run()
+                run = self.ticks(run, 1)
+                self.assertEqual(run["stage"], "ready")
+                baseline = run["evidence_context"]
+                self.change(kind, run)
+                # Repeated ticks keep the prior baseline and a single retirement.
+                run = self.ticks(run, 3)
+                self.assertEqual([e["reason"] for e in run["evidence_invalidations"]].count(LOCAL_CHANGE), 1)
+                self.assertIn((head, "pending", "Evidence inputs changed; readiness invalidated"),
+                              self.github.status_descriptions)
+                self.assertIn(f"Agent Team marked the PR ready for {head}; that readiness is not current.",
+                              self.report(run)["limitations"])
+            else:
+                head = self.open_pr()
+                run = self.reviewed(count=2, grants=grants)
+                baseline = run["evidence_context"]
+                run = self.tick_moving_during_review(run, lambda: self.change(kind, run))
+                self.assertEqual(run["outbox"], [])
+                self.assert_quiet()
             self.assert_fields(run, stage="stopped", next_stage="validate", reviewed_sha=None, validated_sha=None,
-                               outbox=[], evidence_context=baseline)
+                               evidence_context=baseline)
             self.assertTrue(run["pending_contribution"])
-            self.assert_quiet()
             self.assert_retired(self.report(run), head, run["base_sha"], LOCAL_CHANGE, reviewed=head)
             self.refuses("contributor declarations", self.select, run, ["validate", "review"])
-            if kind == "commit":
+            if kind == "local":
                 run = self.ticks(self.select(run, ["validate", "review"], contributors=["human"]), 2)
                 self.assert_fields(run, stage="stopped", reviewed_sha=self.head_of(self.store.workspace(run)))
                 self.assertNotEqual(run["reviewed_sha"], head)

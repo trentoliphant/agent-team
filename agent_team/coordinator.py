@@ -508,10 +508,9 @@ class Coordinator:
         while run.get("outbox"):
             item = run["outbox"][0]
             if run.get("adopted_pr") and item.get("evidence"):
-                change = self.evidence_change(project, run, item.get("context") or {"head": item["evidence"]})
                 # Agent Team's own unvalidated revision is not a local change.
-                if not change and item["evidence"] == run["sha"] and not run.get("commit_contributors"):
-                    change = self.local_change(project, run)
+                change = self.binding_change(project, run, None, item.get("context") or {"head": item["evidence"]},
+                                             item["evidence"] == run["sha"] and not run.get("commit_contributors"))
                 if change:
                     self.adopted_pr_moved(project, run, *change)
                     continue
@@ -557,15 +556,16 @@ class Coordinator:
             return "stopped", LOCAL_CHANGE
         return None
 
-    def binding_change(self, project, run, pr=None):
+    def binding_change(self, project, run, pr=None, context=None, local=True):
         """`evidence_change` plus the local candidate inputs. Never saves."""
-        return self.evidence_change(project, run, binding(run), pr) or self.local_change(project, run)
+        return self.evidence_change(project, run, context or binding(run), pr) or (
+            local and self.local_change(project, run))
 
     def bound(self, run, item):
         return dict(item, evidence=run["sha"], context=binding(run)) if run.get("adopted_pr") else item
 
-    def recheck_adopted(self, project, run, local=True):
-        change = self.binding_change(project, run) if local else self.evidence_change(project, run, binding(run))
+    def recheck_adopted(self, project, run, local=True, pr=None):
+        change = run.get("adopted_pr") and self.binding_change(project, run, pr, local=local)
         if change:
             self.adopted_pr_moved(project, run, *change)
         return bool(change)
@@ -1192,9 +1192,11 @@ class Coordinator:
                                    "Base changed; integration and review need renewal" if base else
                                    "PR head changed; review invalidated" if "repository or branch" in change[1]
                                    else "Changed outside coordinator; review invalidated")
-            reason = not change and current_evidence(run) and self.context_change(project, run, binding(run))
-            if change or reason:
-                self.adopted_pr_moved(project, run, *(change or ("stopped", reason)))
+            # Readiness also binds the local candidate; other stages recheck it when evidence is used.
+            change = change or (current_evidence(run) and
+                                self.binding_change(project, run, pr, local=run["stage"] == "ready"))
+            if change:
+                self.adopted_pr_moved(project, run, *change)
                 return False
         if pr["head"]["sha"] != expected:
             if self.has_effect(run, "github"):
@@ -1702,8 +1704,7 @@ class Coordinator:
             self.store.save(run, review_record=record, review_sha=run["sha"])
         self.record_review(project, run, record)
         # Movement during the review voids its evidence.
-        if run.get("adopted_pr"):
-            self.recheck_adopted(project, run)
+        self.recheck_adopted(project, run)
 
     def review_write(self, run, record):
         marker = f"{run['id']}-review-{run['round']}-{run['sha']}"
@@ -1755,9 +1756,7 @@ class Coordinator:
         # Only an actual pending rejection.
         stored = record and run.get("review_sha") == run["sha"] and run["sha"] not in run.get("rejected_shas", [])
         rejecting = stored and (record["report"]["verdict"] != "pass" or self.pending_validation_failure(run))
-        change = (failed or rejecting) and run.get("adopted_pr") and self.binding_change(project, run)
-        if change:
-            self.adopted_pr_moved(project, run, *change)
+        if (failed or rejecting) and self.recheck_adopted(project, run):
             return False
         if (failed or stored) and self.pins_changed(project, run):
             # Evidence gathered with other pins must not consume the revision budget or reject the
@@ -1819,13 +1818,10 @@ class Coordinator:
             return
         if not self.reconcile(project, run):
             return
-        def moved(pr=None):
-            change = run.get("adopted_pr") and self.binding_change(project, run, pr)
-            if change:
-                self.adopted_pr_moved(project, run, *change)
-            return change
-        # Reconcile the marked review before readiness, including reviews performed
-        # locally without a GitHub grant. A failed write must leave the PR draft.
+        moved = lambda pr=None: self.recheck_adopted(project, run, pr=pr)
+        # Drafting may call a model, so it precedes every binding check and write. The marked review,
+        # even a local-only one, is published first; a failed write leaves the PR draft.
+        ready = self.status_text(project, run, "ready", ready_forms(run))
         comment = self.review_write(run, run["review_record"])
         if moved():
             return
@@ -1843,8 +1839,7 @@ class Coordinator:
             self.store.save(run, ci_checks=changed)
         if moved():
             return
-        self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready",
-                            self.status_text(project, run, "ready", ready_forms(run)))
+        self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready", ready)
         if moved():
             return
         self.store.save(run, stage="ready", ci_checks=changed)
