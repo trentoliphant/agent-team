@@ -106,7 +106,6 @@ def pr_inheritance(project, prior, mode, number):
                         "does not reset the budget. Review mode is still available; further revision needs "
                         "an operator repair outside Agent Team")
     limit = max((limit_of(r) for r in prior), default=project["max_revisions"])
-    # A findings revision spends its round before the budget check.
     round_ = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
     if mode != "review" and round_ > limit:
         raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
@@ -128,7 +127,7 @@ class PullRequests:
         self.team = team
 
     def inspect(self, project, cwd, number):
-        """Fetch a PR head via the base repository's pull ref, which serves forks."""
+        """Fetch a PR head, even a fork's, via the base pull ref."""
         git = core.git
         base = git(cwd, "rev-parse", "HEAD")
         git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
@@ -224,7 +223,6 @@ class PullRequests:
                 "draft": bool(pr.get("draft")), "mode": mode, "findings": findings, "declared": declared,
                 "trailer_families": found["trailer_families"], "unresolved_trailers": unresolved,
                 "inherited_provenance": inherited,
-                # Provenance only, never model authorship.
                 "github_identities": {"pr_author": (pr.get("user") or {}).get("login"),
                                       "commit_authors": found["commit_authors"]},
                 "push_access": access, "adopted_at": time.time()}
@@ -388,7 +386,6 @@ class PullRequests:
         current = run["stage"] not in {"stale", "closed", "merged"} and not retirement
         currency = {"verified": False, "reason": retirement["reason"] if retirement else f"the run is {run['stage']}"}
         if current:
-            # Current only after its binding is checked again now.
             verified, why = (self.currency(project, run) if locked
                              else (None, "a coordinator worker holds the repository"))
             currency, current = {"verified": verified, "reason": why}, verified is True
@@ -402,7 +399,6 @@ class PullRequests:
         elif entries and not (latest and latest["at"] > entries[-1].get("at", 0)):
             review = reviews[-1]
         handoff = self.handoff(run, locked)
-        # Only CI observations for the current evidence apply.
         generation, pins = run.get("evidence_generation", 0), run.get("validated_companions") or []
         checks = [{"operation": c.get("operation", "checks"), "head": c["sha"], "base": c["base"],
                    "state": c["state"], "at": c.get("at"), "readiness_changed": c.get("readiness_changed", False),

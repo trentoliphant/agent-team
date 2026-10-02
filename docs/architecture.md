@@ -175,7 +175,7 @@ never truncates a patch, drops files, or raises the budget. The review record ke
 the patch format, range, sizes, SHA-256, and file and changed-line counts. When the
 compact patch is used, the reviewer prompt and the published review comment state
 that surrounding context was omitted and that the reviewer must inspect the full
-source in the checkout. PR diffs start at the merge base (`base...candidate`).
+source in the checkout.
 
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without
@@ -319,14 +319,9 @@ Discovery records a read-only proposal report; issue preparation records local
 issue drafts. Validation can enter from a remote branch or commit without an
 author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
-evidence only for a published candidate and with the content grant.
-
-`agent-team pr` creates an issue-less selected run published at the PR head;
-revise-mode rejections set `pr_followup`. Author passes need an unused
-`reserved_round`. Withheld independence records `review_withheld`, not
-`reviewed_sha`. Invalidation snapshots `evidence_invalidations` and bumps
-`evidence_generation`, which CI must match. `pr show` rechecks under the
-repository lock without saving. `pr update` and `adopt` journal `pending_swap`.
+evidence only for a published candidate and with the content grant. Existing PR
+adoption from outside the coordinator uses `agent-team pr`; withheld independence
+records `review_withheld`, and `pr update` journals `pending_swap`.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor
