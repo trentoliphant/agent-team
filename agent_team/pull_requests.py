@@ -353,7 +353,6 @@ class PullRequests:
             return self.summary(run, False)
 
     def currency(self, project, run):
-        """(True|False|None if unverifiable, reason)."""
         if run.get("in_flight") or run.get("pending_swap"):
             return None, "an operation is in progress or was interrupted"
         try:
@@ -433,7 +432,7 @@ class PullRequests:
              f"not pass (state: {(latest_check or {}).get('state')})."),
             (run["stage"] != "ready", f"Agent Team marked the PR ready for {marked[-1]['head']}; that readiness is "
              "not current." if marked else
-             "Marking the PR ready was not confirmed; resume reconciles it." if run.get("readiness_intent") else
+             "Marking the PR ready was not confirmed; resume reconciles it." if run.get("readiness_intent") == run["sha"] else
              "Readiness was not assessed; Agent Team did not change draft or readiness state."),
             (handoff, f"The revision is local only ({(handoff or {}).get('reason')}). Apply the patch or push the "
              "commit yourself; no replacement PR was created."),

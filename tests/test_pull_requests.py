@@ -330,7 +330,6 @@ class PullRequestTests(support.PullRequestFixture):
 
     def test_readoption_keeps_exhausted_budget(self):
         self.configure(max_revisions=1)
-        # Rejects the head and its revision.
         self.open_pr(reject=2)
         run = self.until_handoff(self.editing())
         self.assert_fields(run, stage="handoff", round=1)
@@ -461,7 +460,6 @@ class PullRequestTests(support.PullRequestFixture):
     def test_movement_around_readiness_never_ready(self, method, trigger, kind):
         head, run = self.readiness_run()
         if method == "run":
-            # The ready comment becomes a model draft.
             self.store.save_writing({"status": {"instructions": "Write in Spanish."}})
         key = 1 if method in {"ci", "run"} else 2
         with self.moving(self.agents if method == "run" else self.github, method, lambda: self.change(kind, run),
@@ -670,6 +668,14 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(run, stage="ready", readiness_intent=None)
         self.assertEqual((self.pull()["draft"], run["ci_checks"][-1]["readiness_changed"]), (False, True))
 
+    def test_stale_ready_intent(self):
+        run = self.readiness_run()[1]
+        self.pull()["draft"] = False
+        self.store.save(run, readiness_intent="0" * 40)
+        with self.moving(self.github, "comment", self.crash, lambda *a: "-ready" in a[2]), suppress(Interrupted):
+            self.ticks(run)
+        self.assertFalse(self.reload(run)["ci_checks"][-1]["readiness_changed"])
+
     @scenarios(*(("review", kind, grants) for kind in ("local", "dirty") for grants in ([], ["github"])),
                ("ready", "local", None), ("ready", "dirty", None))
     def test_local_change_retires_until_declared(self, when, kind, grants):
@@ -701,7 +707,6 @@ class PullRequestTests(support.PullRequestFixture):
     @scenarios(("openai", "codex", "claude"), ("anthropic", "claude", "codex"))
     def test_interrupted_adoption_keeps_explicit_roles(self, trailer, author, reviewer):
         if trailer == "openai":
-            # Rotation would pick the contributing family.
             self.store.save(self.store.create(self.project, self.github.items[0]), stage="closed")
         self.open_pr(families=[trailer])
         real = self.store.save
@@ -1142,7 +1147,6 @@ class PullRequestTests(support.PullRequestFixture):
         edited = [f"edited {n}" if n % 50 == 0 else line for n, line in enumerate(lines)]
         head = self.commit("feature", "feature", "big.txt", "\n".join(edited) + "\n", "Edit big file")
         span = f"{self.remote_head('main')}...{head}"
-        # The review patch keeps the final newline.
         default, compact = (len(git(self.remote, "diff", *options, span)) + 1 for options in ([], ["--unified=0"]))
         with patch("agent_team.patches.REVIEW_BUDGET", compact if compact_fits else compact - 1):
             run = self.tick_raising(self.adopt_pr(), 3)

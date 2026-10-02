@@ -1582,7 +1582,6 @@ class Coordinator:
                         **self.queue_writes(run, *writes))
 
     def compatible_validation(self, project, run, attempted=False):
-        """Check (failed, if `attempted`) validation still matches."""
         if not run.get("selection"):
             return
         # Before the context check, so a verdict gathered with other pins is kept as superseded history.
@@ -1677,7 +1676,6 @@ class Coordinator:
         self.store.save(run, stage=self.successor(run, "publish", "review"))
 
     def pushed(self, run, sha):
-        """Save a pushed commit and queue its writes."""
         info, new = run["adopted_pr"], dict(run, sha=sha, published_sha=sha)
         done = bool(run.get("review_record")) and run.get("review_sha") == sha and sha in {
             run.get("reviewed_sha"), (run.get("review_withheld") or {}).get("sha")}
@@ -1881,11 +1879,10 @@ class Coordinator:
         if moved(pr):
             return
         changed = run["ci_checks"][:-1] + [dict(run["ci_checks"][-1], readiness_changed=True)]
-        # Journal intent; record the change once confirmed.
         if pr.get("draft"):
             self.store.save(run, readiness_intent=run["sha"])
             self.github.mark_ready(project["repo"], run["pr"])
-        if run.get("readiness_intent"):
+        if run.get("readiness_intent") == run["sha"]:
             self.store.save(run, ci_checks=changed, readiness_intent=None)
         if moved():
             return

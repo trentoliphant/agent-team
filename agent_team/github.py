@@ -128,7 +128,6 @@ class GitHub:
         })
 
     def pr(self, repo, number):
-        """Base `sha` is live; `snapshot_sha` is GitHub's, kept for closed PRs."""
         pr = self.api(f"repos/{repo}/pulls/{number}")
         live = pr["base"]["sha"]
         if pr.get("state") == "open" and not pr.get("merged"):
@@ -137,7 +136,6 @@ class GitHub:
         return pr
 
     def push_access(self, project, pr):
-        """Can we push the actual head? Forks need fork write, or maintainer edits and base write."""
         head = (pr["head"].get("repo") or {}).get("full_name")
         if not head:
             return {"allowed": False, "reason": "the head repository is unavailable"}
