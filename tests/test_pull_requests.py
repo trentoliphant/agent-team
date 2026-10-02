@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.cli import parser
-from agent_team.coordinator import Coordinator, pull_number, review_comment
+from agent_team.coordinator import LOCAL_CHANGE, Coordinator, pull_number, review_comment
 from agent_team.github import GitHub
 from agent_team.patches import COMPACT_NOTICE
 from agent_team.process import git, TeamError
@@ -743,6 +743,8 @@ class PullRequestTests(unittest.TestCase):
             result = self.local_git(cwd, *args)
             if "push" in args:
                 self.assertFalse(any(str(a).startswith("+") or a == "--force" for a in args))
+                # The validated commit is pushed by name, never HEAD.
+                self.assertIn(f"{run['sha']}:refs/heads/feature", args)
                 raise TeamError("Simulated lost push response")
             return result
 
@@ -753,6 +755,75 @@ class PullRequestTests(unittest.TestCase):
         run = self.ticks(run, 2)
         self.assert_fields(run, stage="stopped", reviewed_sha=run["sha"], pending_push_sha=None)
         self.assertEqual(self.remote_head(), run["sha"])
+
+    def test_head_advanced_during_permission_lookup_is_never_pushed(self):
+        run = self.at_publish()
+        head, real = self.remote_head(), self.github.push_access
+
+        def advancing(project, pr):
+            self.local_commit(run)
+            return real(project, pr)
+
+        with patch.object(self.github, "push_access", side_effect=advancing):
+            run = self.ticks(run, 1)
+        self.assert_fields(run, stage="stopped", next_stage="validate", validated_sha=None, pending_push_sha=None)
+        self.assertEqual((self.remote_head(), run["adopted_pr"].get("pushed", [])), (head, []))
+        self.assertTrue(run["pending_contribution"])
+        self.assertIn(LOCAL_CHANGE, run["evidence_invalidations"][-1]["reason"])
+
+    def test_local_change_during_review_retires_evidence_until_contributors_are_declared(self):
+        for kind, grants in self.scenarios(("commit", []), ("commit", ["github"]), ("dirty", []), ("dirty", ["github"])):
+            head = self.open_pr()
+            run = self.reviewed(count=2, grants=grants)
+            baseline = run["evidence_context"]
+            move = ((lambda: self.local_commit(run)) if kind == "commit" else
+                    lambda: (self.store.workspace(run) / "local.txt").write_text("operator edit\n"))
+            run = self.tick_moving_during_review(run, move)
+            # The review is never published; the prior baseline is kept for contributor checks.
+            self.assert_fields(run, stage="stopped", next_stage="validate", reviewed_sha=None, validated_sha=None,
+                               outbox=[], evidence_context=baseline)
+            self.assertTrue(run["pending_contribution"])
+            self.assert_quiet()
+            self.assert_retired(self.report(run), head, run["base_sha"], LOCAL_CHANGE, reviewed=head)
+            self.refuses("contributor declarations", self.select, run, ["validate", "review"])
+            if kind == "commit":
+                run = self.ticks(self.select(run, ["validate", "review"], contributors=["human"]), 2)
+                self.assert_fields(run, stage="stopped", reviewed_sha=self.head_of(self.store.workspace(run)))
+                self.assertNotEqual(run["reviewed_sha"], head)
+
+    def test_interrupted_adoption_keeps_explicit_roles(self):
+        for trailer, author, reviewer in self.scenarios(("openai", "codex", "claude"), ("anthropic", "claude", "codex")):
+            if trailer == "openai":
+                # Advance the rotation so it would assign the contributing family as reviewer.
+                self.store.save(self.store.create(self.project, self.github.items[0]), stage="closed")
+            self.open_pr(message=f"Add feature\n\nAgent-Family: {trailer}")
+            real = self.store.save
+
+            def crash(record, **changes):
+                if "branch" in changes:
+                    raise TeamError("Interrupted")
+                real(record, **changes)
+
+            with patch.object(self.store, "save", side_effect=crash):
+                self.refuses("Interrupted", self.adopt_pr)
+            run = next(r for r in self.store.runs() if r.get("adopted_pr"))
+            self.assert_fields(run, author=author, reviewer=reviewer)
+            self.assertTrue(run["independence"]["established"])
+
+    def test_validation_reports_commands_omitted_after_early_failure(self):
+        self.store.update_project("demo", tests=["false", "true", "echo skipped"])
+        head = self.open_pr()
+        run = self.reviewed(grants=["github"])
+        self.assert_fields(run, stage="stopped", next_stage="implement")
+        report = self.report(run)
+        checks = report["validation"]["checks"]
+        self.assertEqual([(c["command"], c["performed"], c.get("exit_code")) for c in checks],
+                         [("false", True, 1), ("true", False, None), ("echo skipped", False, None)])
+        self.assertEqual(report["review"]["validation_checks"], checks)
+        self.assert_limited(report, "omitted after an earlier failure: true, echo skipped")
+        body = self.github.comments[self.marker(run, head)]
+        self.assertEqual(body.count("omitted after an earlier failure"), 2)
+        self.assertIn("exit 1", body)
 
     def test_queued_review_comment_is_retried_or_withheld_after_changes(self):
         reasons = {"configuration": "Validation configuration changed", "pins": "Companion pins changed"}

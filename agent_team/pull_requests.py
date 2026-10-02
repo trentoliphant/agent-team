@@ -76,7 +76,8 @@ def historical_evidence(entry):
             "verdict": record["report"]["verdict"] if record else None,
             "review": review_report(record, evidence.get("review_sha"), entry["base"], False) if record else None,
             "independent_review_success": bool(evidence.get("reviewed_sha")),
-            "validation_failed": "validation_failure" in evidence, "tests": evidence.get("tests", [])}
+            "validation_failed": "validation_failure" in evidence, "tests": evidence.get("tests", []),
+            "validation_checks": core.validation_checks(evidence.get("tests", []), evidence.get("validation_plan"))}
 
 
 def rejected_review(entry, current):
@@ -87,7 +88,8 @@ def rejected_review(entry, current):
             "verdict": report["verdict"], "summary": report["summary"], "reviewer": entry.get("review"),
             "findings": report["findings"], "candidate_verdict": "changes_requested",
             "candidate_findings": entry["findings"], "candidate_feedback": entry["feedback"],
-            "validation_failed": bool(entry.get("validation_failed"))}
+            "validation_failed": bool(entry.get("validation_failed")),
+            "validation_checks": core.validation_checks(entry["tests"], entry.get("validation_plan"))}
 
 
 def pr_roles(families, reviewer):
@@ -245,7 +247,9 @@ class PullRequests:
         if findings:
             body += "\nOperator-supplied findings:\n" + listed + "\n"
         issue = {"number": None, "title": f"PR #{number}: {pr['title']}"[:150], "body": body}
+        # Explicit roles are saved by the creating transaction, never left to rotation.
         run = team.store.create(project, issue, dict(
+            **dict(zip(("author", "reviewer"), roles or ())),
             selection=True, operations=operations, stop_after=operations[-1], grants=grants, effect_plan=effects,
             requested_operations=["prepare"] + operations,
             omitted_operations=[op for op in core.ENTRY_POINTS if op not in operations],
@@ -267,8 +271,7 @@ class PullRequests:
             pr_followup=followup if mode == "revise" else None, needs_revision=mode == "findings",
             feedback=("Operator-supplied findings to address; no coordinator review has verified them:\n"
                       + listed) if findings else ""))
-        assigned = dict(zip(("author", "reviewer"), roles or ()))
-        team.store.save(run, branch=f"agent-team/pr-{number}-{run['id']}", **assigned)
+        team.store.save(run, branch=f"agent-team/pr-{number}-{run['id']}")
         return run
 
     def update(self, run_id, contributors):
@@ -433,6 +436,8 @@ class PullRequests:
         latest_check = next((c for c in reversed(checks) if c["current"]), None)
         marked = [c for c in checks if c["readiness_changed"]]
         unpublished = run.get("unpublished_evidence", [])
+        plan = core.validation_checks(run.get("tests", []), run.get("validation_plan")) if current else []
+        omitted = [c["command"] for c in plan if not c["performed"]]
         limitations = [text for applies, text in (
             (currency["verified"] is None, f"Evidence currency was not verified ({currency['reason']}); recorded "
              "results are reported as not current. Run pr show again when no worker is active."),
@@ -441,6 +446,7 @@ class PullRequests:
              "historical and do not apply to the current PR."),
             (run.get("validated_sha") != sha or not current,
              "Configured validation has not passed for the current candidate."),
+            (omitted, f"Configured validation commands omitted after an earlier failure: {', '.join(omitted)}."),
             (not info["base_contained"], f"The head does not contain base {info['base_sha']}; the base was not "
              "merged, so validation and review reflect the head as-is."),
             (reason, f"Independent-review success withheld: {reason}."),
@@ -473,7 +479,8 @@ class PullRequests:
                           "reviewer": agent(run["reviewer"])},
                 "independence": run.get("independence"), "current_evidence": current, "currency": currency,
                 "validation": {"passed_for_candidate": current and run.get("validated_sha") == sha,
-                               "results": run.get("tests", []) if current else [], "companions": pins},
+                               "results": run.get("tests", []) if current else [], "checks": plan,
+                               "companions": pins},
                 "review": review, "review_history": reviews,
                 "independent_review_success": bool(current and run.get("reviewed_sha") == sha and not reason),
                 "historical_evidence": historical, "ci_checks": checks or "not checked", "current_ci": latest_check,
