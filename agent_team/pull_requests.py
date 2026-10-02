@@ -381,22 +381,14 @@ class PullRequests:
             return self.summary(run, False)
 
     def currency(self, project, run):
-        """Whether recorded evidence still names the PR head and identity, base, configuration, pins, and local
-        candidate: (True, None), (False, reason), or (None, reason) when that cannot be verified. Never saves."""
+        """(True, None) if the complete binding holds, (False, reason) if not, (None, reason) if unverifiable."""
         if run.get("in_flight") or run.get("pending_swap"):
             return None, "an operation is in progress or was interrupted"
         try:
-            change = self.team.evidence_change(project, run, core.binding(run))
-            if change:
-                return False, change[1]
-            failed = (run.get("validation_failure") or {}).get("sha") == run["sha"]
-            expected = (run.get("validated_context") if run.get("validated_sha") == run["sha"]
-                        else run.get("attempted_context") if failed else None)
-            if expected and self.team.evidence_context(project, run) != expected:
-                return False, "the local candidate or its inputs changed"
+            change = self.team.binding_change(project, run)
         except (TeamError, OSError, KeyError) as exc:
             return None, f"verification failed: {exc}"
-        return True, None
+        return (False, change[1]) if change else (True, None)
 
     def handoff(self, run, locked):
         """A validated local revision that was not pushed, as a commit and patch; never a replacement PR."""
@@ -440,11 +432,13 @@ class PullRequests:
         # A review retired after the PR moved stays the latest report, marked as not current.
         latest = next((h for h in reversed(historical) if h["review"]), None)
         review = latest and latest["review"]
+        # Every rejecting reviewer report stays readable, whatever validation or review followed it.
+        entries = [e for e in history if e["kind"] == "review"]
+        reviews = [rejected_review(e, current and e["sha"] == sha and e.get("base") == run["base_sha"]) for e in entries]
         if run.get("review_record") and run.get("review_sha") == sha:
             review = review_report(run["review_record"], sha, run["base_sha"], current)
-        elif history and history[-1]["kind"] == "review" and not (latest and latest["at"] > history[-1].get("at", 0)):
-            entry = history[-1]
-            review = rejected_review(entry, current and entry["sha"] == sha and entry.get("base") == run["base_sha"])
+        elif entries and not (latest and latest["at"] > entries[-1].get("at", 0)):
+            review = reviews[-1]
         handoff = self.handoff(run, locked)
         # Only CI observations for the current candidate, base, pins, and evidence generation apply: any
         # invalidation starts a new generation, so later validation never makes earlier observations current.
@@ -499,7 +493,7 @@ class PullRequests:
                 "independence": run.get("independence"), "current_evidence": current, "currency": currency,
                 "validation": {"passed_for_candidate": current and run.get("validated_sha") == sha,
                                "results": run.get("tests", []) if current else [], "companions": pins},
-                "review": review,
+                "review": review, "review_history": reviews,
                 "independent_review_success": bool(current and run.get("reviewed_sha") == sha and not reason),
                 "historical_evidence": historical, "ci_checks": checks or "not checked", "current_ci": latest_check,
                 "push": run.get("push_access") or info["push_access"], "local_handoff": handoff,

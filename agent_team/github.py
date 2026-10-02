@@ -1,6 +1,6 @@
 """GitHub operations owned by the coordinator, never an agent's response text."""
 import json
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from .process import execute, TeamError
 from .state import issue_fingerprint
@@ -128,7 +128,11 @@ class GitHub:
         })
 
     def pr(self, repo, number):
-        return self.api(f"repos/{repo}/pulls/{number}")
+        """Base `sha` is the live base branch; GitHub's possibly frozen one is `snapshot_sha`."""
+        pr = self.api(f"repos/{repo}/pulls/{number}")
+        live = self.api(f"repos/{repo}/git/ref/heads/{quote(pr['base']['ref'])}")["object"]["sha"]
+        pr["base"] = dict(pr["base"], snapshot_sha=pr["base"]["sha"], sha=live)
+        return pr
 
     def push_access(self, project, pr):
         """Whether the coordinator's identity can push to the PR's actual head branch. Fork heads

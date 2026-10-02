@@ -33,16 +33,24 @@ class PullGitHub(FakeGitHub):
         self.permissions = {}
 
     def pr(self, repo, number):
-        if number not in self.pulls:
-            return super().pr(repo, number)
+        return GitHub.pr(self, repo, number) if number in self.pulls else super().pr(repo, number)
+
+    def api(self, endpoint):
+        """GitHub's PR payload, whose base SHA stays frozen at opening (as observed for PR #17)."""
+        if "/git/ref/heads/" in endpoint:
+            return {"object": {"sha": self.sha(endpoint.split("/git/ref/", 1)[1])}}
+        number = int(endpoint.rsplit("/", 1)[1])
         p = self.pulls[number]
         return {"number": number, "title": p["title"], "body": p["body"], "state": p["state"],
                 "merged": p["merged"], "draft": p["draft"], "user": {"login": p["user"]},
                 "html_url": f"https://github.com/example/demo/pull/{number}",
                 "maintainer_can_modify": p["maintainer_can_modify"],
-                "head": {"sha": git(self.remote, "rev-parse", f"refs/heads/{p['branch']}"), "ref": p["branch"],
+                "head": {"sha": self.sha(f"heads/{p['branch']}"), "ref": p["branch"],
                          "repo": {"full_name": p["head_repo"]}},
-                "base": {"ref": p["base"], "sha": git(self.remote, "rev-parse", f"refs/heads/{p['base']}")}}
+                "base": {"ref": p["base"], "sha": p["frozen_base"]}}
+
+    def sha(self, ref):
+        return git(self.remote, "rev-parse", f"refs/{ref}")
 
     def repo(self, name):
         return {"full_name": name, "permissions": {"push": self.permissions.get(name, False)}}
@@ -103,7 +111,7 @@ class PullRequestTests(unittest.TestCase):
                 user="octocat", maintainer_can_modify=False):
         self.github.pulls[number] = {"title": "Existing feature", "body": "Human description", "state": "open",
                                      "merged": False, "draft": True, "user": user, "branch": branch,
-                                     "head_repo": head_repo, "base": base,
+                                     "head_repo": head_repo, "base": base, "frozen_base": self.remote_head(base),
                                      "maintainer_can_modify": maintainer_can_modify}
         # The branch name keeps heads of different PRs distinct, so no PR shares another's rejected commit.
         return self.commit(branch, base, "feature.txt", f"external feature {branch}\n", message)
@@ -166,7 +174,6 @@ class PullRequestTests(unittest.TestCase):
         return self.ticks(self.adopt_pr("review", number, contributors, **options), count)
 
     def stopped_review(self, **options):
-        """PR #7 reviewed to a stop with passing evidence for its head."""
         head = self.open_pr()
         run = self.reviewed(**options)
         self.assert_fields(run, stage="stopped", reviewed_sha=head)
@@ -203,7 +210,6 @@ class PullRequestTests(unittest.TestCase):
         return run
 
     def tick_raising(self, run, count=1):
-        """Ticks that may raise; returns the stored run."""
         try:
             return self.ticks(run, count)
         except TeamError:
@@ -271,23 +277,19 @@ class PullRequestTests(unittest.TestCase):
         return [role for _, role in self.agents.calls]
 
     def revised_calls(self, run):
-        """Review of the existing head, one revision, and review of the exact result."""
         return [(run["reviewer"], "review"), (run["author"], "implement"), (run["reviewer"], "review")]
 
     def marker(self, run, head, number=7, round_=0):
         return number, f"{run['id']}-review-{round_}-{head}"
 
     def assert_fields(self, record, **expected):
-        """Each named field of `record` has its expected value."""
         self.assertEqual({k: record.get(k) for k in expected}, expected)
 
     def assert_limited(self, report, *texts):
-        """Each text appears in a reported limitation."""
         for text in texts:
             self.assertTrue(any(text in item for item in report["limitations"]), text)
 
     def assert_quiet(self):
-        """No GitHub comment or status was written."""
         self.assertEqual((self.github.comments, self.github.statuses), ({}, []))
 
     def assert_no_success(self):
@@ -405,6 +407,10 @@ class PullRequestTests(unittest.TestCase):
                       self.github.status_descriptions)
         self.assert_no_success()
         self.assertIn(self.marker(run, run["sha"], round_=1), self.github.comments)
+        # The passing review is current; the rejected head's complete report stays in the history.
+        report = self.report(run)
+        self.assert_review(report["review"], run["sha"], True)
+        self.assert_review(report["review_history"][0], head, False, "changes_requested", run["base_sha"], run["reviewer"])
 
     def test_fork_pushes_only_with_maintainer_edits_and_otherwise_hands_off_locally(self):
         for editable in self.scenarios(True, False):
@@ -690,6 +696,8 @@ class PullRequestTests(unittest.TestCase):
         old = self.remote_head("main")
         head, run = self.stopped_review()
         base = self.advance_base()
+        # GitHub's PR payload still names the old base; the live base branch is what counts.
+        self.assertEqual(self.github.pr(None, 7)["base"]["snapshot_sha"], old)
         run = self.ticks(run, 1)
         self.assert_fields(run, stage="stale", reviewed_sha=None, review_record=None)
         self.assertIn("never merged implicitly", run["error"])
@@ -700,6 +708,9 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(self.remote_head(), head)
         self.assertFalse(run["adopted_pr"]["base_contained"])
         self.assert_limited(self.report(run), "base was not merged")
+        run = self.ticks(self.select(run, ["validate", "review"]), 2)
+        self.assert_fields(run, stage="stopped", reviewed_sha=head, base_sha=base)
+        self.assertTrue(self.report(run)["current_evidence"])
 
     def test_head_moved_before_publication_is_never_overwritten(self):
         run = self.at_publish()
@@ -840,6 +851,40 @@ class PullRequestTests(unittest.TestCase):
         historical = self.assert_retired(report, head, base, DELIBERATE, reviewed=head)
         self.assert_review(historical["review"], head, False, agent=run["reviewer"])
         self.assert_review(report["review"], head, False)
+
+    def test_persisted_rejection_with_changed_inputs_is_retired_on_recovery(self):
+        # A crash between saving a rejecting verdict and recording it; then an input changes.
+        for change, entry in self.scenarios(*((c, "update") for c in ("head", "base", "identity", "configuration",
+                                                                     "local")), ("local", "resume")):
+            head = self.open_pr()
+            self.agents.reject = True
+            run = self.ticks(self.adopt_pr("revise", grants=["edit"]), 2)
+            with patch.object(self.team, "record_review", side_effect=TeamError("Interrupted")):
+                run = self.ticks(run, 1)
+            self.assert_fields(run, stage="blocked", review_sha=head)
+            self.change(change, run)
+            try:
+                self.update(run) if entry == "update" else self.ticks(self.team.resume(run["id"]), 1)
+            except TeamError:
+                pass
+            run = self.store.get(run["id"])
+            self.assert_fields(run, round=0, review_record=None, needs_revision=False, revision_history=None)
+            self.assertEqual((run.get("rejected_shas", []), self.roles()), ([], ["review"]))
+            self.assertEqual([(h["head"], h["verdict"]) for h in self.report(run)["historical_evidence"]
+                              if h["review"]], [(head, "changes_requested")])
+            if change in {"head", "base"}:
+                self.assert_fields(run, stage="stopped", next_stage="validate")
+
+    def test_review_history_keeps_a_rejection_followed_by_validation_failure(self):
+        self.store.update_project("demo", max_revisions=1, tests=["! grep -q fixed feature.txt"])
+        head = self.open_pr()
+        self.agents.reject = 1
+        run = self.until_handoff(self.adopt_pr("revise", grants=["edit"]))
+        self.assertEqual([e["kind"] for e in run["revision_history"]], ["review", "validation"])
+        report = self.report(run)
+        for review in (report["review"], *report["review_history"]):
+            self.assert_review(review, head, False, "changes_requested", run["base_sha"], run["reviewer"])
+            self.assert_fields(review, candidate_verdict="changes_requested", validation_failed=False)
 
     def test_local_continuation_and_validation_drift_keep_complete_prior_evidence(self):
         head, run = self.stopped_review()

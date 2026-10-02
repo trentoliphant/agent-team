@@ -717,7 +717,7 @@ agent-team select example --run RUN_ID --operations validate review
 ```
 
 A later selection does only what it names; a rejection stops it. `pr show`
-reports validation, verdict, findings, roles, authorship, push access, checks
+reports validation, every review's verdict and findings, roles, authorship, push access, checks
 run or omitted, and evidence `currency`. A standalone review skips CI and is not
 readiness, which needs `--operations ci --grant readiness`, independent review
 of the published head, and current CI. No `pr` command reopens, retargets,
@@ -727,7 +727,7 @@ Declare every contributor (`human`, `openai`, `anthropic`, `unknown`); usernames
 imply no family. With `unknown`, both families, or an unsupported trailer,
 independent-review success is withheld and revision refused.
 
-One open run per PR. Input changes retire evidence; head or base movement stops
+One open run per PR. Input changes retire evidence; head or live base-branch movement stops
 the run as `stale` until `pr update` adopts it. Pushes are fast-forward only.
 Re-adoption keeps the budget; past the limit only review is allowed. Fork pushes
 need head write access, or maintainer edits plus base write access; otherwise

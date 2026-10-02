@@ -554,6 +554,16 @@ class Coordinator:
         reason = None if change else self.context_change(project, run, context)
         return change or (("stopped", reason) if reason else None)
 
+    def binding_change(self, project, run):
+        """`evidence_change` for the run's complete binding, including its local candidate inputs. Never saves."""
+        change = self.evidence_change(project, run, binding(run))
+        failed = (run.get("validation_failure") or {}).get("sha") == run["sha"]
+        expected = (run.get("validated_context") if run.get("validated_sha") == run["sha"]
+                    else run.get("attempted_context") if failed else None)
+        if not change and (expected or {}).get("head") == run["sha"] and self.evidence_context(project, run) != expected:
+            change = "stopped", "the local candidate or its inputs changed"
+        return change
+
     def bound(self, run, item):
         """Bind a candidate-dependent GitHub write of an adopted PR to its exact evidence context."""
         return dict(item, evidence=run["sha"], context=binding(run)) if run.get("adopted_pr") else item
@@ -1693,8 +1703,11 @@ class Coordinator:
         return dict(record, companions=pins) if pins else record
 
     def review(self, project, run):
-        if self.finalize_rejection(project, run):
+        if self.finalize_rejection(project, run) or run["stage"] in {"closed", "merged"}:
             return
+        if run["stage"] != "review":
+            # Changed inputs retired the saved verdict; re-entry stays explicit.
+            raise ReentryRequired(run.get("error") or run["partial_result"], run["stage"] == "stale")
         # An adopted PR's existing head is reviewed even when it failed validation.
         attempted = self.review_first(run) and self.pending_validation_failure(run)
         self.compatible_validation(project, run, attempted)
@@ -1772,6 +1785,11 @@ class Coordinator:
         pending = failed or (
             run.get("review_record") and run.get("review_sha") == run["sha"]
             and run["sha"] not in run.get("rejected_shas", []))
+        change = pending and run.get("adopted_pr") and self.binding_change(project, run)
+        if change:
+            # Evidence for changed inputs becomes history: no round is consumed and no repair starts.
+            self.adopted_pr_moved(project, run, *change)
+            return False
         if pending and self.pins_changed(project, run):
             # Evidence gathered with other pins must not consume the revision budget or reject the
             # commit; it is kept as history, and the caller's transition requires new validation and review.
