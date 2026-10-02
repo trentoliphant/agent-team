@@ -128,8 +128,7 @@ class GitHub:
         })
 
     def pr(self, repo, number):
-        """Base `sha` is the live base branch; GitHub's possibly frozen one is `snapshot_sha`. A closed or
-        merged PR keeps the snapshot, so a deleted base branch never blocks its explicit handling."""
+        """Base `sha` is live; `snapshot_sha` is GitHub's, kept for closed PRs."""
         pr = self.api(f"repos/{repo}/pulls/{number}")
         live = pr["base"]["sha"]
         if pr.get("state") == "open" and not pr.get("merged"):
@@ -138,17 +137,19 @@ class GitHub:
         return pr
 
     def push_access(self, project, pr):
-        """Whether the coordinator's identity can push to the PR's actual head branch. Fork heads
-        need write access to the fork, or maintainer edits enabled plus write access to the base."""
+        """Can we push the actual head? Forks need fork write, or maintainer edits and base write."""
         head = (pr["head"].get("repo") or {}).get("full_name")
         if not head:
             return {"allowed": False, "reason": "the head repository is unavailable"}
-        if (self.repo(head).get("permissions") or {}).get("push"):
-            return {"allowed": True, "reason": f"write access to {head}"}
-        if head.casefold() == project["repo"].casefold():
-            return {"allowed": False, "reason": f"no write access to {head}"}
-        if pr.get("maintainer_can_modify") and (self.repo(project["repo"]).get("permissions") or {}).get("push"):
-            return {"allowed": True, "reason": f"maintainer edits allowed on fork {head}"}
+        try:
+            if (self.repo(head).get("permissions") or {}).get("push"):
+                return {"allowed": True, "reason": f"write access to {head}"}
+            if head.casefold() == project["repo"].casefold():
+                return {"allowed": False, "reason": f"no write access to {head}"}
+            if pr.get("maintainer_can_modify") and (self.repo(project["repo"]).get("permissions") or {}).get("push"):
+                return {"allowed": True, "reason": f"maintainer edits allowed on fork {head}"}
+        except TeamError as error:
+            return {"allowed": False, "reason": f"write access to {head} could not be verified ({error})"}
         return {"allowed": False, "reason": f"no write access to fork {head} and maintainer edits are not available"}
 
     def mark_ready(self, repo, number):

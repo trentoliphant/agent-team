@@ -433,6 +433,7 @@ class PullRequests:
              f"not pass (state: {(latest_check or {}).get('state')})."),
             (run["stage"] != "ready", f"Agent Team marked the PR ready for {marked[-1]['head']}; that readiness is "
              "not current." if marked else
+             "Marking the PR ready was not confirmed; resume reconciles it." if run.get("readiness_intent") else
              "Readiness was not assessed; Agent Team did not change draft or readiness state."),
             (handoff, f"The revision is local only ({(handoff or {}).get('reason')}). Apply the patch or push the "
              "commit yourself; no replacement PR was created."),

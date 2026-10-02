@@ -106,7 +106,6 @@ def parser():
     selection.add_argument("--task", help="Explicit immutable task scope and acceptance criteria")
     selection.add_argument("--ref", help="Existing remote branch or exact commit")
     selection.add_argument("--run", dest="run_id", help="Continue compatible tracked evidence")
-    # `unknown` is accepted only for runs that track an existing PR; the coordinator checks the run.
     selection.add_argument("--contributor", action="append", choices=PR_CONTRIBUTORS, default=[])
     selection.add_argument("--plan", action="store_true", help="Show operations and effects without saving or executing")
     queue = commands.add_parser("queue", help="Inspect or save a project's implementation order").add_subparsers(

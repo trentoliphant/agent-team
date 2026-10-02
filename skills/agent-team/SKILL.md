@@ -292,11 +292,10 @@ agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
 agent-team pr findings example 42 --contributor human --grant edit --grant push --grant github \
   --finding 'parser.py:88 drops the last field; keep it and add a test'
 agent-team pr update RUN_ID --contributor human
-agent-team select example --run RUN_ID --operations validate review
-agent-team run example --run RUN_ID --watch
 agent-team pr show RUN_ID
 ```
 
 Declare contributors truthfully, never from usernames. Report `pr show`; a
 review is not readiness. Inspect `stale` changes before `pr update`. Never open
 a replacement PR, force-push, merge, reopen, retarget, or change draft state.
+Unknown or mixed authorship withholds independent success.

@@ -1,5 +1,5 @@
 """Existing-PR adoption, offline."""
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -120,14 +120,17 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual(run["stage"], "repair")
         return run
 
-    def swap_fixture(self, updating):
+    def interrupted_swap(self, updating, point):
         if updating:
             head, run = self.stopped_review()
             external = self.push_external()
             self.assertEqual(self.ticks(run)["stage"], "stale")
-            return run, head, external, lambda: self.update(run)
-        run = self.repair_handoff()
-        return run, run["sha"], self.push_external(message="Repair"), lambda: self.adopt_repair(run)
+            recover = lambda: self.update(run)
+        else:
+            run = self.repair_handoff()
+            head, external, recover = run["sha"], self.push_external(message="Repair"), lambda: self.adopt_repair(run)
+        self.interrupt(point, recover)
+        return run, head, external, recover
 
     def marker(self, run, head, round_=0):
         return 7, f"{run['id']}-review-{round_}-{head}"
@@ -252,12 +255,14 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_review(report["review"], run["sha"], True)
         self.assert_review(report["review_history"][0], head, False, "changes_requested", run["base_sha"], run["reviewer"])
 
-    @scenarios(True, False)
+    @scenarios(True, False, None)
     def test_fork_push_or_local_handoff(self, editable):
         head = self.open_pr(8, "fork-feature", head_repo=FORK, maintainer_can_modify=editable)
         self.github.permissions["example/demo"] = editable
+        if editable is None:
+            self.github.repo = unavailable
         plan = self.adopt_pr("revise", "8", grants=ALL, plan_only=True)
-        self.assertEqual((plan["push"]["allowed"], self.store.runs()), (editable, []))
+        self.assertEqual((plan["push"]["allowed"], self.store.runs()), (bool(editable), []))
         self.assertIn("maintainer edits" if editable else FORK, plan["push"]["reason"])
         if editable:
             self.assertIn("publish", plan["revision_operations"])
@@ -273,6 +278,7 @@ class PullRequestTests(support.PullRequestFixture):
         handoff = self.report(run)["local_handoff"]
         self.assert_fields(handoff, commit=run["sha"], builds_on=head, replacement_pr="not created")
         self.assertIn(FORK, handoff["reason"])
+        self.assertIn("not be verified" if editable is None else "", handoff["reason"])
         self.assertIn("fixed", Path(handoff["patch"]).read_text())
         self.refuses("published PR head", self.select, run, ["ci"], READY)
         self.store.save(run, stage="ci", grants=READY, operations=["ci"], stop_after="ci")
@@ -397,6 +403,10 @@ class PullRequestTests(support.PullRequestFixture):
         cwd = self.store.workspace(run)
         self.assertEqual((self.head_of(cwd), git(cwd, "status", "--porcelain"), self.remote_head(branch)),
                          (head, "", head))
+        self.change("dirty", run)
+        self.store.save(run, stage="validate", evidence_context=self.team.evidence_context(self.store.project("demo"), run))
+        self.assertRegex(self.tick_raising(run)["error"], message)
+        self.assertEqual((self.head_of(cwd), self.remote_head(branch)), (head, head))
 
     @scenarios("success", "pending")
     def test_readiness_records_ci_states(self, state):
@@ -498,7 +508,7 @@ class PullRequestTests(support.PullRequestFixture):
                          ([], repair, repair, [head]))
         self.assert_fields(run, stage="stopped" if kind == "configuration" else "stale", validated_sha=None)
 
-    @scenarios("head", "base", "identity", "configuration", "pins", "local", "worker", "ready")
+    @scenarios(*MOVES, "pins", "local", "worker", "ready")
     def test_pr_show_verifies_binding(self, change):
         if change == "ready":
             head, run = self.readiness_run()
@@ -632,14 +642,33 @@ class PullRequestTests(support.PullRequestFixture):
                           for e in authorship["subsequent"]], [("external_repair", external, ["human"], [family], True),
                                                                ("local_commit", local, ["unknown"], [], True)])
 
-    def test_permission_lookup_movement_not_pushed(self):
+    @scenarios(True, False)
+    def test_permission_lookup_movement_not_pushed(self, moved):
         run = self.at_publish()
         head = self.remote_head()
-        with self.moving(self.github, "push_access", lambda: self.local_commit(run)):
-            run = self.ticks(run)
-        self.assert_awaiting(run, validated_sha=None, pending_push_sha=None)
+        with self.moving(self.github, "push_access", lambda: self.local_commit(run)) if moved else \
+                patch.object(self.github, "repo", side_effect=unavailable):
+            run = self.ticks(run, 2 - moved)
         self.assertEqual((self.remote_head(), run["adopted_pr"].get("pushed", [])), (head, []))
-        self.assert_local_pending(run)
+        if moved:
+            self.assert_awaiting(run, validated_sha=None, pending_push_sha=None)
+            return self.assert_local_pending(run)
+        self.assert_reviewed(run, run["sha"], published_sha=head)
+        self.assertIn("could not be verified", self.report(run)["local_handoff"]["reason"])
+
+    @scenarios("failed", "intent", "lost")
+    def test_readiness_change_needs_confirmation(self, case):
+        head, run = self.readiness_run()
+        with self.moving(self.github, "mark_ready", unavailable if case == "failed" else self.crash,
+                         after=case == "lost"), suppress(Interrupted):
+            self.ticks(run)
+        run = self.reload(run)
+        self.assertEqual((self.pull()["draft"], run["ci_checks"][-1]["readiness_changed"], run["readiness_intent"]),
+                         (case != "lost", False, head))
+        self.assert_limited(self.report(run), "ready was not confirmed")
+        run = self.ticks(self.team.resume(self.ticks(run)["id"]))
+        self.assert_fields(run, stage="ready", readiness_intent=None)
+        self.assertEqual((self.pull()["draft"], run["ci_checks"][-1]["readiness_changed"]), (False, True))
 
     @scenarios(*(("review", kind, grants) for kind in ("local", "dirty") for grants in ([], ["github"])),
                ("ready", "local", None), ("ready", "dirty", None))
@@ -801,20 +830,6 @@ class PullRequestTests(support.PullRequestFixture):
             self.agents.reject = False
             self.assert_reviewed(self.revalidate(run), head)
 
-    @scenarios(*((updating, point) for updating in (True, False) for point in INTERRUPTIONS))
-    def test_close_refuses_interrupted_swap(self, updating, point):
-        run, _, external, recover = self.swap_fixture(updating)
-        self.interrupt(point, recover)
-        stage = self.reload(run)["stage"]
-        self.refuses("interrupted", self.command, "close", run["id"])
-        self.assertEqual(self.reload(run)["stage"], stage)
-        if point == "rename-2":
-            self.store.save(self.reload(run), stage="closed")
-        run = recover()
-        self.assert_fields(run, pending_swap=None, sha=external, stage="closed" if point == "rename-2" else "stopped")
-        self.command("close", run["id"])
-        self.assert_fields(self.reload(run), stage="closed", pending_swap=None)
-
     @scenarios("failed", "crash", "moved")
     def test_post_push_status_survives(self, case):
         run = self.at_publish()
@@ -851,8 +866,7 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertIn(PUSHED, descriptions)
         self.assertNotEqual(descriptions[-1], "Coordinator blocked; maintainer action needed")
 
-    @scenarios(*((change, "update") for change in ("head", "base", "identity", "configuration", "local")),
-               ("local", "resume"))
+    @scenarios(*((change, "update") for change in (*MOVES, "local")), ("local", "resume"))
     def test_stale_persisted_rejection_retired(self, change, entry):
         head = self.open_pr(reject=True)
         run = self.ticks(self.editing(), 2)
@@ -980,6 +994,10 @@ class PullRequestTests(support.PullRequestFixture):
             self.assert_fields(run, unresolved_trailers=unresolved, reviewed_sha=None)
             self.assertEqual(run["adopted_pr"]["unresolved_trailers"], unresolved)
             self.assert_withheld(self.ticks(run, 2), commit)
+            self.change("dirty", run)
+            self.refuses("Independent review cannot", self.select, run, RECHECK, ALL, contributors=declared)
+            git(self.store.workspace(run), "checkout", ".")
+            self.assert_error(self.ticks(self.select(run, ["publish"], ["push", "github"])), "blocked", "nothing was pushed")
             self.assertEqual(self.remote_head(), head)
         else:
             run = self.repair_handoff()
@@ -999,12 +1017,21 @@ class PullRequestTests(support.PullRequestFixture):
         self.assert_fields(self.report(run)["authorship"]["subsequent"][-1], kind=kind, commit=commit,
                            declared=declared, unresolved_trailers=unresolved)
 
-    @scenarios(*((command, point) for command in ("pr update RUN_ID", "adopt RUN_ID") for point in INTERRUPTIONS))
-    def test_interrupted_swap_recovers_inputs(self, command, point):
+    @scenarios(*((command, point, closing) for command in ("pr update RUN_ID", "adopt RUN_ID")
+                 for point in INTERRUPTIONS for closing in (False, True)))
+    def test_interrupted_swap_recovers_inputs(self, command, point, closing):
         updating = command == "pr update RUN_ID"
-        run, head, external, recover = self.swap_fixture(updating)
-        self.interrupt(point, recover)
+        run, head, external, recover = self.interrupted_swap(updating, point)
         stored = self.reload(run)
+        if closing:
+            self.refuses("interrupted", self.command, "close", run["id"])
+            self.assertEqual(self.reload(run)["stage"], stored["stage"])
+            if point == "rename-2":
+                self.store.save(self.reload(run), stage="closed")
+            run = recover()
+            self.assert_fields(run, pending_swap=None, sha=external, stage="closed" if point == "rename-2" else "stopped")
+            self.command("close", run["id"])
+            return self.assert_fields(self.reload(run), stage="closed", pending_swap=None)
         self.assert_fields(stored, stage="stale" if updating else "repair", sha=head)
         self.assertEqual(stored["pending_swap"]["command"], command)
         if updating:

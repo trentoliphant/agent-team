@@ -563,7 +563,8 @@ local review. New branch/commit work can enter at validation; it does not need a
 implementation pass. Individual publication, review, and readiness operations
 reuse a tracked run's compatible evidence. They refuse missing prerequisites;
 select validation first when there is no recorded evidence. Adopting an existing
-PR from outside Agent Team uses `agent-team pr`. No command merges PRs.
+PR from outside Agent Team uses `agent-team pr` ([examples](skills/agent-team/SKILL.md#existing-pull-requests)).
+No command merges PRs.
 
 Grants are separate: `edit` permits local source edits and candidate commits,
 `push` permits topic-branch publication, `github` permits GitHub content and
@@ -690,26 +691,3 @@ commits and input from both model families are refused before scope is claimed.
 If the input becomes invalid after selection, preparation leaves no author
 checkout. Correct the input branch, inspect the blocked run, then explicitly
 resume it. Selection and preparation revisions remain recorded in provenance.
-
-### Existing pull requests
-
-`agent-team pr` adopts an open PR of a registered repository:
-
-```sh
-# Review; review with fixes (--plan previews); supplied findings:
-agent-team pr review example 42 --contributor human
-agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
-  --contributor human --grant edit --grant push --grant github
-agent-team pr findings example 42 --contributor human --grant edit --grant push --grant github \
-  --finding 'parser.py:88 drops the last field; keep it and add a test'
-agent-team run example --run RUN_ID --watch
-agent-team pr show RUN_ID
-# After an external push makes the run stale:
-agent-team pr update RUN_ID --contributor human
-agent-team select example --run RUN_ID --operations validate review
-```
-
-`pr show` reports findings, roles, and checks; a review is not readiness.
-Unknown or mixed authorship withholds independent success. Pushes only
-fast-forward, else `pr show` offers a local patch. Nothing reopens, retargets,
-changes draft, or merges.

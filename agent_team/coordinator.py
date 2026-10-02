@@ -965,6 +965,8 @@ class Coordinator:
                             commit_contributors=sorted(set(run.get("commit_contributors") or []) | set(contributors)),
                             contribution_history=run.get("contribution_history", []) +
                             [{"at": time.time(), "context": context, "declared": contributors}])
+        if context["dirty"] and "validate" in operations:
+            self.require_revisable(project, run, False)
         if previous and context != previous:
             self.store.save(run, **retire_evidence(run, "Candidate or configuration changed", not pending,
                                                    before=previous, after=context), evidence_context=context,
@@ -1370,7 +1372,7 @@ class Coordinator:
         self.implement(project, run)
 
     @staticmethod
-    def require_revisable(project, run):
+    def require_revisable(project, run, reserved=True):
         info = run.get("adopted_pr")
         for refused, reason in info and (
                 (withheld(run), REFUSED_REVISION.format(withheld(run))),
@@ -1380,8 +1382,8 @@ class Coordinator:
                  f"PR targets {info['base_ref']}, not registered base {project['base']}; Agent Team never retargets PRs"),
                 (run["round"] > revision_limit(project, run),
                  "The PR has no revision budget left; record an operator decision instead"),
-                (not run.get("needs_revision") or run.get("reserved_round") != run["round"]
-                 or run["round"] in run.get("authored_rounds", []),
+                (reserved and (not run.get("needs_revision") or run.get("reserved_round") != run["round"]
+                               or run["round"] in run.get("authored_rounds", [])),
                  "No revision round is reserved for this PR; each round allows one pass")) or ():
             if refused:
                 raise TeamError(reason)
@@ -1437,6 +1439,7 @@ class Coordinator:
         author = self.store.workspace(run)
         if git(author, "status", "--porcelain"):
             self.require_effect(run, "edit")
+            self.require_revisable(project, run, False)
         git(author, "add", "--all")
         if git(author, "status", "--porcelain"):
             git(author, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
@@ -1649,6 +1652,8 @@ class Coordinator:
                 raise TeamError("PR head repository or branch changed; nothing was pushed")
             if pr["base"]["ref"] != project["base"]:
                 raise TeamError("PR does not target the registered base; nothing was pushed and the PR is never retargeted")
+            if withheld(run):
+                raise TeamError(REFUSED_REVISION.format(withheld(run)) + "; nothing was pushed")
             if change:
                 self.store.save(run, **retire_evidence(run, "PR head or base moved before publication"))
                 raise ReentryRequired("PR head or base moved before publication; nothing was pushed. Inspect it, "
@@ -1876,9 +1881,12 @@ class Coordinator:
         if moved(pr):
             return
         changed = run["ci_checks"][:-1] + [dict(run["ci_checks"][-1], readiness_changed=True)]
+        # Journal intent; record the change once confirmed.
         if pr.get("draft"):
-            self.store.save(run, ci_checks=changed)
+            self.store.save(run, readiness_intent=run["sha"])
             self.github.mark_ready(project["repo"], run["pr"])
+        if run.get("readiness_intent"):
+            self.store.save(run, ci_checks=changed, readiness_intent=None)
         if moved():
             return
         self.github.comment(project["repo"], run["pr"], f"{run['id']}-ready", ready)
