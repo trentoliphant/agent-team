@@ -693,14 +693,13 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 ### Existing pull requests
 
-`agent-team pr` adopts an open PR (number or URL) in a registered repository
-with no issue, author pass, or new PR, recording its head repository, branch,
-and commit, base, state, draft flag, operation, contributors, `Agent-Family`
-trailers, and usernames. `pr review` validates, reviews, and stops: no edits,
-pushes, base merges, or repair. `pr revise` fixes rejections on the PR branch,
-revalidates, pushes, and reviews the new commit. `pr findings` revises only the
-`--finding` items. Each author pass needs a round reserved by a rejection,
-supplied findings, or `decide extend`. GitHub writes need `--grant github`.
+`agent-team pr` adopts an open PR (number or URL) of a registered repository
+without an issue or new PR. It records the head repository, branch, and commit,
+base, state, draft flag, contributors, trailers, and usernames. `pr review`
+validates, reviews, and stops: no edits, pushes, base merges, or repair. `pr
+revise` fixes rejections on the PR branch, revalidates, pushes, and reviews the
+new commit. `pr findings` revises only `--finding` items. Each author pass needs
+a reserved round. GitHub writes need `--grant github`.
 
 ```sh
 # Review only, review with fixes (--plan previews), supplied findings:
@@ -716,20 +715,18 @@ agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
 ```
 
-A later selection does only what it names; a rejection stops it. `pr show`
-reports validation, every review's verdict and findings, roles, authorship, push access, checks
-run or omitted, and evidence `currency`. A standalone review skips CI and is not
-readiness, which needs `--operations ci --grant readiness`, independent review
-of the published head, and current CI. No `pr` command reopens, retargets,
-changes draft state, or merges.
+A selection does only what it names; a rejection stops it. `pr show` reports
+reviews and findings, roles, authorship, push access, checks run or omitted,
+and evidence `currency`. A standalone review is not readiness, which needs
+`--operations ci --grant readiness` and current CI. No `pr` command reopens,
+retargets, changes draft state, or merges.
 
 Declare every contributor (`human`, `openai`, `anthropic`, `unknown`); usernames
 imply no family. With `unknown`, both families, or an unsupported trailer,
 independent-review success is withheld and revision refused.
 
-One open run per PR. Input changes retire evidence; head or live base-branch movement stops
-the run as `stale` until `pr update` adopts it. Pushes are fast-forward only.
-Re-adoption keeps the budget; past the limit only review is allowed. Fork pushes
-need head write access, or maintainer edits plus base write access; otherwise
-`pr show` offers a local commit and patch, never a replacement PR. Closed or
-merged PRs, and revision against an unregistered base, are refused.
+One open run per PR. Input changes retire evidence; head or base movement stops
+the run as `stale` until `pr update`. Pushes are fast-forward only. Re-adoption
+keeps the budget. Fork pushes need head write access, or maintainer edits and
+base write access; otherwise `pr show` offers a local commit and patch, never a replacement PR.
+Closed or merged PRs, and revision against an unregistered base, are refused.

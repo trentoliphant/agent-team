@@ -298,10 +298,9 @@ agent-team run example --run RUN_ID --watch
 agent-team pr show RUN_ID
 ```
 
-`pr review` only reports findings; `pr revise` and `pr findings` fix them within
-the budget. Declare every contributor truthfully, including your own family,
-never from a username; report withheld independent review. From `pr show`,
-report roles, findings, checks run and omitted, and any local patch handoff; a
-review alone is not readiness. After `stale`, inspect the change before `pr
-update`. Never open a replacement PR, force-push, merge the base, reopen,
-retarget, change draft state, or merge.
+`pr review` only reports findings; `pr revise` and `pr findings` fix them.
+Declare every contributor truthfully, including your own family, never from a
+username. From `pr show`, report roles, findings, checks run and omitted,
+withheld independence, and any local patch; a review is not readiness. After
+`stale`, inspect the change before `pr update`. Never open a replacement PR,
+force-push, merge the base, reopen, retarget, change draft state, or merge.
