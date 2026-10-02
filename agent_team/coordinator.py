@@ -187,6 +187,75 @@ def binding(run):
             "configuration": validated.get("configuration"), "companions": run.get("validated_companions") or []}
 
 
+def declared_contributors(contributors):
+    """An adopted PR's contributor declarations: at least one, each from PR_CONTRIBUTORS."""
+    declared = sorted(set(contributors or []))
+    if not declared or not set(declared) <= set(PR_CONTRIBUTORS):
+        raise TeamError("Declare every contributor: " + ", ".join(PR_CONTRIBUTORS))
+    return declared
+
+
+def review_report(record, commit, base, current):
+    """A reviewer's complete report, named with the commit and base it was gathered for."""
+    report = record["report"]
+    return {"commit": commit, "base": base, "current": current, "verdict": report["verdict"],
+            "summary": report["summary"], "findings": report["findings"],
+            "reviewer": {k: record.get(k) for k in ("agent", "family", "cli_version", "requested_model",
+                                                    "observed_models")}}
+
+
+def historical_evidence(entry):
+    """Retired evidence as reported: never current, always named with its head and base."""
+    evidence = entry["evidence"]
+    record = evidence.get("review_record")
+    return {"reason": entry["reason"], "at": entry["at"], "head": entry["head"], "base": entry["base"],
+            "validated": evidence.get("validated_sha"), "reviewed": evidence.get("review_sha"),
+            "verdict": record["report"]["verdict"] if record else None,
+            "review": review_report(record, evidence.get("review_sha"), entry["base"], False) if record else None,
+            "independent_review_success": bool(evidence.get("reviewed_sha")),
+            "validation_failed": "validation_failure" in evidence, "tests": evidence.get("tests", [])}
+
+
+def pr_inputs(found):
+    """The adopted head and base fields recorded from `inspect_pr`."""
+    return {"head_sha": found["head"], "base_sha": found["base"], "merge_base": found["merge_base"],
+            "base_contained": found["base_contained"]}
+
+
+def pr_roles(families, reviewer):
+    """(reviser, reviewer) agents for an adopted PR, or None to assign by rotation. A single known
+    contributing family is never assigned to review, even when independence is otherwise withheld."""
+    other = {"codex": "claude", "claude": "codex"}
+    if len(families) == 1:
+        author = {family: agent for agent, family in FAMILIES.items()}[next(iter(families))]
+        if reviewer and reviewer != other[author]:
+            raise TeamError(f"The {FAMILIES[reviewer]} family contributed; it cannot review independently")
+        return author, other[author]
+    return (other[reviewer], reviewer) if reviewer else None
+
+
+def pr_inheritance(project, prior, mode, number):
+    """The revision budget and provenance an adoption inherits from earlier runs of the same PR. Readoption
+    never resets the budget, including after review-only runs, and never clears recorded authorship."""
+    exhausted = [r for r in prior if r.get("handoffs") and r["handoffs"][-1]["round"] >= revision_limit(project, r)]
+    if mode != "review" and exhausted:
+        raise TeamError(f"PR #{number} reached its revision limit in run {exhausted[-1]['id']}; readoption "
+                        "does not reset the budget. Review mode is still available; further revision needs "
+                        "an operator repair outside Agent Team")
+    limit = max((revision_limit(project, r) for r in prior), default=project["max_revisions"])
+    # A findings revision edits immediately, so it spends its round before the budget check.
+    round_ = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
+    if mode != "review" and round_ > limit:
+        raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
+                        "reset it. Review mode is still available")
+    inherited = {"runs": [r["id"] for r in prior],
+                 "contributors": sorted({c for r in prior for c in r.get("contributors", [])}
+                                        | {f for r in prior for f in contributing_families(r)}),
+                 "unresolved_trailers": sorted({t for r in prior for t in r.get("unresolved_trailers", []) +
+                                                (r.get("adopted_pr") or {}).get("unresolved_trailers", [])})}
+    return limit, round_, inherited
+
+
 def head_moved(info, pr):
     """Whether an adopted PR's head now names another repository or branch, even at the same commit."""
     head = pr["head"].get("repo") or {}
@@ -1972,8 +2041,7 @@ class Coordinator:
                        stage="validate", in_flight=False, round=run["round"] + 1,
                        notification_pending=True, error=None, evidence_retired=None)
         if info:
-            changes["adopted_pr"] = dict(info, head_sha=candidate, base_sha=base_sha, merge_base=found["merge_base"],
-                                         base_contained=found["base_contained"])
+            changes["adopted_pr"] = dict(info, **pr_inputs(found))
         return fresh, changes, extra
 
     def swap(self, project, run, fresh, changes, command, context, preserved=None):
@@ -2368,29 +2436,35 @@ class Coordinator:
                 "trailer_families": families, "unresolved_trailers": unresolved,
                 "commit_authors": sorted({line.strip() for line in authors.splitlines() if line.strip()})}
 
+    def fetch_pr(self, project, pr, number, fresh, moved):
+        """Clone the PR's base into `fresh` and inspect its head, refusing with `moved` if either changed."""
+        clone_repository(project["repo"], fresh, pr["base"]["ref"], project["timeout"])
+        found = self.inspect_pr(project, fresh, number)
+        if found["head"] != pr["head"]["sha"] or found["base"] != pr["base"]["sha"]:
+            raise TeamError(moved)
+        return found
+
     def adopt_pr(self, name, reference, mode, contributors, grants=(), reviewer=None, findings=(), plan_only=False):
         """Track an existing PR in a durable selected run without an issue, implementation pass, or new PR."""
         project = self.store.project(name)
         number = pull_number(project, reference)
         if mode not in PR_MODES:
             raise TeamError("Select review, revise, or findings")
-        declared = sorted(set(contributors))
-        if not declared or not set(declared) <= set(PR_CONTRIBUTORS):
-            raise TeamError("Declare every contributor: " + ", ".join(PR_CONTRIBUTORS))
+        declared = declared_contributors(contributors)
         grants = sorted(set(grants))
-        if not set(grants) <= set(PR_GRANTS):
-            raise TeamError("Adoption accepts only edit, push, and github grants; it never changes PR readiness")
         findings = [f.strip() for f in findings if f.strip()]
-        if mode == "review" and {"edit", "push"} & set(grants):
-            raise TeamError("Review-only never edits or pushes; omit the edit and push grants")
-        if mode != "review" and "edit" not in grants:
-            raise TeamError("Revision requires --grant edit")
-        if (mode == "findings") != bool(findings):
-            raise TeamError("Supply --finding text with findings mode, and only with findings mode")
-        if reviewer is not None and reviewer not in FAMILIES:
-            raise TeamError("Unknown reviewer agent")
-        if project["paused"]:
-            raise TeamError("Project is paused")
+        for refused, message in (
+                (not set(grants) <= set(PR_GRANTS),
+                 "Adoption accepts only edit, push, and github grants; it never changes PR readiness"),
+                (mode == "review" and {"edit", "push"} & set(grants),
+                 "Review-only never edits or pushes; omit the edit and push grants"),
+                (mode != "review" and "edit" not in grants, "Revision requires --grant edit"),
+                ((mode == "findings") != bool(findings),
+                 "Supply --finding text with findings mode, and only with findings mode"),
+                (reviewer is not None and reviewer not in FAMILIES, "Unknown reviewer agent"),
+                (project["paused"], "Project is paused")):
+            if refused:
+                raise TeamError(message)
         runs = self.store.repository_runs(name)
         owner = next((r for r in runs if r.get("pr") == number and r["stage"] not in TERMINAL), None)
         if owner:
@@ -2409,34 +2483,12 @@ class Coordinator:
             raise TeamError(f"PR targets {pr['base']['ref']}, not registered base {project['base']}. Revision is "
                             "refused before any change; Agent Team never retargets PRs. Use review mode instead")
         with tempfile.TemporaryDirectory(prefix="agent-team-pr-") as temporary:
-            fresh = Path(temporary) / "input"
-            clone_repository(project["repo"], fresh, pr["base"]["ref"], project["timeout"])
-            found = self.inspect_pr(project, fresh, number)
-        if found["head"] != pr["head"]["sha"] or found["base"] != pr["base"]["sha"]:
-            raise TeamError("PR head or base moved during adoption; retry")
+            found = self.fetch_pr(project, pr, number, Path(temporary) / "input",
+                                  "PR head or base moved during adoption; retry")
         if any(found["head"] in r.get("rejected_shas", []) for r in runs):
             raise TeamError("PR head was rejected by an earlier run; continue that run and its budget")
-        # Readoption never resets the budget of earlier runs, including review-only runs.
         prior = [r for r in runs if r.get("pr") == number]
-        exhausted = [r for r in prior if r.get("handoffs") and
-                     r["handoffs"][-1]["round"] >= revision_limit(project, r)]
-        if mode != "review" and exhausted:
-            raise TeamError(f"PR #{number} reached its revision limit in run {exhausted[-1]['id']}; readoption "
-                            "does not reset the budget. Review mode is still available; further revision needs "
-                            "an operator repair outside Agent Team")
-        inherited_limit = max((revision_limit(project, r) for r in prior), default=project["max_revisions"])
-        # A findings revision edits immediately, so it spends its round before the budget check.
-        inherited_round = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
-        if mode != "review" and inherited_round > inherited_limit:
-            raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
-                            "reset it. Review mode is still available")
-        # Earlier runs' recorded authorship stays with the PR's retained work: new declarations add to it and
-        # never clear it. No removal mechanism exists, so it is always carried forward.
-        inherited = {"runs": [r["id"] for r in prior],
-                     "contributors": sorted({c for r in prior for c in r.get("contributors", [])}
-                                            | {f for r in prior for f in contributing_families(r)}),
-                     "unresolved_trailers": sorted({t for r in prior for t in r.get("unresolved_trailers", []) +
-                                                    (r.get("adopted_pr") or {}).get("unresolved_trailers", [])})}
+        inherited_limit, inherited_round, inherited = pr_inheritance(project, prior, mode, number)
         families = ({c for c in declared + inherited["contributors"] if c in FAMILIES.values()}
                     | set(found["trailer_families"]))
         unresolved = sorted(set(found["unresolved_trailers"]) | set(inherited["unresolved_trailers"]))
@@ -2444,48 +2496,34 @@ class Coordinator:
         if mode != "review" and not independence["established"]:
             raise TeamError(f"Independent review cannot be established ({independence['reason']}), so revision is "
                             "refused. Review mode reports findings and withholds an independent-review success verdict")
-        agent_of = {family: agent for agent, family in FAMILIES.items()}
-        roles = None
-        if len(families) == 1:
-            # A single known family is never assigned to review, even when independence is otherwise withheld.
-            author = agent_of[next(iter(families))]
-            roles = (author, "claude" if author == "codex" else "codex")
-            if reviewer and reviewer != roles[1]:
-                raise TeamError(f"The {FAMILIES[reviewer]} family contributed; it cannot review independently")
-        elif reviewer:
-            roles = ("claude" if reviewer == "codex" else "codex", reviewer)
+        roles = pr_roles(families, reviewer)
         access = (self.github.push_access(project, pr) if mode != "review"
                   else {"allowed": False, "reason": "review-only never pushes"})
-        can_push = "push" in grants and access["allowed"]
-        followup = ["revision", "validate"] + (["publish"] if can_push else []) + ["review"]
+        followup = ["revision", "validate"] + (["publish"] if "push" in grants and access["allowed"] else []) + ["review"]
         operations = followup if mode == "findings" else ["validate", "review"]
-        plan = self.operation_plan(operations, grants)
-        effects = plan["selected_effects"]
+        effects = self.operation_plan(operations, grants)["selected_effects"]
         if mode == "revise":
             effects = list(dict.fromkeys(effects + self.operation_plan(followup, grants)["selected_effects"]))
         info = {"number": number, "url": pr.get("html_url") or f"https://github.com/{project['repo']}/pull/{number}",
                 "repo": project["repo"], "head_repo": head_repo, "head_ref": pr["head"]["ref"],
-                "head_sha": found["head"], "base_ref": pr["base"]["ref"], "base_sha": found["base"],
-                "merge_base": found["merge_base"], "base_contained": found["base_contained"],
-                "state": pr["state"], "draft": bool(pr.get("draft")), "mode": mode, "findings": findings,
-                "declared": declared, "trailer_families": found["trailer_families"],
-                "unresolved_trailers": unresolved, "inherited_provenance": inherited,
+                "base_ref": pr["base"]["ref"], **pr_inputs(found), "state": pr["state"],
+                "draft": bool(pr.get("draft")), "mode": mode, "findings": findings, "declared": declared,
+                "trailer_families": found["trailer_families"], "unresolved_trailers": unresolved,
+                "inherited_provenance": inherited,
                 # GitHub identities are recorded as provenance only, never as model authorship.
                 "github_identities": {"pr_author": (pr.get("user") or {}).get("login"),
                                       "commit_authors": found["commit_authors"]},
                 "push_access": access, "adopted_at": time.time()}
-        summary = {"pr": number, "mode": mode, "operations": operations,
-                   "revision_operations": followup if mode == "revise" else None, "grants": grants,
-                   "selected_effects": effects, "independence": independence, "inherited_provenance": inherited,
-                   "roles": {"reviser": roles[0], "reviewer": roles[1]} if roles else "assigned by rotation",
-                   "push": access if mode != "review" else "never", "head": found["head"], "base": found["base"],
-                   "base_contained": found["base_contained"],
-                   "revision_budget": {"round": inherited_round, "limit": inherited_limit,
-                                       "prior_runs": [r["id"] for r in prior]},
-                   "readiness": "never changed by adoption or review",
-                   "whole_workflow_certified": False}
         if plan_only:
-            return summary
+            return {"pr": number, "mode": mode, "operations": operations,
+                    "revision_operations": followup if mode == "revise" else None, "grants": grants,
+                    "selected_effects": effects, "independence": independence, "inherited_provenance": inherited,
+                    "roles": {"reviser": roles[0], "reviewer": roles[1]} if roles else "assigned by rotation",
+                    "push": access if mode != "review" else "never", "head": found["head"], "base": found["base"],
+                    "base_contained": found["base_contained"],
+                    "revision_budget": {"round": inherited_round, "limit": inherited_limit,
+                                        "prior_runs": inherited["runs"]},
+                    "readiness": "never changed by adoption or review", "whole_workflow_certified": False}
         body = (f"Existing pull request #{number} ({info['url']}) in {project['repo']}.\n"
                 f"Head {head_repo}:{info['head_ref']} at {found['head']}; base {info['base_ref']} at {found['base']}.\n"
                 f"Requested operation: {PR_MODES[mode]}\n\nPR title: {pr['title']}\n\n"
@@ -2548,9 +2586,7 @@ class Coordinator:
             raise TeamError("Update applies to stale, stopped, or blocked runs")
         if self.finalize_rejection(project, run):
             return run
-        declared = sorted(set(contributors))
-        if not declared or not set(declared) <= set(PR_CONTRIBUTORS):
-            raise TeamError("Declare every contributor to the change: " + ", ".join(PR_CONTRIBUTORS))
+        declared = declared_contributors(contributors)
         pr = self.github.pr(project["repo"], info["number"])
         if pr.get("merged") or pr["state"] != "open":
             stage = "merged" if pr.get("merged") else "closed"
@@ -2569,10 +2605,7 @@ class Coordinator:
                                 "(previous work retained)")
         fresh = self.store.run_root(run) / f"pr-update-{time.time_ns()}"
         fresh.parent.mkdir(parents=True, exist_ok=True)
-        clone_repository(project["repo"], fresh, info["base_ref"], project["timeout"])
-        found = self.inspect_pr(project, fresh, info["number"])
-        if found["head"] != pr["head"]["sha"] or found["base"] != pr["base"]["sha"]:
-            raise TeamError("PR moved during update; retry (previous work retained)")
+        found = self.fetch_pr(project, pr, info["number"], fresh, "PR moved during update; retry (previous work retained)")
         if found["head"] == info["head_sha"] and found["base"] == info["base_sha"] and run["stage"] != "blocked":
             raise TeamError("PR head and base are unchanged; nothing to adopt")
         if found["head"] in run.get("rejected_shas", []):
@@ -2594,8 +2627,7 @@ class Coordinator:
                   "after": {"head": found["head"], "base": found["base"]},
                   # A local revision that was never pushed is kept in the preserved checkout, never pushed over the PR.
                   "unpushed_local_commit": run.get("sha") if run.get("sha") not in {None, run.get("published_sha")} else None}
-        new_info = dict(info, head_sha=found["head"], base_sha=found["base"], merge_base=found["merge_base"],
-                        base_contained=found["base_contained"], declared=all_declared,
+        new_info = dict(info, **pr_inputs(found), declared=all_declared,
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
                         unresolved_trailers=unresolved, updates=info.get("updates", []) + [update])
         common = dict(adopted_pr=new_info, independence=independence, base_sha=found["base"], sha=found["head"],
@@ -2667,29 +2699,12 @@ class Coordinator:
             verified, reason = (self.evidence_currency(project, run) if locked
                                 else (None, "a coordinator worker holds the repository"))
             currency, current = {"verified": verified, "reason": reason}, verified is True
-
-        def reported(record, commit, base, is_current):
-            return {"commit": commit, "base": base, "current": is_current,
-                    "verdict": record["report"]["verdict"], "summary": record["report"]["summary"],
-                    "reviewer": {k: record.get(k) for k in ("agent", "family", "cli_version", "requested_model",
-                                                            "observed_models")},
-                    "findings": record["report"]["findings"]}
-
-        retired = [e for e in run.get("evidence_invalidations", []) if e.get("evidence")]
-        historical = [{"reason": e["reason"], "at": e["at"], "head": e["head"], "base": e["base"],
-                       "validated": e["evidence"].get("validated_sha"), "reviewed": e["evidence"].get("review_sha"),
-                       "verdict": (e["evidence"].get("review_record") or {}).get("report", {}).get("verdict"),
-                       "review": reported(e["evidence"]["review_record"], e["evidence"].get("review_sha"),
-                                          e["base"], False) if e["evidence"].get("review_record") else None,
-                       "independent_review_success": bool(e["evidence"].get("reviewed_sha")),
-                       "validation_failed": "validation_failure" in e["evidence"],
-                       "tests": e["evidence"].get("tests", [])}
-                      for e in retired]
+        historical = [historical_evidence(e) for e in run.get("evidence_invalidations", []) if e.get("evidence")]
         # A review retired after the PR moved stays the latest report, marked as not current.
         latest = next((h for h in reversed(historical) if h["review"]), None)
         review = None
         if run.get("review_record") and run.get("review_sha") == sha:
-            review = reported(run["review_record"], sha, run["base_sha"], current)
+            review = review_report(run["review_record"], sha, run["base_sha"], current)
         elif history and history[-1]["kind"] == "review" and not (
                 latest and latest["at"] > history[-1].get("at", 0)):
             entry = history[-1]
@@ -2731,39 +2746,32 @@ class Coordinator:
                    and c.get("generation", 0) == generation and (c.get("companions") or []) == pins}
                   for c in run.get("ci_checks", [])]
         latest_check = next((c for c in reversed(checks) if c["current"]), None)
-        limitations = []
-        if currency["verified"] is None:
-            limitations.append(f"Evidence currency was not verified ({currency['reason']}); recorded results are "
-                               "reported as not current. Run pr show again when no worker is active.")
-        elif not current:
-            limitations.append(f"The PR or its evidence inputs changed after the recorded evidence was gathered "
-                               f"({currency['reason']}); earlier validation and review results are historical and "
-                               "do not apply to the current PR.")
-        if run.get("validated_sha") != sha or not current:
-            limitations.append("Configured validation has not passed for the current candidate.")
-        if not info["base_contained"]:
-            limitations.append(f"The head does not contain base {info['base_sha']}; the base was not merged, so "
-                               "validation and review reflect the head as-is.")
-        if withheld(run):
-            limitations.append(f"Independent-review success withheld: {withheld(run)}.")
-        if not checks:
-            limitations.append("GitHub CI checks were not checked.")
-        elif not latest_check:
-            limitations.append("GitHub CI checks were not checked for the current candidate and base; earlier "
-                               "observations are historical.")
-        elif latest_check["state"] != "success":
-            limitations.append(f"GitHub CI checks for the current candidate did not pass (state: {latest_check['state']}).")
         marked = [c for c in checks if c["readiness_changed"]]
-        if run["stage"] != "ready":
-            limitations.append(f"Agent Team marked the PR ready for {marked[-1]['head']}; that readiness is not "
-                               "current." if marked else
-                               "Readiness was not assessed; Agent Team did not change draft or readiness state.")
-        if handoff:
-            limitations.append(f"The revision is local only ({handoff['reason']}). Apply the patch or push the "
-                               "commit yourself; no replacement PR was created.")
         unpublished = run.get("unpublished_evidence", [])
-        for item in unpublished:
-            limitations.append(f"Review evidence for {item['evidence']} was not published: {item['withheld_reason']}.")
+        # Each limitation applies when its condition holds; the order is the reported order.
+        limitations = [text for applies, text in (
+            (currency["verified"] is None, f"Evidence currency was not verified ({currency['reason']}); recorded "
+             "results are reported as not current. Run pr show again when no worker is active."),
+            (currency["verified"] is not None and not current, "The PR or its evidence inputs changed after the "
+             f"recorded evidence was gathered ({currency['reason']}); earlier validation and review results are "
+             "historical and do not apply to the current PR."),
+            (run.get("validated_sha") != sha or not current,
+             "Configured validation has not passed for the current candidate."),
+            (not info["base_contained"], f"The head does not contain base {info['base_sha']}; the base was not "
+             "merged, so validation and review reflect the head as-is."),
+            (withheld(run), f"Independent-review success withheld: {withheld(run)}."),
+            (not checks, "GitHub CI checks were not checked."),
+            (checks and not latest_check, "GitHub CI checks were not checked for the current candidate and base; "
+             "earlier observations are historical."),
+            (latest_check and latest_check["state"] != "success", "GitHub CI checks for the current candidate did "
+             f"not pass (state: {(latest_check or {}).get('state')})."),
+            (run["stage"] != "ready", f"Agent Team marked the PR ready for {marked[-1]['head']}; that readiness is "
+             "not current." if marked else
+             "Readiness was not assessed; Agent Team did not change draft or readiness state."),
+            (handoff, f"The revision is local only ({(handoff or {}).get('reason')}). Apply the patch or push the "
+             "commit yourself; no replacement PR was created."),
+            *((True, f"Review evidence for {item['evidence']} was not published: {item['withheld_reason']}.")
+              for item in unpublished)) if applies]
         return {"run": run["id"], "stage": run["stage"], "next_stage": run.get("next_stage"), "error": run.get("error"),
                 "pr": {k: info[k] for k in ("number", "url", "head_repo", "head_ref", "base_ref", "state", "draft")},
                 "mode": info["mode"], "requested_findings": info["findings"],
