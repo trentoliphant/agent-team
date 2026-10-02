@@ -16,6 +16,7 @@ this package or needs its workflow files.
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 | `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
+| `pull_requests.py` | Existing-PR adoption, deliberate updates, and read-only `pr show` reports |
 
 Each project registers one repository. It may also declare public companion
 repositories that its validation needs (see the README). Companions are read-only
@@ -298,19 +299,17 @@ author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
 evidence only for a published candidate and with the content grant.
 
-`pr review|revise|findings` adopts a PR as an issue-less selected run (rules in
-the README); its published commit is the PR head. A rejection within budget
-enters `pr_followup` (revise mode only) until `select --run`. Author passes need
-`reserved_round == round` and a round not in `authored_rounds`. A failed validation of the unedited
-head stays in `attempted_context` until review; one rejection records both.
-Unestablished independence records `review_withheld`, not `reviewed_sha`.
-Every invalidation (movement, configuration, pins, local continuation) snapshots the complete
-evidence to `evidence_invalidations`, sets `evidence_retired`, and bumps `evidence_generation`;
-CI observations count only for their generation. Bound queued writes move to `unpublished_evidence`.
-`pr show` rechecks the full binding under the repository lock and never saves.
-Recovery stages keep their stage. Re-adoption inherits round, limit, `rejected_shas`, contributors,
-and unresolved trailers from `prior_runs`. `pr update` and `adopt` journal `pending_swap`
-before any rename, so a rerun completes it with the recorded inputs.
+`pr review|revise|findings` adopts a PR as an issue-less selected run whose
+published commit is the PR head. A rejection within budget enters `pr_followup`
+(revise mode only) until `select --run`. Author passes need `reserved_round ==
+round` and a round not in `authored_rounds`. A failed validation of the unedited
+head stays in `attempted_context` until review. Unestablished independence
+records `review_withheld`, not `reviewed_sha`. Every invalidation snapshots the
+evidence to `evidence_invalidations`, sets `evidence_retired`, and bumps
+`evidence_generation`, which CI observations must match. Bound queued writes
+move to `unpublished_evidence`. `pr show` rechecks the binding under the
+repository lock and never saves. Re-adoption inherits budget and provenance
+(`prior_runs`). `pr update` and `adopt` journal `pending_swap` before any rename.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

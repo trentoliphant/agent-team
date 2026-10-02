@@ -695,22 +695,21 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 ### Existing pull requests
 
-`agent-team pr` adopts an open PR (number or URL) in a registered repository,
-whoever opened it, without an issue, author pass, or new PR. The run records the
-head repository, branch, and commit, the base branch and commit, state, draft
-flag, operation, contributors, `Agent-Family` trailers, and GitHub usernames.
+`agent-team pr` adopts an open PR (number or URL) in a registered repository
+without an issue, author pass, or new PR. The run records the head repository,
+branch, and commit, the base, state, draft flag, operation, contributors,
+`Agent-Family` trailers, and GitHub usernames.
 
 - `pr review` validates and reviews the head (even if validation fails), then
-  stops: no edits, pushes, base merges, or repair loop. Findings stay local
-  unless `--grant github` is given.
+  stops: no edits, pushes, base merges, or repair. Findings stay local unless
+  `--grant github` is given.
 - `pr revise` also fixes a rejection on the PR branch, revalidates, pushes, and
-  reviews the new commit, within the budget. It needs `edit`, `push`, `github`.
-- `pr findings` revises only the `--finding` items, with the same grants. That
-  first edit uses one revision. If the fresh review raises other findings, they
-  are reported and the run stops; it does not fix them on its own.
+  reviews the new commit within the budget. It needs `edit`, `push`, `github`.
+- `pr findings` revises only the `--finding` items, using one revision. Fresh
+  findings from its review are reported, and the run stops.
 
-Each author pass needs a round that a rejection, supplied findings, or `decide
-extend` has reserved. A round allows one pass. A passing review reserves none.
+Each author pass needs its own round, reserved by a rejection, supplied
+findings, or `decide extend`. A passing review reserves none.
 
 ```sh
 # Alternatives: review only, review with fixes (--plan previews), supplied findings.
@@ -726,40 +725,30 @@ agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
 ```
 
-A later selection does only what it names; a rejection stops it, so select
-`revision validate publish review` to fix. `pr show` reports validation, the
-verdict and findings (combined rejection: `candidate_verdict`), roles,
-authorship, push access, and checks run or omitted. A standalone review never
-checks CI and is not a readiness verdict. Readiness (`select --run RUN_ID
---operations ci --grant readiness`) needs independent review of the published head and CI for
-the current head and base (`current_ci`); the PR is rechecked before each
-readiness write and save, and `pr show` flags readiness that is no longer current.
-`pr show` rechecks the PR, configuration, pins, and checkout before calling evidence
-current (`currency`); while a worker holds the repository it reports it unverified.
-No `pr` command reopens, retargets, changes draft state, or merges a PR.
+A later selection does only what it names; a rejection stops it. `pr show`
+reports validation, the verdict and findings (combined rejection:
+`candidate_verdict`), roles, authorship, push access, and checks run or omitted.
+It rechecks the PR, configuration, pins, and checkout before calling evidence
+current (`currency`), and reports it unverified while a worker is active. A
+standalone review never checks CI and is not a readiness verdict. Readiness
+(`--operations ci --grant readiness`) needs independent review of the published
+head and CI for the current inputs (`current_ci`). No `pr` command reopens,
+retargets, changes draft state, or merges a PR.
 
-Declare every contributor: `human`, `openai`, `anthropic`, or `unknown`; trailer
-families are added and usernames never imply one. One model family is reviewed
-by the other. With `unknown`, both families, or an unsupported trailer,
-independent-review success is withheld and revision refused. `adopt`,
-`select --run`, and `continue` apply the same checks and, for adopted PRs,
-accept `unknown`.
+Declare every contributor: `human`, `openai`, `anthropic`, or `unknown`.
+Trailer families are added; usernames never imply one. With `unknown`, both
+families, or an unsupported trailer, independent-review success is withheld and
+revision refused.
 
-One open run per PR; PR metadata is never edited. Head, base, and head
-repository/branch are rechecked before pushes and writes, after review, and on
-evidence reuse. A change stops the run as `stale`, keeps unpublished evidence
-local, and marks earlier evidence `historical_evidence`. `pr update` adopts new
-commits deliberately, keeps the old checkout and unpushed revisions, and is
-rerunnable. A new head repository or branch needs a new adoption. The base is
-never merged; pushes are fast-forward only. Configuration or companion-pin
-changes also retire evidence, in every stage, including handoff, repair, closed,
-and merged. Re-adoption keeps the budget and the earlier runs' contributors and
-unresolved trailers (`inherited_provenance`); after
-the limit only review is accepted, and `handoff`/`decide`/`adopt` apply (repairs
-are used as-is).
+One open run per PR. Head, base, and head identity are rechecked before pushes
+and writes, after review, and on evidence reuse. A change, or a configuration or
+pin change, retires evidence to `historical_evidence` in every stage; head or
+base movement stops the run as `stale`. `pr update` adopts new commits
+deliberately and keeps the old checkout. The base is never merged; pushes are
+fast-forward only. Re-adoption keeps the budget and earlier provenance
+(`inherited_provenance`); after the limit only review is accepted.
 
-Accessible fork PRs can be reviewed. Pushing needs write access to the head
-repository, or maintainer edits plus base write access; otherwise `pr show` gives
-a local commit and patch, never a replacement PR. Closed and merged PRs are
-refused. Revision requires the registered base (review keeps the PR's);
-independence, base, and budget are rechecked before every edit.
+Fork PRs can be reviewed. Pushing needs write access to the head repository, or
+maintainer edits plus base write access; otherwise `pr show` gives a local
+commit and patch, never a replacement PR. Closed and merged PRs are refused.
+Revision requires the registered base.
