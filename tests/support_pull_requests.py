@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.coordinator import Coordinator
-from agent_team.process import git, TeamError
+from agent_team.process import execute, git, git_env, TeamError
 
 # A module import, so discovery does not rerun WorkflowTests here.
 from tests import test_coordinator
@@ -15,10 +15,24 @@ from tests.test_coordinator import FakeGitHub
 
 COMMIT = ["-c", "user.name=Human", "-c", "user.email=human@example.invalid", "-c", "commit.gpgsign=false"]
 FORK = "someone/demo-fork"
+# Fixture Git speaks only to local files, and skips templates and hooks.
+LOCAL = ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always"]
+ISOLATED = ["-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", *LOCAL]
 
 
 class Interrupted(Exception):
     pass
+
+
+def isolated(args, *, timeout=120, **kwargs):
+    """Run fixture Git without caller GIT_* overrides or global/system configuration."""
+    if list(args[:1]) != ["git"]:
+        return execute(args, timeout=timeout, **kwargs)
+    return execute(["git", *ISOLATED, *args[1:]], env=git_env(), timeout=timeout)
+
+
+def local(cwd, *args):
+    return git(cwd, *LOCAL, *args)
 
 
 def scenarios(*cases):
@@ -81,13 +95,20 @@ class PullRequestFixture(unittest.TestCase):
     tearDown = test_coordinator.WorkflowTests.tearDown
 
     def setUp(self):
-        test_coordinator.WorkflowTests.setUp(self)
+        with patch.object(test_coordinator, "execute", isolated):
+            test_coordinator.WorkflowTests.setUp(self)
         self.source = self.root / "source"
         self.github = self.provider(self.remote)
         self.team = Coordinator(self.store, self.github, self.agents)
+        self.exec_patch.stop()
+        self.exec_patch = patch("agent_team.coordinator.clone_repository", side_effect=self.local_clone)
+        self.exec_patch.start()
         self.git_patch.stop()
         self.git_patch = patch("agent_team.coordinator.git", side_effect=self.local_git)
         self.git_patch.start()
+
+    def local_clone(self, repo, destination, base, timeout):
+        return isolated(["git", "clone", "--branch", base, str(self.remote), str(destination)], timeout=timeout)
 
     def local_git(self, cwd, *args):
         args = list(args)
@@ -97,15 +118,15 @@ class PullRequestFixture(unittest.TestCase):
             args = [str(self.remote) if str(a).startswith("https://github.com/") else a for a in args]
             args = [f"refs/heads/{self.pull(int(m[1]))['branch']}"
                     if (m := re.fullmatch(r"refs/pull/(\d+)/head", str(a))) else a for a in args]
-        return git(cwd, *args)
+        return local(cwd, *args)
 
     def commit(self, branch, start, name, text, message):
-        git(self.source, "fetch", str(self.remote), start)
+        local(self.source, "fetch", str(self.remote), start)
         git(self.source, "checkout", "-B", branch, "FETCH_HEAD")
         (self.source / name).write_text(text)
         git(self.source, "add", ".")
         git(self.source, *COMMIT, "commit", "-m", message)
-        git(self.source, "push", str(self.remote), f"HEAD:refs/heads/{branch}")
+        local(self.source, "push", str(self.remote), f"HEAD:refs/heads/{branch}")
         return self.head_of(self.source)
 
     def open_pr(self, number=7, branch="feature", head_repo="example/demo", base="main", families=(),

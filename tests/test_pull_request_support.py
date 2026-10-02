@@ -1,4 +1,7 @@
 """Proofs for the offline pull-request fixture; they use no existing-PR feature API."""
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -111,6 +114,53 @@ class FixtureProofTests(support.PullRequestFixture):
         self.assertEqual(self.remote_head("pushed"), self.head_of(work))
         self.assertEqual(self.remote_head("pr-nine"), head)
         self.assertEqual(git(self.source, "rev-parse", "--abbrev-ref", "HEAD"), "pr-nine")
+
+    def test_bootstrap_and_clones_ignore_hostile_git_environment_and_configuration(self):
+        hostile = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        elsewhere, marker = hostile / "elsewhere", hostile / "hooked"
+        hook = f"#!/bin/sh\necho hooked >> '{marker}'\n"
+        for hooks in (hostile / "hooks", hostile / "template" / "hooks"):
+            hooks.mkdir(parents=True)
+            for name in ("post-checkout", "pre-commit", "post-commit", "pre-push", "reference-transaction"):
+                (hooks / name).write_text(hook)
+                (hooks / name).chmod(0o755)
+        elsewhere.mkdir()
+        # A rewrite of every absolute path to loopback HTTP: if honored, clones fail instead of staying local.
+        config = (f'[url "http://127.0.0.1:9/"]\n\tinsteadOf = /\n[init]\n\ttemplateDir = {hostile / "template"}\n'
+                  f'[core]\n\thooksPath = {hostile / "hooks"}\n[protocol]\n\tallow = always\n')
+        for path in (hostile / "config", hostile / "home" / ".gitconfig", hostile / "xdg" / "git" / "config"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(config)
+        env = {"GIT_DIR": str(elsewhere), "GIT_WORK_TREE": str(elsewhere), "GIT_TEMPLATE_DIR": str(hostile / "template"),
+               "GIT_CONFIG_GLOBAL": str(hostile / "config"), "GIT_CONFIG_SYSTEM": str(hostile / "config"),
+               "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": str(hostile / "hooks"),
+               "HOME": str(hostile / "home"), "XDG_CONFIG_HOME": str(hostile / "xdg")}
+        with patch.dict(os.environ, env):
+            self.tearDown()
+            self.setUp()
+            head = self.open_pr()
+            work = self.root / "work"
+            coordinator.clone_repository("example/demo", work, "feature", 60)
+            coordinator.git(work, "fetch", "https://github.com/example/demo.git", "refs/pull/7/head")
+            coordinator.git(work, "push", "https://github.com/example/demo.git", "HEAD:refs/heads/copied")
+        self.assertEqual((git(work, "rev-parse", "HEAD"), git(work, "rev-parse", "FETCH_HEAD")), (head, head))
+        self.assertEqual((self.remote_head(), self.remote_head("copied")), (head, head))
+        self.assertEqual(git(self.remote, "rev-parse", "--is-bare-repository"), "true")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertFalse(marker.exists())
+        for hooks in (self.source / ".git" / "hooks", work / ".git" / "hooks", self.remote / "hooks"):
+            self.assertFalse((hooks / "post-checkout").exists(), hooks)
+
+    def test_fixture_git_reaches_only_local_files(self):
+        work = self.root / "work"
+        self.local_clone("example/demo", work, "main", 60)
+        self.assertEqual(self.head_of(work), self.remote_head("main"))
+        for url in ("http://127.0.0.1:9/demo.git", "git://127.0.0.1:9/demo.git"):
+            with self.subTest(url=url):
+                self.refuses("not allowed", coordinator.git, work, "fetch", url, "main")
+                self.refuses("not allowed", support.isolated, ["git", "clone", url, str(self.root / "net")])
+                self.refuses("not allowed", support.local, work, "fetch", url, "main")
+                self.refuses("not allowed", support.local, work, "push", url, "HEAD:refs/heads/x")
 
     def test_moving_runs_callbacks_before_or_after_including_failed_calls(self):
         target = Target()
