@@ -1171,7 +1171,8 @@ class Coordinator:
         expected = run.get("published_sha") or run.get("sha")
         if run.get("pending_push_sha") == pr["head"]["sha"]:
             expected = pr["head"]["sha"]
-            self.store.save(run, published_sha=expected, pending_push_sha=None)
+            self.store.save(run, **(self.pushed(run, expected) if run.get("adopted_pr")
+                                    else dict(published_sha=expected, pending_push_sha=None)))
         if run.get("adopted_pr"):
             change = self.adopted_pr_change(project, run, expected, pr)
             if change and self.has_effect(run, "github"):
@@ -1623,10 +1624,20 @@ class Coordinator:
             # A plain push of the validated commit, never HEAD.
             git(cwd, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
                 "push", f"https://github.com/{info['head_repo']}.git", f"{sha}:refs/heads/{info['head_ref']}")
-            self.store.save(run, published_sha=sha, pending_push_sha=None, local_handoff_reason=None,
-                            adopted_pr=dict(info, pushed=info.get("pushed", []) + [sha]))
-            self.github.status(project["repo"], sha, "pending", "Revision pushed; independent review pending")
+            self.store.save(run, **self.pushed(run, sha))
+            self.flush(project, run)
+            if run["stage"] != "publish":
+                return
         self.store.save(run, stage=self.successor(run, "publish", "review"))
+
+    def pushed(self, run, sha):
+        """Saves the pushed commit with its pending status queued, bound to it; `flush` checks currency
+        and retries, so neither a crash nor a lost push response skips the status."""
+        info = run["adopted_pr"]
+        status = self.bound(dict(run, sha=sha, published_sha=sha), {
+            "type": "status", "sha": sha, "state": "pending", "description": "Revision pushed; independent review pending"})
+        return dict(published_sha=sha, pending_push_sha=None, local_handoff_reason=None,
+                    adopted_pr=dict(info, pushed=info.get("pushed", []) + [sha]), **self.queue_writes(run, status))
 
     def independent_review(self, project, run):
         root, cwd = self.store.layout(run, f"review-{run['round']}-{time.time_ns()}")
@@ -1722,8 +1733,14 @@ class Coordinator:
                                else "Validation failed; reviewer requested changes")
             status = self.bound(run, {"type": "status", "sha": run["sha"], "state": "failure", "evidence": run["sha"],
                                       "description": description})
-            self.revise(project, run, feedback, findings, record,
-                        writes=[comment, status] if run.get("published_sha") == run["sha"] else [])
+            writes = [comment, status] if run.get("published_sha") == run["sha"] else []
+            change = run.get("adopted_pr") and self.binding_change(project, run)
+            if change:
+                # Moved inputs leave the report as history: no rejected SHA, revision round or handoff.
+                self.store.save(run, **self.queue_writes(run, *writes))
+                self.adopted_pr_moved(project, run, *change)
+                return
+            self.revise(project, run, feedback, findings, record, writes=writes)
         elif withheld(run):
             self.store.save(run, review_withheld={"sha": run["sha"], "reason": withheld(run)},
                             stage=self.successor(run, "review", "ci"), **self.queue_writes(run, comment))
@@ -1922,7 +1939,10 @@ class Coordinator:
             raise TeamError("Journaled checkout changed; inspect it before recovery")
         context = self.evidence_context(project, dict(run, **changes)) if pending["context"] else run.get("evidence_context")
         cleared = {"pending_contribution": None} if pending["context"] else {}
-        self.store.save(run, **changes, **cleared, evidence_context=context, pending_swap=None)
+        # Recovery installs the checkout but never reactivates a terminal run.
+        if run["stage"] in {"closed", "merged"}:
+            cleared.update(stage=run["stage"], outbox=run.get("outbox", []))
+        self.store.save(run, **{**changes, **cleared}, evidence_context=context, pending_swap=None)
         return run
 
     def contributor_check(self, run, declared, adopting, local_changes=False):

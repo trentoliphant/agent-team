@@ -765,8 +765,10 @@ class PullRequestTests(unittest.TestCase):
         self.assert_fields(run, stage="blocked", pending_push_sha=run["sha"])
         self.team.resume(run["id"])
         run = self.ticks(run, 2)
-        self.assert_fields(run, stage="stopped", reviewed_sha=run["sha"], pending_push_sha=None)
-        self.assertEqual(self.remote_head(), run["sha"])
+        self.assert_fields(run, stage="stopped", reviewed_sha=run["sha"], pending_push_sha=None, outbox=[])
+        self.assertEqual((self.remote_head(), run["adopted_pr"]["pushed"]), (run["sha"], [run["sha"]]))
+        self.assertIn((run["sha"], "pending", "Revision pushed; independent review pending"),
+                      self.github.status_descriptions)
 
     def test_head_advanced_during_permission_lookup_is_never_pushed(self):
         run = self.at_publish()
@@ -914,11 +916,12 @@ class PullRequestTests(unittest.TestCase):
                     self.assertTrue(review["summary"])
                     self.assertIn("findings", review)
             elif case == "handoff":
-                self.assertEqual((run["stage"], len(run["handoffs"]), run["outbox"], self.github.statuses),
-                                 ("handoff", 1, [], []))
-                self.assertIn(f"{run['id']}-handoff-0", [i.get("marker") for i in run["unpublished_evidence"]])
+                # The exhausted budget is not consumed by a rejection whose inputs moved.
+                self.assert_fields(run, stage="stale", handoffs=None, round=0, outbox=[])
+                self.assertEqual((run.get("rejected_shas", []), self.github.statuses), ([], []))
+                self.assertIn(self.marker(run, head)[1], [i.get("marker") for i in run["unpublished_evidence"]])
                 self.assertIn("PR head moved", run["evidence_retired"]["reason"])
-                self.assertEqual(self.team.decide(run["id"], "repair")["stage"], "repair")
+                self.refuses("handoff", self.team.decide, run["id"], "repair")
             else:
                 self.assert_fields(run, stage=case, reviewed_sha=None, outbox=[])
                 self.assert_retired(report, head, run["base_sha"], "")
@@ -937,6 +940,102 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
         for reason in (run["error"], run["evidence_invalidations"][-1]["reason"]):
             self.assertIn("PR head moved", reason)
+
+    def test_rejecting_review_with_moved_inputs_is_history_only(self):
+        reasons = {"configuration": "Validation configuration changed", "local": LOCAL_CHANGE, "dirty": LOCAL_CHANGE,
+                   "head": "PR head moved", "base": "PR base changed"}
+        for kind in self.scenarios(*reasons):
+            self.store.update_project("demo", max_revisions=0)
+            head, base = self.open_pr(), self.remote_head("main")
+            self.agents.reject = True
+            run = self.reviewed(count=2, grants=["github"])
+            run = self.tick_moving_during_review(run, lambda: self.change(kind, run))
+            self.assert_fields(run, round=0, handoffs=None, revision_history=None, review_record=None, outbox=[],
+                               stage="stale" if kind in {"head", "base"} else "stopped")
+            self.assertEqual((run.get("rejected_shas", []), bool(run.get("needs_revision"))), ([], False))
+            self.assertEqual((self.github.comments, self.github.statuses), ({}, []))
+            self.assertEqual({i["type"] for i in run["unpublished_evidence"]}, {"comment", "status"})
+            self.assert_retired(self.report(run), head, base, reasons[kind], verdict="changes_requested")
+            if kind == "configuration":
+                # The unchanged commit can still be validated and reviewed afresh.
+                self.agents.reject = False
+                run = self.ticks(self.select(run, ["validate", "review"]), 2)
+                self.assert_fields(run, stage="stopped", reviewed_sha=head)
+
+    def test_close_refuses_interrupted_swap_and_recovery_keeps_closed_runs(self):
+        points = ("journal", "rename-1", "rename-2", "final-save")
+        for updating, point in self.scenarios(*((u, p) for u in (True, False) for p in points)):
+            if updating:
+                _, run = self.stopped_review()
+                external = self.push_external()
+                self.assertEqual(self.ticks(run, 1)["stage"], "stale")
+                recover = lambda: self.update(run)
+            else:
+                run = self.repair_handoff()
+                external = self.push_external(message="Repair")
+                recover = lambda: self.team.adopt(run["id"], ["human"])
+            self.interrupt(point, recover)
+            stage = self.store.get(run["id"])["stage"]
+            self.refuses("interrupted", test_coordinator.WorkflowTests.command, self, "close", run["id"])
+            self.assertEqual(self.store.get(run["id"])["stage"], stage)
+            if point == "rename-2":
+                # A run closed outside the CLI stays closed when its swap is recovered.
+                self.store.save(self.store.get(run["id"]), stage="closed")
+            run = recover()
+            self.assert_fields(run, pending_swap=None, sha=external,
+                               stage="closed" if point == "rename-2" else "stopped")
+            test_coordinator.WorkflowTests.command(self, "close", run["id"])
+            self.assert_fields(self.store.get(run["id"]), stage="closed", pending_swap=None)
+
+    def test_post_push_status_survives_failures_crashes_and_movement(self):
+        class Crash(Exception):
+            pass
+
+        for case in self.scenarios("failed", "crash", "moved"):
+            run = self.at_publish()
+            real_status, real_save = self.github.status, self.store.save
+
+            def status(repo, sha, state, description):
+                if description.startswith("Revision pushed"):
+                    raise TeamError("GitHub unavailable")
+                return real_status(repo, sha, state, description)
+
+            def save(record, **changes):
+                real_save(record, **changes)
+                if "published_sha" in changes and changes.get("outbox"):
+                    raise Crash()
+
+            def pushing(cwd, *args):
+                result = self.local_git(cwd, *args)
+                if "push" in args:
+                    self.push_external()
+                return result
+
+            context = {"failed": patch.object(self.github, "status", side_effect=status),
+                       "crash": patch.object(self.store, "save", side_effect=save),
+                       "moved": patch("agent_team.coordinator.git", side_effect=pushing)}[case]
+            with context:
+                try:
+                    self.ticks(run, 1)
+                except (Crash, TeamError):
+                    pass
+            run = self.store.get(run["id"])
+            pushed = run["published_sha"]
+            self.assertEqual((self.remote_head() == pushed, run["adopted_pr"]["pushed"]), (case != "moved", [pushed]))
+            descriptions = [(s, d) for s, _, d in self.github.status_descriptions if s == pushed]
+            if case == "moved":
+                self.assertEqual((run["stage"], run["outbox"], descriptions), ("stale", [], []))
+                self.assertEqual([i["description"] for i in run["unpublished_evidence"]],
+                                 ["Revision pushed; independent review pending"])
+                continue
+            self.ticks(self.team.resume(run["id"]) if case == "failed" else run, 1)
+            if case == "crash":
+                self.team.resume(run["id"])
+            run = self.ticks(run, 2)
+            self.assert_fields(run, stage="stopped", reviewed_sha=pushed, outbox=[])
+            descriptions = [d for s, _, d in self.github.status_descriptions if s == pushed]
+            self.assertIn("Revision pushed; independent review pending", descriptions)
+            self.assertNotEqual(descriptions[-1], "Coordinator blocked; maintainer action needed")
 
     def test_deliberate_update_snapshots_review(self):
         base = self.remote_head("main")

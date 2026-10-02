@@ -11,7 +11,7 @@ from . import __version__
 from . import companions
 from .agents import Agents, subscription_status
 from .coordinator import (ACTIONS, CONTRIBUTORS, MAX_EXTENSION, STOP_POINTS, ENTRY_POINTS, EFFECTS, PR_CONTRIBUTORS,
-                          PR_GRANTS, PR_MODES, Coordinator)
+                          PR_GRANTS, PR_MODES, Coordinator, require_no_swap)
 from .github import GitHub
 from .process import TeamError, execute
 from .state import CoordinatorBusy, Store, default_home
@@ -339,6 +339,8 @@ def dispatch(args, store):
         emit(team.resume(args.run_id))
     elif args.command == "close":
         run = store.get(args.run_id)
+        # Recovery would otherwise reinstall the journaled stage and reactivate the run.
+        require_no_swap(run)
         store.save(run, stage="closed", in_flight=False, notification_pending=True)
         team.notify(store.project(run["project"]), run)
         emit({"id": run["id"], "stage": "closed", "note": "GitHub issue/PR and local checkout retained"})
