@@ -19,8 +19,7 @@ PR_MODES = {
 PR_GRANTS = ("edit", "push", "github")
 IDENTITY = ("number", "url", "head_repo", "head_ref", "base_ref", "state", "draft")
 REVIEWER = ("agent", "family", "cli_version", "requested_model", "observed_models")
-REFUSED_REVISION = ("Independent review cannot be established ({}), so revision is refused. "
-                    "Review mode reports findings and withholds an independent-review success verdict")
+REFUSED_REVISION = "Independent review cannot be established ({}); revision refused. Use review mode"
 
 
 def pull_number(project, value):
@@ -103,13 +102,11 @@ def pr_inheritance(project, prior, mode, number):
     exhausted = [r for r in prior if r.get("handoffs") and r["handoffs"][-1]["round"] >= limit_of(r)]
     if mode != "review" and exhausted:
         raise TeamError(f"PR #{number} reached its revision limit in run {exhausted[-1]['id']}; readoption "
-                        "does not reset the budget. Review mode is still available; further revision needs "
-                        "an operator repair outside Agent Team")
+                        "keeps that budget. Use review mode or repair outside Agent Team")
     limit = max((limit_of(r) for r in prior), default=project["max_revisions"])
     round_ = max((r["round"] for r in prior), default=0) + (1 if mode == "findings" else 0)
     if mode != "review" and round_ > limit:
-        raise TeamError(f"PR #{number} has no revision budget left from earlier runs; readoption does not "
-                        "reset it. Review mode is still available")
+        raise TeamError(f"PR #{number} has no revision budget left; use review mode")
     inherited = {"runs": [r["id"] for r in prior],
                  "contributors": sorted({c for r in prior for c in r.get("contributors", [])}
                                         | {f for r in prior for f in core.contributing_families(r)}),
@@ -183,10 +180,10 @@ class PullRequests:
                             f"PR #{number} is closed; Agent Team never reopens pull requests")
         head_repo = (pr["head"].get("repo") or {}).get("full_name")
         if not head_repo:
-            raise TeamError("PR head repository is unavailable (for example, a deleted fork); adoption refused")
+            raise TeamError("PR head repository is unavailable; adoption refused")
         if mode != "review" and pr["base"]["ref"] != project["base"]:
-            raise TeamError(f"PR targets {pr['base']['ref']}, not registered base {project['base']}. Revision is "
-                            "refused before any change; Agent Team never retargets PRs. Use review mode instead")
+            raise TeamError(f"PR targets {pr['base']['ref']}, not registered base {project['base']}; "
+                            "Agent Team never retargets PRs. Use review mode")
         with tempfile.TemporaryDirectory(prefix="agent-team-pr-") as temporary:
             found = self.fetch(project, number, pr["base"]["ref"], heads(pr), Path(temporary) / "input",
                                "PR head or base moved during adoption; retry")
@@ -289,6 +286,9 @@ class PullRequests:
         if core.head_moved(info, pr):
             raise TeamError("PR head repository or branch changed; close this run and adopt the PR again")
         cwd = team.store.workspace(run)
+        if cwd.exists() and not run.get("git_metadata"):
+            # The installation journal is verified only by the preparation stage.
+            raise TeamError("Initial preparation was interrupted; finish it with agent-team resume RUN_ID first")
         if cwd.exists():
             core.assert_metadata(cwd, run["git_metadata"])
             if core.git(cwd, "status", "--porcelain"):
@@ -308,8 +308,7 @@ class PullRequests:
         if independence["established"] and FAMILIES[run["reviewer"]] in families:
             independence = {"established": False, "reason": "the assigned reviewer's family contributed"}
         if info["mode"] != "review" and not independence["established"]:
-            raise TeamError(f"Independent review cannot be established ({independence['reason']}); revision "
-                            "stops here. Close this run, or adopt the PR again in review mode (previous work retained)")
+            raise TeamError(REFUSED_REVISION.format(independence["reason"]) + " (previous work retained)")
         update = {"at": time.time(), "declared": declared, "trailer_families": found["trailer_families"],
                   "before": {"head": info["head_sha"], "base": info["base_sha"], "candidate": run.get("sha")},
                   "after": {"head": found["head"], "base": found["base"]},
@@ -411,16 +410,14 @@ class PullRequests:
         plan = core.validation_checks(run.get("tests", []), run.get("validation_plan")) if current else []
         omitted = [c["command"] for c in plan if not c["performed"]]
         limitations = [text for applies, text in (
-            (currency["verified"] is None, f"Evidence currency was not verified ({currency['reason']}); recorded "
-             "results are reported as not current. Run pr show again when no worker is active."),
-            (currency["verified"] is not None and not current, "The PR or its evidence inputs changed after the "
-             f"recorded evidence was gathered ({currency['reason']}); earlier validation and review results are "
-             "historical and do not apply to the current PR."),
+            (currency["verified"] is None,
+             f"Evidence currency was not verified ({currency['reason']}); results are reported as not current."),
+            (currency["verified"] is not None and not current, f"Evidence inputs changed ({currency['reason']}); "
+             "earlier validation and review results are historical."),
             (run.get("validated_sha") != sha or not current,
              "Configured validation has not passed for the current candidate."),
             (omitted, f"Configured validation commands omitted after an earlier failure: {', '.join(omitted)}."),
-            (not info["base_contained"], f"The head does not contain base {info['base_sha']}; the base was not "
-             "merged, so validation and review reflect the head as-is."),
+            (not info["base_contained"], f"The head does not contain base {info['base_sha']}; the base was not merged."),
             (reason, f"Independent-review success withheld: {reason}."),
             (not checks, "GitHub CI checks were not checked."),
             (checks and not latest_check, "GitHub CI checks were not checked for the current candidate and base; "

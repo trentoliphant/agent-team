@@ -282,7 +282,8 @@ class PullRequestTests(unittest.TestCase):
             return result
 
         def save(record, **changes):
-            if point == "final-save" and "pending_swap" in changes and changes["pending_swap"] is None:
+            if (point == "final-save" and "pending_swap" in changes and changes["pending_swap"] is None
+                    or point == "metadata" and "git_metadata" in changes):
                 raise Interrupted()
             real_save(record, **changes)
             if point == "journal" and changes.get("pending_swap"):
@@ -684,6 +685,8 @@ class PullRequestTests(unittest.TestCase):
             self.assertEqual(run["evidence_invalidations"][-1]["head"], head)
             if method != "status":
                 self.assert_no_success()
+            # A success already written before the movement is revoked.
+            self.assertNotEqual([s for c, s in self.github.statuses if c == head][-1:], ["success"])
             if method in {"ci", "run"}:
                 self.assertFalse([c for c in comment.call_args_list if c.args[2].endswith(("-ready", head))])
             if kind in {"local", "dirty"}:
@@ -1352,6 +1355,55 @@ class PullRequestTests(unittest.TestCase):
             self.assertNotIn("\n line 51\n", prompt)
             self.assertEqual(self.report(run)["review"]["patch"], run["review_record"]["patch"])
             self.assertIn("complete context-free patch", review_comment(head, run["review_record"]))
+
+    def test_interrupted_readiness_success_is_revoked_after_base_movement(self):
+        head, run = self.readiness_run()
+        with self.writes("status", lambda state: state == "success", self.crash), self.assertRaises(Interrupted):
+            self.ticks(run)
+        self.assertEqual(self.github.statuses[-1], (head, "success"))
+        self.advance_base()
+        self.assert_fields(self.ticks(run), stage="stale", readiness_status=None)
+        self.assertEqual(self.github.statuses[-1], (head, "pending"))
+
+    def test_interrupted_initial_preparation_recovers_the_installed_checkout(self):
+        for point in self.scenarios("rename-1", "metadata", "tampered"):
+            head = self.open_pr()
+            run = self.adopt_pr()
+            self.interrupt("metadata" if point == "metadata" else "rename-1", lambda: self.ticks(run))
+            if point == "tampered":
+                self.local_commit(run)
+            self.ticks(run)
+            self.refuses("Initial preparation was interrupted", self.update, run)
+            run = self.ticks(self.team.resume(run["id"]), 3)
+            if point == "tampered":
+                self.assertIn("differs from the adopted PR head", run["error"])
+                continue
+            self.assert_reviewed(run, head, installing=None)
+            self.assertEqual(self.roles(), ["review"])
+
+    def test_exhausted_fork_revision_is_repaired_locally_without_push_or_base_merge(self):
+        self.configure(max_revisions=1)
+        base, head = self.remote_head("main"), self.open_pr(8, "fork-feature", head_repo=FORK, reject=2)
+        run = self.until_handoff(self.adopt_pr("revise", "8", grants=ALL))
+        rejected = run["sha"]
+        self.assertIn("local repair checkout", run["handoffs"][-1]["text"])
+        checkout = Path(self.team.decide(run["id"], "repair")["repair_checkout"]["path"])
+        self.assertEqual(self.head_of(checkout), rejected)
+        (checkout / "repair.txt").write_text("repair\n")
+        git(checkout, "add", ".")
+        git(checkout, *COMMIT, "commit", "-m", "Repair")
+        repaired = self.head_of(checkout)
+        run = self.team.adopt(run["id"], ["human"])
+        self.assert_awaiting(run, sha=repaired, base_sha=base, published_sha=head, pending_swap=None)
+        self.assertTrue(run["adoptions"][-1]["local"] and rejected in run["rejected_shas"])
+        self.agents.reject = False
+        run = self.revalidate(run)
+        self.assert_reviewed(run, repaired)
+        self.assertEqual(self.report(run)["local_handoff"]["commit"], repaired)
+        self.assert_untouched(head, 8, "fork-feature")
+
+    def crash(self):
+        raise Interrupted()
 
     def test_cli_parses_existing_pr_operations(self):
         parse = parser().parse_args
