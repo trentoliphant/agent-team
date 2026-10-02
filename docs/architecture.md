@@ -163,8 +163,8 @@ same changed lines, line numbers, and no-newline markers as the full diff. Hunk
 lengths come from hunk headers, so content that looks like diff syntax stays content.
 Both formats are parsed before use. Each file section must be complete: metadata in
 Git's order with no missing or contradictory parts, names that agree with it, and
-exactly the body it implies (none for mode-only, pure rename/copy, or empty
-created/deleted files; otherwise a binary notice or `---`/`+++` with hunks). Hunks must
+exactly the body it implies (none for mode-only, 100%-similar rename/copy, or empty
+created/deleted files; a rename/copy below 100% needs an index line and a body; otherwise a binary notice or `---`/`+++` with hunks). Hunks must
 change something, have valid ranges, and be in order without overlap; unchanged lines
 between hunks must line up on both sides. No-newline markers must follow the last line
 of their side. The context-free patch may not contain unchanged lines. Both must

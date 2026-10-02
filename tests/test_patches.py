@@ -259,6 +259,31 @@ class ReviewPatchTests(unittest.TestCase):
         self.assertEqual(review_patch(fake_git({False: default, True: b""}), self.repo, base, head)[1]["format"],
                          "default")
 
+    def test_partial_rename_or_copy_without_body_fails_closed(self):
+        base, head = self.scattered()
+        default, compact = self.diffs(base, head)
+        limit = len(compact) + 200
+        self.assertGreater(len(default), limit)
+        for kind in (b"rename", b"copy"):
+            section = b"diff --git a/f b/g\nsimilarity index %s%%\n" + kind + b" from f\n" + kind + b" to g\n"
+            exact, partial = section % b"100", section % b"90"
+            with self.subTest(kind=kind):
+                self.assertEqual(len(changes(exact)), 1)
+                for patch in (partial, partial.replace(b"90%", b"99%")):
+                    for flag in (False, True):
+                        with self.assertRaisesRegex(Unproven, "partial rename or copy"):
+                            changes(patch, compact=flag)
+                with self.assertRaisesRegex(TeamError, "Diff could not be parsed .*review refused"):
+                    review_patch(fake_git({False: default + partial, True: b""}), self.repo, base, head)
+                with self.assertRaisesRegex(TeamError, "Context-free patch could not be proven complete"):
+                    review_patch(fake_git({False: default + exact, True: compact + partial}), self.repo, base, head,
+                                 limit=limit)
+                # The exact rename or copy passes both paths, so each refusal is due to the partial similarity.
+                self.assertEqual(review_patch(fake_git({False: default + exact, True: b""}), self.repo, base,
+                                              head)[1]["format"], "default")
+                self.assertEqual(review_patch(fake_git({False: default + exact, True: compact + exact}), self.repo,
+                                              base, head, limit=limit)[1]["format"], "compact")
+
     def test_invalid_utf8_is_refused_not_replaced(self):
         base = self.commit({"big.txt": "\n".join(self.lines) + "\n", "latin.txt": b"keep\n\xff\n"}, "Base")
         edited = [f"edited {n}" if n % 40 == 0 else line for n, line in enumerate(self.lines)]
@@ -322,6 +347,10 @@ class PatchStructureTests(unittest.TestCase):
         "rename names disagree": b"diff --git a/f b/h\nsimilarity index 100%\nrename from f\nrename to g\n",
         "rename to itself": b"diff --git a/f b/f\nsimilarity index 100%\nrename from f\nrename to f\n",
         "similarity over 100": b"diff --git a/f b/g\nsimilarity index 101%\nrename from f\nrename to g\n",
+        "partial rename without body": b"diff --git a/f b/g\nsimilarity index 90%\nrename from f\nrename to g\n",
+        "partial copy without body": b"diff --git a/f b/g\nsimilarity index 90%\ncopy from f\ncopy to g\n",
+        "partial rename with mode without body": b"diff --git a/f b/g\nold mode 100644\nnew mode 100755\n"
+                                                 b"similarity index 99%\nrename from f\nrename to g\n",
         "created and renamed": b"diff --git a/f b/g\nnew file mode 100644\nsimilarity index 100%\nrename from f\n"
                                b"rename to g\nindex 0000000..e69de29\n",
         "names differ without rename": TEXT.replace(b" b/f\n", b" b/g\n", 1),

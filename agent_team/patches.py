@@ -164,9 +164,11 @@ def section(line, meta, at):
         raise Unproven(f"file at line {at} has an invalid similarity index")
     index = meta.get("index")
     if index is None:
-        # Without an index line the content is unchanged, so only a mode change or rename/copy remains.
+        # Without an index line the content is unchanged, so only a mode change or exact rename/copy remains.
         if created or deleted or "dissimilarity" in meta or not (chmod or moved):
             raise Unproven(f"file at line {at} has no recorded change")
+        if moved and meta["similarity"][0] != b"100":
+            raise Unproven(f"file at line {at} is a partial rename or copy without an index line and body")
         bodyless = True
     else:
         before, after, mode = index
