@@ -14,6 +14,7 @@ this package or needs its workflow files.
 | `github.py` | GitHub API reads and coordinator-owned writes through `gh` |
 | `writing.py` | Writing-standard precedence, validation, and prompt text (style only); the coordinator applies the `status` policy to its status comments |
 | `coordinator.py` | State transitions, independent review, Git publication, discovery |
+| `patches.py` | Complete, budget-bounded review patches and their completeness proof |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 | `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
 
@@ -153,6 +154,19 @@ exact candidate commit and a fresh CLI session. It receives the issue, diff,
 source, and coordinator validation results, not the author's private transcript.
 Reviewer modifications invalidate the report. A passing report with findings is
 rejected as ambiguous.
+
+The review budget is 180,000 characters. The diff from the base SHA to the
+candidate is sent in full when it fits. Otherwise the coordinator generates a
+context-free diff (`--unified=0`). It uses that diff only if it fits and its raw bytes
+parse to the same per-file headers (mode, rename, binary, and index lines) and the
+same changed lines, line numbers, and no-newline markers as the full diff. Hunk
+lengths come from hunk headers, so content that looks like diff syntax stays content.
+A malformed, mismatched, or still oversized patch blocks the review; the coordinator
+never truncates a patch, drops files, or raises the budget. The review record keeps
+the patch format, range, sizes, SHA-256, and file and changed-line counts. When the
+compact patch is used, the reviewer prompt and the published review comment state
+that surrounding context was omitted and that the reviewer must inspect the full
+source in the checkout.
 
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without
