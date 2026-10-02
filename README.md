@@ -705,7 +705,12 @@ flag, operation, contributors, `Agent-Family` trailers, and GitHub usernames.
   unless `--grant github` is given.
 - `pr revise` also fixes a rejection on the PR branch, revalidates, pushes, and
   reviews the new commit, within the budget. It needs `edit`, `push`, `github`.
-- `pr findings` revises only the `--finding` items, with the same grants.
+- `pr findings` revises only the `--finding` items, with the same grants. That
+  first edit uses one revision. If the fresh review raises other findings, they
+  are reported and the run stops; it does not fix them on its own.
+
+Each author pass needs a round that a rejection, supplied findings, or `decide
+extend` has reserved. A round allows one pass. A passing review reserves none.
 
 ```sh
 # Alternatives: review only, review with fixes (--plan previews), supplied findings.
@@ -744,7 +749,10 @@ evidence reuse. A change stops the run as `stale`, keeps unpublished evidence
 local, and marks earlier evidence `historical_evidence`. `pr update` adopts new
 commits deliberately, keeps the old checkout and unpushed revisions, and is
 rerunnable. A new head repository or branch needs a new adoption. The base is
-never merged; pushes are fast-forward only. Re-adoption keeps the budget; after
+never merged; pushes are fast-forward only. Configuration or companion-pin
+changes also retire evidence, in every stage, including handoff, repair, closed,
+and merged. Re-adoption keeps the budget and the earlier runs' contributors and
+unresolved trailers (`inherited_provenance`); after
 the limit only review is accepted, and `handoff`/`decide`/`adopt` apply (repairs
 are used as-is).
 

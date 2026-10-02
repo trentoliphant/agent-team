@@ -300,13 +300,15 @@ evidence only for a published candidate and with the content grant.
 
 `pr review|revise|findings` adopts a PR as an issue-less selected run (rules in
 the README); its published commit is the PR head. A rejection within budget
-enters `pr_followup` until `select --run`. A failed validation of the unedited
+enters `pr_followup` (revise mode only) until `select --run`. Author passes need
+`reserved_round == round` and a round not in `authored_rounds`. A failed validation of the unedited
 head stays in `attempted_context` until review; one rejection records both.
 Unestablished independence records `review_withheld`, not `reviewed_sha`.
-Movement retires evidence to `evidence_invalidations`, queued writes to
-`unpublished_evidence`, and stops as `stale`. Re-adoption inherits round, limit,
-and `rejected_shas` from `prior_runs`. `pr update` journals `pending_pr_update`
-before its swap, so a rerun completes it.
+Movement, configuration changes, and pin changes retire evidence to `evidence_invalidations`
+and `evidence_retired`, in every stage, and move bound queued writes to `unpublished_evidence`.
+Recovery stages keep their stage. Re-adoption inherits round, limit, `rejected_shas`, contributors,
+and unresolved trailers from `prior_runs`. `pr update` and `adopt` journal `pending_swap`
+before any rename, so a rerun completes it with the recorded inputs.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor

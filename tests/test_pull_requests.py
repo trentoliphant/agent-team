@@ -930,14 +930,8 @@ class PullRequestTests(unittest.TestCase):
         self.assertIn("PR head moved", run["evidence_invalidations"][-1]["reason"])
         self.assertEqual(len(self.agents.calls), 1)
 
-    def interrupted_update(self, point):
-        """Interrupt update_pr at `point`, then recover by running the update again."""
-        head = self.open_pr()
-        run = self.reviewed()
-        external = self.push_external()
-        run = self.ticks(run, 1)
-        self.assertEqual(run["stage"], "stale")
-
+    def interrupt(self, point, action):
+        """Run `action`, interrupting its journaled checkout swap at `point`."""
         class Interrupted(Exception):
             pass
 
@@ -951,24 +945,33 @@ class PullRequestTests(unittest.TestCase):
             return result
 
         def save(record, **changes):
-            if point == "final-save" and "pending_pr_update" in changes and changes["pending_pr_update"] is None:
+            if point == "final-save" and "pending_swap" in changes and changes["pending_swap"] is None:
                 raise Interrupted()
             real_save(record, **changes)
-            if point == "journal" and changes.get("pending_pr_update"):
+            if point == "journal" and changes.get("pending_swap"):
                 raise Interrupted()
 
         with patch("pathlib.Path.rename", rename), patch.object(self.store, "save", side_effect=save), \
                 self.assertRaises(Interrupted):
-            self.team.update_pr(run["id"], ["human"])
+            action()
+
+    def interrupted_update(self, point):
+        """Interrupt update_pr at `point`, then recover by running the update again."""
+        head = self.open_pr()
+        run = self.reviewed()
+        external = self.push_external()
+        run = self.ticks(run, 1)
+        self.assertEqual(run["stage"], "stale")
+        self.interrupt(point, lambda: self.team.update_pr(run["id"], ["human"]))
         run = self.store.get(run["id"])
         self.assertEqual((run["stage"], run["sha"]), ("stale", head))
-        self.assertTrue(run["pending_pr_update"])
-        with self.assertRaisesRegex(TeamError, "interrupted"):
-            self.team.select("demo", ["validate"], [], run_id=run["id"])
-        with self.assertRaisesRegex(TeamError, "interrupted"):
-            self.team.resume(run["id"])
+        self.assertEqual(run["pending_swap"]["command"], "pr update RUN_ID")
+        for command in (lambda: self.team.select("demo", ["validate"], [], run_id=run["id"]),
+                        lambda: self.team.resume(run["id"])):
+            with self.assertRaisesRegex(TeamError, "interrupted"):
+                command()
         run = self.team.update_pr(run["id"], ["human"])
-        self.assertIsNone(run["pending_pr_update"])
+        self.assertIsNone(run["pending_swap"])
         self.assertEqual((run["stage"], run["next_stage"], run["sha"]), ("stopped", "validate", external))
         self.assertEqual(git(self.store.workspace(run), "rev-parse", "HEAD"), external)
         self.assertEqual(git(Path(run["adopted_pr"]["updates"][0]["preserved"]), "rev-parse", "HEAD"), head)
@@ -1068,6 +1071,147 @@ class PullRequestTests(unittest.TestCase):
         self.assertEqual(run["adopted_pr"]["head_sha"], external)
         self.assertFalse(run["adopted_pr"]["base_contained"])
         self.assertEqual(self.remote_head(), external)
+
+    def test_every_author_entry_needs_a_reserved_unused_round(self):
+        for limit in self.scenarios(0, 2):
+            self.store.update_project("demo", max_revisions=limit)
+            head = self.open_pr()
+            run = self.ticks(self.writable(), 3)
+            self.assertEqual((run["stage"], run["reviewed_sha"], run["round"]), ("stopped", head, 0))
+            # A passing review reserves no round, so no continuation can start an author pass.
+            for operations in (["implement", "validate", "review"], ["revision", "validate"]):
+                with self.assertRaisesRegex(TeamError, "No revision round is reserved"):
+                    self.team.select("demo", operations, ["edit"], run_id=run["id"])
+            self.store.save(run, round=limit + 1, reserved_round=limit + 1, needs_revision=True)
+            with self.assertRaisesRegex(TeamError, "no revision budget left"):
+                self.team.select("demo", ["implement", "validate"], ["edit"], run_id=run["id"])
+            self.assertEqual([role for _, role in self.agents.calls], ["review"])
+            self.assertEqual(self.remote_head(), head)
+
+    def test_supplied_findings_stop_on_fresh_unrelated_findings(self):
+        self.store.update_project("demo", max_revisions=3)
+        self.open_pr()
+        self.agents.reject = 1
+        self.agents.findings = [[{"severity": "P2", "location": "other.txt:3", "evidence": "Unrelated",
+                                  "request": "Rewrite other.txt"}]]
+        run = self.writable("findings", findings=["Append a closing line to feature.txt"])
+        self.assertIsNone(run["pr_followup"])
+        run = self.ticks(run, 6)
+        # The fresh finding is reported; nothing outside the supplied scope is revised automatically.
+        self.assertEqual((run["stage"], run["next_stage"], run["round"]), ("stopped", "implement", 2))
+        self.assertEqual([role for _, role in self.agents.calls], ["implement", "review"])
+        self.assertIn("supplied findings remain the revision scope", run["partial_result"])
+        report = self.team.pr_report(run["id"])
+        self.assertEqual(report["requested_findings"], ["Append a closing line to feature.txt"])
+        self.assertEqual(report["review"]["findings"][0]["location"], "other.txt:3")
+        # A round whose author pass already ran can never start another one.
+        self.store.save(run, round=1, reserved_round=1)
+        with self.assertRaisesRegex(TeamError, "each round allows one pass"):
+            self.team.select("demo", ["revision", "validate"], ["edit"], run_id=run["id"])
+        self.assertEqual(len(self.agents.calls), 2)
+
+    def test_readoption_carries_prior_provenance_forward(self):
+        for first, second, message in self.scenarios((["openai"], ["human"], "cannot review independently"),
+                                                     (["human", "unknown"], ["human"], "unknown contributors"),
+                                                     (["openai"], ["anthropic"], "both model families")):
+            self.open_pr()
+            run = self.reviewed(contributors=first)
+            self.store.save(run, stage="closed")
+            self.push_external()
+            # New declarations of the retained work never clear the earlier run's recorded authorship.
+            with self.assertRaisesRegex(TeamError, message):
+                self.team.adopt_pr("demo", "7", "revise", second, grants=["edit"], reviewer="codex")
+            again = self.team.adopt_pr("demo", "7", "review", second)
+            self.assertEqual(again["adopted_pr"]["inherited_provenance"]["runs"], [run["id"]])
+            self.assertTrue(set(first) <= set(again["contributors"]))
+            if first == ["openai"] and second == ["human"]:
+                self.assertEqual((again["author"], again["reviewer"]), ("codex", "claude"))
+            else:
+                self.assertIn(message, again["independence"]["reason"])
+
+    def test_movement_during_final_review_keeps_handoff_and_retires_evidence(self):
+        self.store.update_project("demo", max_revisions=0)
+        head = self.open_pr()
+        self.agents.reject = True
+        run = self.tick_moving_during_review(self.reviewed(count=2, grants=["github"]))
+        self.assertEqual((run["stage"], len(run["handoffs"])), ("handoff", 1))
+        self.assertEqual((run["outbox"], self.github.comments, self.github.statuses), ([], {}, []))
+        self.assertIn(f"{run['id']}-handoff-0", [i.get("marker") for i in run["unpublished_evidence"]])
+        self.assertIn("PR head moved", run["evidence_retired"]["reason"])
+        report = self.team.pr_report(run["id"])
+        self.assertFalse(report["current_evidence"] or report["review"]["current"])
+        self.assertEqual((report["review"]["commit"], report["review"]["verdict"]), (head, "changes_requested"))
+        # The handoff decision and its budget stay available.
+        self.assertEqual(self.team.decide(run["id"], "repair")["stage"], "repair")
+
+    def test_closed_or_merged_during_review_retires_evidence(self):
+        for merged in self.scenarios(False, True):
+            head = self.open_pr()
+            run = self.reviewed(count=2, grants=["github"])
+            with patch.object(self, "push_external",
+                              lambda: self.github.pulls[7].update(state="closed", merged=merged)):
+                run = self.tick_moving_during_review(run)
+            self.assertEqual((run["stage"], run["reviewed_sha"]), ("merged" if merged else "closed", None))
+            self.assertEqual((run["outbox"], self.github.comments), ([], {}))
+            report = self.team.pr_report(run["id"])
+            self.assertFalse(report["current_evidence"] or report["independent_review_success"]
+                             or report["review"]["current"])
+            self.assertEqual((report["review"]["commit"], report["historical_evidence"][-1]["verdict"]), (head, "pass"))
+            self.assertEqual(self.github.pulls[7]["state"], "closed")
+
+    def test_queued_evidence_is_withheld_after_configuration_or_pin_change(self):
+        for change, reason in self.scenarios(("configuration", "Validation configuration changed"),
+                                             ("pins", "Companion pins changed")):
+            head = self.open_pr()
+            run = self.reviewed(count=2, grants=["github"])
+            with patch.object(self.github, "comment", side_effect=TeamError("GitHub unavailable")), \
+                    self.assertRaises(TeamError):
+                self.ticks(run, 1)
+            self.assertEqual(len(self.store.get(run["id"])["outbox"]), 1)
+            if change == "configuration":
+                self.store.update_project("demo", tests=["true"])
+                run = self.ticks(run, 1)
+            else:
+                with patch.object(self.team, "pins_changed", return_value=True):
+                    run = self.ticks(run, 1)
+            self.assertEqual((run["stage"], run["next_stage"], run["outbox"]), ("stopped", "validate", []))
+            self.assertEqual(self.github.comments, {})
+            self.assertEqual(run["unpublished_evidence"][0]["withheld_reason"], reason)
+            report = self.team.pr_report(run["id"])
+            self.assertFalse(report["current_evidence"] or report["independent_review_success"])
+            self.assertEqual((report["review"]["commit"], report["review"]["current"]), (head, False))
+            self.assertEqual(report["historical_evidence"][-1]["reason"], reason)
+            # The saved review is never rerun: new validation must be selected explicitly first.
+            with self.assertRaisesRegex(TeamError, "validat"):
+                self.team.select("demo", ["review"], [], run_id=run["id"])
+            self.assertEqual(len(self.agents.calls), 1)
+
+    def test_interrupted_repair_adoption_recovers_recorded_inputs(self):
+        for point in self.scenarios("journal", "rename-1", "rename-2", "final-save"):
+            run = self.repair_handoff()
+            head = run["sha"]
+            external = self.push_external(message="Repair")
+            self.interrupt(point, lambda: self.team.adopt(run["id"], ["human"]))
+            stored = self.store.get(run["id"])
+            self.assertEqual((stored["stage"], stored["sha"]), ("repair", head))
+            self.assertEqual(stored["pending_swap"]["command"], "adopt RUN_ID")
+            with self.assertRaisesRegex(TeamError, "interrupted"):
+                self.team.decide(run["id"], "stop")
+            # The PR moves again before recovery; recovery still installs the journaled inputs.
+            later = self.commit("feature", "feature", "later.txt", "later\n", "Later change")
+            run = self.team.adopt(run["id"], ["human"])
+            self.assertIsNone(run["pending_swap"])
+            self.assertEqual((run["stage"], run["next_stage"], run["sha"], run["round"]),
+                             ("stopped", "validate", external, 1))
+            self.assertEqual([(a["head"], a["declared"]) for a in run["adoptions"]], [(external, ["human"])])
+            self.assertEqual(run["adopted_pr"]["head_sha"], external)
+            self.assertEqual(git(self.store.workspace(run), "rev-parse", "HEAD"), external)
+            preserved = list(self.store.run_root(run).glob("author-preserved-*"))
+            self.assertEqual([git(p, "rev-parse", "HEAD") for p in preserved], [head])
+            self.assertEqual(self.remote_head(), later)
+            run = self.ticks(run, 1)
+            self.assertEqual(run["stage"], "stale")
+            self.assertIn("agent-team adopt", run["error"])
 
     def test_cli_parses_existing_pr_operations(self):
         args = parser().parse_args(["pr", "review", "demo", "7", "--contributor", "unknown"])
