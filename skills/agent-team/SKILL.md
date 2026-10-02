@@ -284,8 +284,9 @@ resume it. Selection and preparation revisions remain recorded in provenance.
 
 ## Existing pull requests
 
-Confirm the PR belongs to a registered repository and which operation and
-effects the operator authorizes; `--plan` previews without saving.
+Confirm the PR's registered repository and the authorized operation and effects
+(`--plan` previews). Alternatives: review only; review with fixes; supplied
+findings; continuation after an external push (`stale`).
 
 ```sh
 agent-team pr review example 42 --contributor human
@@ -293,26 +294,22 @@ agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
   --contributor human --grant edit --grant push --grant github
 agent-team pr findings example 42 --contributor human --grant edit --grant push --grant github \
   --finding 'parser.py:88 drops the last field; keep it and add a test'
-agent-team run example --run RUN_ID --watch
-agent-team pr show RUN_ID
 agent-team pr update RUN_ID --contributor human
 agent-team select example --run RUN_ID --operations validate review
+agent-team run example --run RUN_ID --watch
+agent-team pr show RUN_ID
 ```
 
-These are alternatives. `pr review` validates and reviews the head, then stops
-without edits, pushes, base merges, or repair; `--grant github` publishes the
-review. `pr revise` then fixes findings on the PR's branch within the budget;
-`pr findings` revises only supplied findings. Both need fresh review of the exact
-result. A later `select --run` performs only the operations it names.
-
-Declare every contributor truthfully (`human`, `openai`, `anthropic`, `unknown`),
-including your own family. Never infer a family from a GitHub username. With
-`unknown`, both families, or an unsupported trailer, independent-review success
-is withheld and revision refused; report it, never change declarations.
-
-From `pr show`, report the head and base, roles, validation, findings, checks run
-and omitted, and any local handoff. A standalone review is not a readiness
-verdict. After movement (`stale`), inspect the change, run `pr update` with the
-new contributors, and reselect validation. Without push access, hand over the
-commit and patch. Never open a replacement PR, force-push, merge the base,
-reopen, retarget, change draft state, or merge.
+`pr review` stops after findings, with no edits, pushes, base merges, or repair;
+`--grant github` publishes them. `pr revise` fixes findings on the PR branch
+within the budget; `pr findings` revises only supplied ones; both need fresh
+exact-commit review. A later `select --run` does only what it names. Declare
+every contributor truthfully (`human`, `openai`, `anthropic`, `unknown`),
+including your family; never infer one from a username. With `unknown`, both
+families, or an unsupported trailer, independent-review success is withheld and
+revision refused; report it, never change declarations. From `pr show`, report
+head, base, roles, validation, findings, checks run and omitted, and any local
+patch handoff (no push access). A standalone review is not a readiness verdict.
+After `stale`, inspect the change before `pr update` and reselect validation.
+Never open a replacement PR, force-push, merge the base, reopen, retarget,
+change draft state, or merge.

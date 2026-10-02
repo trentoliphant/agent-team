@@ -35,13 +35,10 @@ switching identities mid-run if you want to retain a single status comment.
 
 ## Existing pull requests
 
-`agent-team pr` reads PRs and fetches their heads through the base repository's
-`refs/pull/N/head`, so accessible fork PRs can be reviewed. Pushing a revision
-needs write access to the head repository, or maintainer edits on a fork plus
-write access to the base. Without either, the revision stays local and no
-replacement PR is created. Review comments and statuses on an adopted PR need the
-`github` grant. Adoption never edits the PR title, description, labels, draft
-state, or base.
+`agent-team pr` fetches heads through the base repository's `refs/pull/N/head`,
+so accessible fork PRs can be reviewed. Push requirements are in the README.
+Comments and statuses need the `github` grant. Adoption never edits the PR
+title, description, labels, draft state, or base.
 
 ## Human merge authority
 

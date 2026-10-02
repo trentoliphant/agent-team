@@ -298,16 +298,15 @@ author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
 evidence only for a published candidate and with the content grant.
 
-`pr review|revise|findings` adopts an existing PR as a selected run with no
-issue (rules are in the README). Its published commit is the PR head; the base is
-never merged. Revision modes store `pr_followup`, entered by a rejection within
-the budget and released by `select --run`. A failed validation of the unedited
-head stays pending (`attempted_context`) until review, and one rejection records
-both. Unestablished independence records `review_withheld`, not `reviewed_sha`.
-Movement retires evidence to `evidence_invalidations`, moves queued writes to
-`unpublished_evidence`, and stops the run as `stale`. Re-adoption inherits the
-round, limit, and `rejected_shas` of `prior_runs`. `pr update` journals its swap
-(`pending_pr_update`) before renaming, so a rerun completes it.
+`pr review|revise|findings` adopts a PR as an issue-less selected run (rules in
+the README); its published commit is the PR head. A rejection within budget
+enters `pr_followup` until `select --run`. A failed validation of the unedited
+head stays in `attempted_context` until review; one rejection records both.
+Unestablished independence records `review_withheld`, not `reviewed_sha`.
+Movement retires evidence to `evidence_invalidations`, queued writes to
+`unpublished_evidence`, and stops as `stale`. Re-adoption inherits round, limit,
+and `rejected_shas` from `prior_runs`. `pr update` journals `pending_pr_update`
+before its swap, so a rerun completes it.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor
