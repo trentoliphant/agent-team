@@ -528,6 +528,8 @@ class PullRequestTests(support.PullRequestFixture):
         update = run["adopted_pr"]["updates"][0]
         self.assertEqual(update["after"]["head"], external)
         self.assertTrue(Path(update["preserved"]).is_dir() and run["evidence_invalidations"])
+        self.assert_fields(self.report(run)["authorship"]["subsequent"][-1], kind="external_update",
+                           commit=external, declared=["human"], trailer_families=[])
         self.refuses("unchanged", self.update, run)
         self.assert_reviewed(self.revalidate(run), external)
         self.assertEqual(self.remote_head(), external)
@@ -564,16 +566,7 @@ class PullRequestTests(support.PullRequestFixture):
 
     def test_interrupted_push_reconciles_without_force(self):
         run = self.at_publish()
-
-        def lost_response(cwd, *args):
-            result = self.local_git(cwd, *args)
-            if "push" in args:
-                self.assertFalse(any(str(a).startswith("+") or a == "--force" for a in args))
-                self.assertIn(f"{run['sha']}:refs/heads/feature", args)
-                raise TeamError("Simulated lost push response")
-            return result
-
-        with patch("agent_team.coordinator.git", side_effect=lost_response):
+        with patch("agent_team.coordinator.git", side_effect=self.lost_push):
             run = self.ticks(run)
         self.assert_fields(run, stage="blocked", pending_push_sha=run["sha"])
         self.team.resume(run["id"])
@@ -582,7 +575,15 @@ class PullRequestTests(support.PullRequestFixture):
         self.assertEqual((self.remote_head(), run["adopted_pr"]["pushed"]), (run["sha"], [run["sha"]]))
         self.assert_status(run["sha"], "pending", PUSHED)
 
-    @scenarios(False, True)
+    def lost_push(self, cwd, *args):
+        result = self.local_git(cwd, *args)
+        if "push" in args:
+            self.assertFalse(any(str(a).startswith("+") or a == "--force" for a in args))
+            self.assertIn(f"{self.workspace_head(self.store.runs()[0])}:refs/heads/feature", args)
+            raise TeamError("Simulated lost push response")
+        return result
+
+    @scenarios(None, "comment", "push")
     def test_publishing_a_locally_reviewed_revision_posts_its_review(self, crash):
         head = self.open_pr(reject=1)
         self.github.permissions["example/demo"] = True
@@ -590,9 +591,13 @@ class PullRequestTests(support.PullRequestFixture):
         sha, key = run["sha"], self.marker(run, run["sha"], 1)
         self.assert_reviewed(run, sha)
         run = self.select(run, ["publish"], ["push", "github"])
-        with self.writes("comment", lambda k: crash and "-review-" in k, self.crash), \
-                self.assertRaises(Interrupted) if crash else nullcontext():
+        with self.writes("comment", lambda k: crash == "comment" and "-review-" in k, self.crash), \
+                patch("agent_team.coordinator.git", side_effect=self.lost_push) if crash == "push" else nullcontext(), \
+                self.assertRaises(Interrupted) if crash == "comment" else nullcontext():
             self.ticks(run)
+        if crash == "push":
+            self.assert_fields(self.reload(run), stage="blocked", pending_push_sha=sha)
+            self.assertNotIn(key, self.github.comments)
         if crash and self.ticks(run)["stage"] == "blocked":
             self.team.resume(run["id"])
         run = self.ticks(run)

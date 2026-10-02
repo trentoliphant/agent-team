@@ -316,6 +316,15 @@ class PullRequests:
         new_info = dict(info, **core.pr_inputs(found), declared=sorted(set(info["declared"]) | set(declared)),
                         trailer_families=sorted(set(info["trailer_families"]) | set(found["trailer_families"])),
                         unresolved_trailers=unresolved, updates=info.get("updates", []) + [update])
+        if found["head"] != info["head_sha"]:
+            # Commit-bound like repairs; a rewritten head is attributed from the base.
+            try:
+                core.git(fresh, "merge-base", "--is-ancestor", info["head_sha"], found["head"])
+                since = info["head_sha"]
+            except TeamError:
+                since = found["base"]
+            new_info = core.contributed(new_info, "external_update", found["head"], declared, fresh,
+                                        found["head"], "^" + since)
         common = dict(provenance, adopted_pr=new_info, independence=independence, base_sha=found["base"], sha=found["head"],
                       published_sha=found["head"], pending_push_sha=None, error=None, resume_stage=None,
                       in_flight=False, contributors=sorted(set(run.get("contributors", [])) | set(declared) | families))

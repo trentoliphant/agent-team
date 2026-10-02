@@ -1680,9 +1680,10 @@ class Coordinator:
     def pushed(self, run, sha):
         """Save the pushed commit with its status, and a review already done for it, queued so a crash cannot skip them."""
         info, new = run["adopted_pr"], dict(run, sha=sha, published_sha=sha)
-        done = run.get("review_sha") == sha and sha in {run.get("reviewed_sha"), (run.get("review_withheld") or {}).get("sha")}
+        done = bool(run.get("review_record")) and run.get("review_sha") == sha and sha in {
+            run.get("reviewed_sha"), (run.get("review_withheld") or {}).get("sha")}
         # The review's original marker keeps the comment idempotent.
-        writes = [self.review_write(new, run["review_record"])] * bool(done) + [self.bound(new, {
+        writes = ([self.review_write(new, run["review_record"])] if done else []) + [self.bound(new, {
             "type": "status", "sha": sha, "state": "pending", "description": "Review reported; readiness not checked"
             if done else "Revision pushed; independent review pending"})]
         return dict(published_sha=sha, pending_push_sha=None, local_handoff_reason=None,
