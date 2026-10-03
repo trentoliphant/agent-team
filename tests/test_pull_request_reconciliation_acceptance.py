@@ -2,7 +2,9 @@
 import unittest
 
 from agent_team import coordinator
+from agent_team.agents import FAMILIES
 from agent_team.coordinator import LOCAL_CHANGE
+from agent_team.process import git, TeamError
 # Module imports, so discovery collects neither fixture class nor other suites here.
 from tests import support_pull_request_reconciliation as reconciliation
 from tests.support_existing_pull_requests import DRIFT
@@ -190,6 +192,118 @@ class ReconciliationAcceptanceTests(reconciliation.ReconciliationFixture):
         self.assertIn("local.txt", contribution["context"]["dirty"])
         self.assert_fields(run, pending_contribution=None, commit_contributors=["human"],
                            attributed_context=contribution["context"])
+
+    def implemented(self):
+        """An ordinary issue run after the normal prepare and implement ticks, about to validate."""
+        run = self.reload(self.ticks(self.team.tick("demo")))
+        self.assert_fields(run, stage="validate", adopted_pr=None, selection=None, stop_after=None,
+                           commit_contributors=[FAMILIES[run["author"]]])
+        self.assertEqual(self.roles(), ["implement"])
+        return run
+
+    def assert_stopped_before_staging(self, run, baseline, head, kind, calls):
+        """The moved checkout is neither staged nor committed; it waits under the earlier attribution."""
+        run = self.reload(run)
+        self.assert_fields(run, stage="stopped", next_stage="validate", validated_sha=None, reviewed_sha=None,
+                           evidence_context=baseline, attributed_context=baseline)
+        self.assert_local_pending(run)
+        self.assertIn("Inputs changed before validation", self.invalidation(run)["reason"])
+        pending = run["pending_contribution"]
+        if kind == "dirty":
+            self.assertIn("local.txt", pending["dirty"])
+            self.assertNotIn("local.txt", baseline["dirty"])
+        else:
+            self.assertNotEqual(pending["head"], baseline["head"])
+        cwd = self.store.workspace(run)
+        self.assertEqual((self.workspace_head(run), git(cwd, "diff", "--cached", "--name-only")), (head, ""))
+        self.assertEqual(self.agents.calls, calls)
+        # No earlier attribution covers the change, so validation is refused without a declaration.
+        self.refuses("--contributor declarations", self.team.continue_run, run["id"], ["validate"])
+        run = self.reload(run)
+        self.assert_fields(run, stage="stopped", next_stage="validate", validated_sha=None, pending_contribution=pending,
+                           evidence_context=baseline, attributed_context=baseline, contribution_history=None)
+        self.assertEqual((self.workspace_head(run), git(cwd, "diff", "--cached", "--name-only")), (head, ""))
+        self.assertEqual(self.agents.calls, calls)
+        return run
+
+    def assert_declared_validation(self, run, kind, calls, contributors):
+        """A fresh human declaration attributes the change; validation then tests the intact source."""
+        pending = run["pending_contribution"]
+        self.team.continue_run(run["id"], ["validate"], ["human"])
+        run = self.reload(run)
+        self.assertEqual([(c["declared"], c["context"]) for c in run["contribution_history"]], [(["human"], pending)])
+        self.assert_fields(run, stage="validate", pending_contribution=None, commit_contributors=contributors,
+                           attributed_context=pending, evidence_context=pending)
+        run = self.reload(self.ticks(run))
+        validated, cwd = self.workspace_head(run), self.store.workspace(run)
+        self.assert_fields(run, stage="stopped", next_stage="publish", sha=validated, validated_sha=validated,
+                           pending_contribution=None, tests=[{"command": "test -f feature.txt", "exit_code": 0}])
+        self.assertIn("human", run["contributors"])
+        self.assertEqual(self.agents.calls, calls)
+        # The human source is in the validated commit, attributed to its human contributor.
+        self.assertEqual((git(cwd, "status", "--porcelain"), git(cwd, "show", f"{validated}:feature.txt"),
+                          git(cwd, "show", f"{validated}:local.txt")),
+                         ("", "feature", "operator edit" if kind == "dirty" else "operator change"))
+        message = git(cwd, "log", "-1", "--format=%an%n%B", validated)
+        if kind == "dirty":
+            for contributor in contributors:
+                self.assertIn("Contributor: human" if contributor == "human" else f"Agent-Family: {contributor}",
+                              message)
+        else:
+            self.assertTrue(message.startswith("Human\nLocal change"), message)
+        return run
+
+    @scenarios("dirty", "local")
+    def test_ordinary_change_after_implementation_awaits_declarations(self, kind):
+        run = self.implemented()
+        baseline, calls = run["attributed_context"], list(self.agents.calls)
+        self.assertEqual(baseline, self.context(run))
+        self.assertEqual(baseline["head"], run["base_sha"])
+        self.assertIn("feature.txt", baseline["dirty"])
+        # An external edit or commit lands after the author finished and before validation stages.
+        self.change(kind, run)
+        head = self.workspace_head(run)
+        self.assertEqual(head == baseline["head"], kind == "dirty")
+        self.ticks(run)
+        run = self.assert_stopped_before_staging(run, baseline, head, kind, calls)
+        self.assertEqual(run["sha"], baseline["head"])
+        run = self.assert_declared_validation(run, kind, calls, sorted({FAMILIES[run["author"]], "human"}))
+        self.assertEqual(run["sha"] == head, kind == "local")
+
+    @scenarios(*((failure, kind) for failure in ("clone", "timeout") for kind in ("dirty", "local")))
+    def test_ordinary_change_while_validation_blocked_awaits_declarations(self, failure, kind):
+        run = self.implemented()
+        calls = list(self.agents.calls)
+        error = "git failed (128): clone refused" if failure == "clone" else "Timed out: /bin/sh (limit 1s)"
+
+        def fail():
+            raise TeamError(error)
+        # Injected after the candidate commit: the validation clone fails, or a command times out.
+        with self.moving(coordinator, "execute", fail,
+                         lambda args, *_: "clone" in args if failure == "clone" else args[0] == "/bin/sh"):
+            self.ticks(run)
+        run = self.reload(run)
+        candidate, baseline = self.workspace_head(run), self.context(run)
+        # The commit is real, and its exact state is the durable baseline of the blocked run.
+        self.assert_fields(run, stage="blocked", resume_stage="validate", error=error, sha=candidate,
+                           validated_sha=None, commit_contributors=None, pending_contribution=None,
+                           attributed_context=baseline)
+        self.assertNotEqual(candidate, run["base_sha"])
+        self.assertEqual((baseline["head"], baseline["dirty"]), (candidate, ""))
+        self.assertIn(f"Agent-Family: {FAMILIES[run['author']]}",
+                      git(self.store.workspace(run), "log", "-1", "--format=%B", candidate))
+        self.change(kind, run)
+        head = self.workspace_head(run)
+        self.assertEqual(head == candidate, kind == "dirty")
+        # The resumed boundary rechecks the source against that baseline before staging anything.
+        self.assertEqual(self.team.resume(run["id"])["stage"], "validate")
+        self.ticks(run)
+        run = self.assert_stopped_before_staging(run, baseline, head, kind, calls)
+        self.assertEqual(run["sha"], candidate)
+        run = self.assert_declared_validation(run, kind, calls, ["human"])
+        cwd = self.store.workspace(run)
+        self.assertEqual((git(cwd, "rev-parse", f"{run['sha']}^") == candidate, run["sha"] == head),
+                         (True, kind == "local"))
 
 
 if __name__ == "__main__":
