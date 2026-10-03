@@ -309,11 +309,20 @@ superseded, and historical evidence from plain dictionaries. Rendered reviews
 keep their companion pins, and historical validation failures keep their
 complete feedback.
 
-For an adopted PR, ready reconciliation saves the CI observation, then checks the
-complete binding again: PR head, head repository and branch, base branch and SHA,
-validation configuration, companion pins, and the local candidate. Inputs can
-move during the CI read. If they did, the observation stays only as history for
-the retired evidence, and no "CI changed" status is queued.
+For an adopted PR, every CI read saves its observation, then checks the complete
+binding again: PR head, head repository and branch, base branch and SHA,
+validation configuration, companion pins, and the local candidate. This applies
+to ready reconciliation, `checks`, and `ci`, including pending reads that return
+and failing reads that would block. The local candidate is compared with both its
+validated fingerprint and its fingerprint just before the read. Inputs can move
+during the CI read. If they did, evidence is retired before the operation
+returns, raises, or saves its successor. The observation stays only as history,
+and no "CI changed" status is queued. Its recorded `context` is the local
+fingerprint taken before the read, so an edit made during the read never
+appears in the observation's head, configuration, or working state. A local commit or edit stops the run with
+its contributors pending. The stopped baseline keeps the earlier fingerprint, so
+validation cannot continue until contributors are declared, and the edit is never
+attributed to the assigned author. Earlier pending declarations are kept.
 
 Movement and pin changes retire evidence before any GitHub write. One save clears
 validation, review, and the readiness intent and status. The same save journals

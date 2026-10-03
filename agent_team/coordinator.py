@@ -1227,10 +1227,11 @@ class Coordinator:
             self.invalidate_pins(project, run)
             return False
         if run["stage"] == "ready":
+            before = self.ci_baseline(project, run)
             state = self.github.ci(project["repo"], expected)
             # The observation and the status write are saved before the write is attempted, so a
             # failed write cannot lose pending or failing CI, and a later success keeps it as history.
-            observation = ci_observation(run, state, "reconcile", sha=expected)
+            observation = ci_observation(run, state, "reconcile", sha=expected, context=before)
             changes = dict(ci_checks=run.get("ci_checks", []) + [observation]) if observation_changed(
                 run.get("ci_checks"), observation) else {}
             # Inputs can move during the CI read. The observation is kept, then retired as history.
@@ -1238,7 +1239,7 @@ class Coordinator:
                 if changes:
                     self.store.save(run, **changes)
                     changes = {}
-                if self.adopted_inputs_moved(project, run, expected, self.github.pr(project["repo"], run["pr"])):
+                if self.moved_during_ci(project, run, expected, before):
                     return False
             if state != "success":
                 changes.update(self.queue_writes(run, {"type": "status", "sha": expected, "state": "pending",
@@ -1267,6 +1268,24 @@ class Coordinator:
         if change:
             self.adopted_pr_moved(project, run, *change, notice=notice)
         return bool(change)
+
+    def ci_baseline(self, project, run):
+        """Local inputs before a CI read of an adopted PR, compared by `moved_during_ci`."""
+        return self.evidence_context(project, run) if run.get("adopted_pr") else None
+
+    def moved_during_ci(self, project, run, expected, before):
+        """After a CI read whose observation is already saved: recheck the complete adopted binding
+        before the caller returns, raises or saves its successor. A local commit or edit, including
+        one made during the read, retires evidence and awaits contributor declarations, so the tick
+        keeps the earlier baseline and later validation cannot attribute the edit to the author."""
+        if not run.get("adopted_pr"):
+            return False
+        if self.adopted_inputs_moved(project, run, expected, self.github.pr(project["repo"], run["pr"])):
+            return True
+        if not self.local_change(project, run) and self.evidence_context(project, run) == before:
+            return False
+        self.adopted_pr_moved(project, run, "stopped", LOCAL_CHANGE)
+        return True
 
     def suite(self, project, run):
         """Whether this run validates with companions. Runs created before companions were
@@ -1869,8 +1888,10 @@ class Coordinator:
             return
         context = self.evidence_context(project, run)
         state = self.github.ci(project["repo"], run["sha"])
-        self.store.save(run, ci_checks=run.get("ci_checks", []) + [ci_observation(run, state, "checks", context=context)],
-                        stage=self.successor(run, "checks", "ci"))
+        self.store.save(run, ci_checks=run.get("ci_checks", []) + [ci_observation(run, state, "checks", context=context)])
+        if self.moved_during_ci(project, run, run["sha"], context):
+            return
+        self.store.save(run, stage=self.successor(run, "checks", "ci"))
 
     def ci(self, project, run):
         self.compatible_validation(project, run)
@@ -1887,11 +1908,16 @@ class Coordinator:
         if self.pins_changed(project, run):
             self.renew_pins(project, run)
             return
+        # The observation is bound to the inputs captured before the read, never to edits made during it.
+        before = self.ci_baseline(project, run)
+        context = before or (self.evidence_context(project, run) if run.get("selection") else None)
         state = self.github.ci(project["repo"], run["sha"])
-        observation = ci_observation(run, state, "ci")
+        observation = ci_observation(run, state, "ci", context=context)
         if observation_changed(run.get("ci_checks"), observation, evidence.RECORD):
-            self.store.save(run, ci_checks=run.get("ci_checks", []) + [dict(
-                observation, context=self.evidence_context(project, run) if run.get("selection") else None)])
+            self.store.save(run, ci_checks=run.get("ci_checks", []) + [observation])
+        # Pending and failing reads are rechecked too, before returning or raising.
+        if self.moved_during_ci(project, run, run["sha"], before):
+            return
         if state == "failure":
             raise TeamError("GitHub CI failed; inspect checks and resume after correction")
         if state == "pending":

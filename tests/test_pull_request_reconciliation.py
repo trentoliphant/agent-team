@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 # Module imports, so discovery collects neither fixture class nor other suites here.
 from tests import support_existing_pull_requests as existing
-from tests.support_existing_pull_requests import MOVES, READY, unavailable
+from tests.support_existing_pull_requests import MOVES, READY, REASONS, unavailable
 from tests.support_pull_requests import scenarios
 
 REVOKED = ("pending", "Evidence inputs changed; readiness invalidated")
@@ -12,25 +12,76 @@ NOTICES = {"head": ("pending", "Changed outside coordinator; review invalidated"
            "identity": ("pending", "PR head changed; review invalidated"),
            "base": ("failure", "Base changed; integration and review need renewal")}
 PINS = ("pending", "Companion pins changed; validation and review need renewal")
+CI_MOVES = (*MOVES, "pins", "local", "dirty")
 
 
 class ReconciliationTests(existing.ExistingPullRequestFixture):
     def ready_run(self):
         head, run = self.readiness_run()
+        context = self.context(run)
         run = self.ticks(run)
         self.assertEqual(run["stage"], "ready")
+        # A successful read is bound to the inputs it was taken with.
+        self.assertEqual(self.report(run)["current_ci"]["context"], context)
         return head, run
+
+    def context(self, run):
+        return self.team.evidence_context(self.store.project("demo"), self.reload(run))
+
+    def capturing(self, kind, run):
+        """Record the inputs at the start of the CI read, then move `kind` during it."""
+        def move():
+            self.read_context = self.context(run)
+            self.move(kind, run)
+        return move
 
     def posted(self):
         return [(state, description) for _, state, description in self.github.status_descriptions]
 
     def assert_withdrawn(self, run, head, kind):
-        self.assert_fields(run, stage="stopped" if kind in {"configuration", "local", "dirty"} else "stale",
+        self.assert_fields(run, stage="stopped" if kind in {"configuration", "pins", "local", "dirty"} else "stale",
                            validated_sha=None, reviewed_sha=None, review_record=None, readiness_status=None)
         self.assertEqual(self.invalidation(run)["head"], head)
         report = self.report(run)
         self.assertFalse(report["current_evidence"] or report["independent_review_success"])
         self.assertIsNone(report["current_ci"])
+
+    def move(self, kind, run):
+        """Change `kind` of input; pins change only from this call on."""
+        if kind != "pins":
+            return self.change(kind, run)
+        pinned = self.pinned("pins")
+        pinned.start()
+        self.addCleanup(pinned.stop)
+
+    def checks_run(self):
+        head, run = self.stopped_review(grants=["github"])
+        return head, self.select(run, ["checks"])
+
+    def tick_moving_ci(self, run, kind):
+        with self.moving(self.github, "ci", self.capturing(kind, run)):
+            return self.ticks(run)
+
+    def assert_read_binding(self, check):
+        """The observation keeps the inputs from before the read, never the movement during it."""
+        self.assertEqual(check["context"], self.read_context)
+        self.assertEqual(check["context"]["dirty"], "")
+
+    def assert_moved_during_ci(self, run, head, kind, operation, state):
+        self.assert_withdrawn(run, head, kind)
+        self.assertIn({**REASONS, "identity": "repository or branch"}[kind], self.invalidation(run)["reason"])
+        self.assertEqual(run["outbox"], [])
+        if kind in {"local", "dirty"}:
+            self.assert_local_pending(run)
+        # The CI read is persisted, but only as history for the retired evidence.
+        checks = self.report(run)["ci_checks"]
+        self.assertEqual([(c["operation"], c["state"], c["current"]) for c in checks], [(operation, state, False)])
+        self.assert_read_binding(checks[0])
+        if kind in {"configuration", "local", "dirty"}:
+            self.assertNotEqual(checks[0]["context"], self.context(run))
+        self.assertTrue(self.pull()["draft"])
+        self.assertNotIn(("pending", "CI changed; waiting for checks"), self.posted())
+        self.assert_no_success()
 
     @scenarios(*MOVES)
     def test_failed_movement_notification_keeps_retirement(self, kind):
@@ -106,8 +157,7 @@ class ReconciliationTests(existing.ExistingPullRequestFixture):
     def test_movement_during_ready_ci_read_retires_evidence(self, state, kind):
         head, run = self.ready_run()
         self.github.check_state = state
-        with self.moving(self.github, "ci", lambda: self.change(kind, run)):
-            run = self.ticks(run)
+        run = self.tick_moving_ci(run, kind)
         self.assert_withdrawn(run, head, kind)
         self.assertEqual(run["outbox"], [])
         posted = self.posted()
@@ -122,6 +172,48 @@ class ReconciliationTests(existing.ExistingPullRequestFixture):
         self.assertFalse(any(c["current"] for c in checks))
         self.assertEqual([(c["operation"], c["state"]) for c in checks],
                          [("ci", "success")] + [("reconcile", state)] * (state != "success"))
+        if state != "success":
+            self.assert_read_binding(checks[-1])
+
+    @scenarios(*CI_MOVES)
+    def test_movement_during_checks_read_retires_evidence(self, kind):
+        head, run = self.checks_run()
+        run = self.tick_moving_ci(run, kind)
+        self.assert_moved_during_ci(run, head, kind, "checks", "success")
+
+    @scenarios(*((state, kind) for state in ("pending", "failure") for kind in CI_MOVES))
+    def test_movement_during_pending_or_failing_ci_read_retires_evidence(self, state, kind):
+        head, run = self.readiness_run()
+        self.github.check_state = state
+        # Movement is rechecked before a pending read returns or a failing read raises.
+        run = self.tick_moving_ci(run, kind)
+        self.assertNotIn(run["stage"], {"ci", "blocked", "ready"})
+        self.assert_moved_during_ci(run, head, kind, "ci", state)
+
+    @scenarios("checks", "pending", "failure")
+    def test_dirty_edit_during_ci_read_cannot_enter_validation(self, read):
+        if read == "checks":
+            head, run = self.checks_run()
+        else:
+            head, run = self.readiness_run()
+            self.github.check_state = read
+        baseline, calls = self.reload(run).get("evidence_context"), list(self.agents.calls)
+        run = self.tick_moving_ci(run, "dirty")
+        # The tick keeps the earlier baseline; the edit waits for contributor declarations.
+        self.assertEqual(run.get("evidence_context"), baseline)
+        self.assertIn("local.txt", run["pending_contribution"]["dirty"])
+        self.assert_read_binding(self.report(run)["ci_checks"][-1])
+        self.refuses("--contributor declarations", self.select, run, ["validate"], ["edit"])
+        run = self.reload(run)
+        self.assert_fields(run, stage="stopped", validated_sha=None, reviewed_sha=None)
+        self.assertTrue(run["pending_contribution"])
+        self.assertEqual(self.agents.calls, calls)
+        # Only a declaration attributes the edit, and it is recorded to the declared contributor.
+        self.select(run, ["validate"], ["edit"], contributors=["human"])
+        contribution = self.reload(run)["contribution_history"][-1]
+        self.assertEqual(contribution["declared"], ["human"])
+        self.assertIn("local.txt", contribution["context"]["dirty"])
+        self.assertIsNone(self.reload(run)["pending_contribution"])
 
 
 if __name__ == "__main__":
