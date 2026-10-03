@@ -309,11 +309,38 @@ superseded, and historical evidence from plain dictionaries. Rendered reviews
 keep their companion pins, and historical validation failures keep their
 complete feedback.
 
-For an adopted PR, ready reconciliation saves the CI observation, then checks the
-complete binding again: PR head, head repository and branch, base branch and SHA,
-validation configuration, companion pins, and the local candidate. Inputs can
-move during the CI read. If they did, the observation stays only as history for
-the retired evidence, and no "CI changed" status is queued.
+For an adopted PR, every CI read saves its observation, then checks the complete
+binding again: PR head, head repository and branch, base branch and SHA,
+validation configuration, companion pins, and the local candidate. This applies
+to ready reconciliation, `checks`, and `ci`, including pending reads that return
+and failing reads that would block. The local candidate is compared with both its
+validated fingerprint and its fingerprint just before the read. Inputs can move
+during the CI read. If they did, evidence is retired before the operation
+returns, raises, or saves its successor. The observation stays only as history,
+and no "CI changed" status is queued. Its recorded `context` is the local
+fingerprint taken before the read, so an edit made during the read never
+appears in the observation's head, configuration, or working state. A local commit or edit stops the run with
+its contributors pending. The stopped baseline keeps the earlier fingerprint, so
+validation cannot continue until contributors are declared, and the edit is never
+attributed to the assigned author. Earlier pending declarations are kept.
+
+Local movement is checked on its own whenever adopted evidence is retired, not
+only when nothing else moved. If configuration, pins, head, or base move along
+with a local commit or edit, the same save records the pending declarations, and
+the retirement reason names both changes. Only the commit, tree, and working
+state count as a contribution. Configuration movement alone never does.
+
+Work attributed before the next validation commit, by the author's implementation
+or by `--contributor` declarations, is recorded with its exact fingerprint. Only
+that fingerprint is exempt. A later commit or edit, including one made during a
+CI read after an earlier declaration, awaits new declarations; the earlier
+declaration never covers it. A candidate already ahead of the published head is
+compared with its own fingerprint from before the read.
+
+Validation fingerprints the author checkout after the candidate commit, before any
+command runs, and checks it again before accepting a pass or a failure. If it moved,
+the result is kept only as history for that commit, the run stops on the earlier
+fingerprint, and a commit or edit awaits declarations.
 
 Movement and pin changes retire evidence before any GitHub write. One save clears
 validation, review, and the readiness intent and status. The same save journals

@@ -3,35 +3,13 @@ import unittest
 from unittest.mock import patch
 
 # Module imports, so discovery collects neither fixture class nor other suites here.
-from tests import support_existing_pull_requests as existing
+from tests import support_pull_request_reconciliation as reconciliation
 from tests.support_existing_pull_requests import MOVES, READY, unavailable
+from tests.support_pull_request_reconciliation import NOTICES, PINS, REVOKED
 from tests.support_pull_requests import scenarios
 
-REVOKED = ("pending", "Evidence inputs changed; readiness invalidated")
-NOTICES = {"head": ("pending", "Changed outside coordinator; review invalidated"),
-           "identity": ("pending", "PR head changed; review invalidated"),
-           "base": ("failure", "Base changed; integration and review need renewal")}
-PINS = ("pending", "Companion pins changed; validation and review need renewal")
 
-
-class ReconciliationTests(existing.ExistingPullRequestFixture):
-    def ready_run(self):
-        head, run = self.readiness_run()
-        run = self.ticks(run)
-        self.assertEqual(run["stage"], "ready")
-        return head, run
-
-    def posted(self):
-        return [(state, description) for _, state, description in self.github.status_descriptions]
-
-    def assert_withdrawn(self, run, head, kind):
-        self.assert_fields(run, stage="stopped" if kind in {"configuration", "local", "dirty"} else "stale",
-                           validated_sha=None, reviewed_sha=None, review_record=None, readiness_status=None)
-        self.assertEqual(self.invalidation(run)["head"], head)
-        report = self.report(run)
-        self.assertFalse(report["current_evidence"] or report["independent_review_success"])
-        self.assertIsNone(report["current_ci"])
-
+class ReconciliationTests(reconciliation.ReconciliationFixture):
     @scenarios(*MOVES)
     def test_failed_movement_notification_keeps_retirement(self, kind):
         head, run = self.ready_run()
@@ -106,8 +84,7 @@ class ReconciliationTests(existing.ExistingPullRequestFixture):
     def test_movement_during_ready_ci_read_retires_evidence(self, state, kind):
         head, run = self.ready_run()
         self.github.check_state = state
-        with self.moving(self.github, "ci", lambda: self.change(kind, run)):
-            run = self.ticks(run)
+        run = self.tick_moving_ci(run, kind)
         self.assert_withdrawn(run, head, kind)
         self.assertEqual(run["outbox"], [])
         posted = self.posted()
@@ -122,6 +99,8 @@ class ReconciliationTests(existing.ExistingPullRequestFixture):
         self.assertFalse(any(c["current"] for c in checks))
         self.assertEqual([(c["operation"], c["state"]) for c in checks],
                          [("ci", "success")] + [("reconcile", state)] * (state != "success"))
+        if state != "success":
+            self.assert_read_binding(checks[-1])
 
 
 if __name__ == "__main__":
