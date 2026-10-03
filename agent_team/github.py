@@ -1,6 +1,6 @@
 """GitHub operations owned by the coordinator, never an agent's response text."""
 import json
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from .process import execute, TeamError
 from .state import issue_fingerprint
@@ -128,7 +128,27 @@ class GitHub:
         })
 
     def pr(self, repo, number):
-        return self.api(f"repos/{repo}/pulls/{number}")
+        pr = self.api(f"repos/{repo}/pulls/{number}")
+        live = pr["base"]["sha"]
+        if pr.get("state") == "open" and not pr.get("merged"):
+            live = self.api(f"repos/{repo}/git/ref/heads/{quote(pr['base']['ref'])}")["object"]["sha"]
+        pr["base"] = dict(pr["base"], snapshot_sha=pr["base"]["sha"], sha=live)
+        return pr
+
+    def push_access(self, project, pr):
+        head = (pr["head"].get("repo") or {}).get("full_name")
+        if not head:
+            return {"allowed": False, "reason": "the head repository is unavailable"}
+        try:
+            if (self.repo(head).get("permissions") or {}).get("push"):
+                return {"allowed": True, "reason": f"write access to {head}"}
+            if head.casefold() == project["repo"].casefold():
+                return {"allowed": False, "reason": f"no write access to {head}"}
+            if pr.get("maintainer_can_modify") and (self.repo(project["repo"]).get("permissions") or {}).get("push"):
+                return {"allowed": True, "reason": f"maintainer edits allowed on fork {head}"}
+        except TeamError as error:
+            return {"allowed": False, "reason": f"write access to {head} could not be verified ({error})"}
+        return {"allowed": False, "reason": f"no write access to fork {head} and maintainer edits are not available"}
 
     def mark_ready(self, repo, number):
         execute(["gh", "pr", "ready", str(number), "--repo", repo])

@@ -10,7 +10,8 @@ import time
 from . import __version__
 from . import companions
 from .agents import Agents, subscription_status
-from .coordinator import ACTIONS, CONTRIBUTORS, MAX_EXTENSION, STOP_POINTS, ENTRY_POINTS, EFFECTS, Coordinator
+from .coordinator import (ACTIONS, CONTRIBUTORS, MAX_EXTENSION, STOP_POINTS, ENTRY_POINTS, EFFECTS, PR_CONTRIBUTORS,
+                          PR_GRANTS, PR_MODES, Coordinator, require_no_swap)
 from .github import GitHub
 from .process import TeamError, execute
 from .state import CoordinatorBusy, Store, default_home
@@ -105,7 +106,7 @@ def parser():
     selection.add_argument("--task", help="Explicit immutable task scope and acceptance criteria")
     selection.add_argument("--ref", help="Existing remote branch or exact commit")
     selection.add_argument("--run", dest="run_id", help="Continue compatible tracked evidence")
-    selection.add_argument("--contributor", action="append", choices=CONTRIBUTORS, default=[])
+    selection.add_argument("--contributor", action="append", choices=PR_CONTRIBUTORS, default=[])
     selection.add_argument("--plan", action="store_true", help="Show operations and effects without saving or executing")
     queue = commands.add_parser("queue", help="Inspect or save a project's implementation order").add_subparsers(
         dest="queue_command", required=True)
@@ -129,7 +130,7 @@ def parser():
     continuation = commands.add_parser("continue", help="Explicitly continue a stopped run without resetting its history")
     continuation.add_argument("run_id")
     continuation.add_argument("--operations", nargs="+", choices=ENTRY_POINTS, required=True)
-    continuation.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), default=[])
+    continuation.add_argument("--contributor", action="append", choices=list(PR_CONTRIBUTORS), default=[])
     handoff = commands.add_parser("handoff", help="Show the latest revision-limit handoff and decisions")
     handoff.add_argument("run_id")
     handoff.add_argument("--json", action="store_true")
@@ -141,8 +142,27 @@ def parser():
     adopt = commands.add_parser("adopt", help="Adopt a direct repair (PR head, or local repair checkout "
                                                 "if never published) for new validation and review")
     adopt.add_argument("run_id")
-    adopt.add_argument("--contributor", action="append", choices=list(CONTRIBUTORS), required=True,
+    adopt.add_argument("--contributor", action="append", choices=list(PR_CONTRIBUTORS), required=True,
                        help="Who contributed to the repair; repeatable")
+    pull = commands.add_parser("pr", help="Review or revise an existing pull request without a new issue or PR"
+                               ).add_subparsers(dest="pr_command", required=True)
+    for mode, text in PR_MODES.items():
+        item = pull.add_parser(mode, help=text)
+        item.add_argument("project")
+        item.add_argument("pull", help="PR number or https://github.com/OWNER/REPO/pull/NUMBER")
+        item.add_argument("--contributor", action="append", choices=PR_CONTRIBUTORS, required=True,
+                          help="Who contributed to the PR; repeatable. GitHub usernames never imply a model family")
+        item.add_argument("--reviewer", choices=["codex", "claude"], help="Reviewer agent when authorship allows a choice")
+        item.add_argument("--grant", action="append", choices=PR_GRANTS, default=[])
+        item.add_argument("--plan", action="store_true", help="Show the adoption plan without saving or executing")
+        if mode == "findings":
+            item.add_argument("--finding", action="append", required=True, help="A finding to revise; repeatable")
+    update = pull.add_parser("update", help="Deliberately adopt a changed head or base of an adopted PR")
+    update.add_argument("run_id")
+    update.add_argument("--contributor", action="append", choices=PR_CONTRIBUTORS, required=True,
+                        help="Who contributed to the change; repeatable")
+    report = pull.add_parser("show", help="Local findings, performed and omitted checks, and any local handoff")
+    report.add_argument("run_id")
     discover = commands.add_parser("discover", help="Read-only investigation; opens at most three unready issues")
     discover.add_argument("project")
     discover.add_argument("--agent", choices=["codex", "claude"], default="claude")
@@ -318,6 +338,8 @@ def dispatch(args, store):
         emit(team.resume(args.run_id))
     elif args.command == "close":
         run = store.get(args.run_id)
+        # Recovery would otherwise reinstall the journaled stage and reactivate the run.
+        require_no_swap(run)
         store.save(run, stage="closed", in_flight=False, notification_pending=True)
         team.notify(store.project(run["project"]), run)
         emit({"id": run["id"], "stage": "closed", "note": "GitHub issue/PR and local checkout retained"})
@@ -345,7 +367,21 @@ def dispatch(args, store):
                                       "repair_checkout")})
     elif args.command == "adopt":
         run = team.adopt(args.run_id, args.contributor)
-        emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions")})
+        emit({k: run.get(k) for k in ("id", "stage", "round", "sha", "contributors", "adoptions", "independence")})
+    elif args.command == "pr":
+        if args.pr_command == "update":
+            run = team.update_pr(args.run_id, args.contributor)
+            emit({k: run.get(k) for k in ("id", "stage", "next_stage", "sha", "base_sha", "contributors", "independence")})
+        elif args.pr_command == "show":
+            emit(team.pr_report(args.run_id))
+        else:
+            options = dict(grants=args.grant, reviewer=args.reviewer, findings=getattr(args, "finding", None) or [])
+            if args.plan:
+                emit(team.adopt_pr(args.project, args.pull, args.pr_command, args.contributor, plan_only=True, **options))
+            else:
+                run = team.adopt_pr(args.project, args.pull, args.pr_command, args.contributor, **options)
+                emit({k: run.get(k) for k in ("id", "stage", "pr", "sha", "base_sha", "author", "reviewer", "operations",
+                                              "pr_followup", "grants", "effect_plan", "independence")})
     elif args.command == "discover":
         emit(team.discover(args.project, args.agent, args.focus))
     return 0
@@ -359,8 +395,11 @@ def main(argv=None):
         if args.command in {"continue", "resume", "close", "decide", "adopt", "refresh"}:
             with store.repository_lock(store.get(args.run_id)["project"]):
                 code = dispatch(args, store)
-        elif args.command == "select":
+        elif args.command == "select" or (args.command == "pr" and args.pr_command in PR_MODES):
             with store.repository_lock(args.project):
+                code = dispatch(args, store)
+        elif args.command == "pr" and args.pr_command == "update":
+            with store.repository_lock(store.get(args.run_id)["project"]):
                 code = dispatch(args, store)
         elif args.command == "discover":
             with store.worker(args.project):
@@ -373,6 +412,7 @@ def main(argv=None):
             with store.repository_lock(args.name):
                 code = dispatch(args, store)
         elif (args.command in {"run", "status", "inspect", "handoff", "doctor", "smoke", "init"} or
+                (args.command == "pr" and args.pr_command == "show") or
                 (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"}) or
                 (args.command == "writing" and args.writing_command == "show") or
                 (args.command == "queue" and args.queue_command == "show")):

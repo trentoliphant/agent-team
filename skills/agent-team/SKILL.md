@@ -228,8 +228,7 @@ and ready label remain required. Tasks never require synthetic issues. Existing
 branches/commits require every contributor to be declared. Choose one operation
 or an ordered sequence; local review may omit publication. Individual publication,
 review, and CI reuse a tracked run's compatible evidence. Without such evidence,
-select validation first. Existing-PR adoption from outside Agent Team is #10;
-do not create a replacement PR or author pass to work around that limitation.
+select validation first. Use `agent-team pr` for outside PRs, not an author pass.
 After a compatible local review, `publish ci` publishes and checks readiness
 without repeating review. Publication posts the stored review on the PR;
 readiness requires its comment write to succeed. Inspect each continuation's grants and effects to
@@ -281,3 +280,25 @@ commits and input from both model families are refused before scope is claimed.
 If the input becomes invalid after selection, preparation leaves no author
 checkout. Correct the input branch, inspect the blocked run, then explicitly
 resume it. Selection and preparation revisions remain recorded in provenance.
+
+## Existing pull requests
+
+Confirm the repository, operation, and grants (`--plan` previews):
+
+```sh
+agent-team pr review example 42 --contributor human
+agent-team pr revise example https://github.com/OWNER/REPO/pull/42 \
+  --contributor human --grant edit --grant push --grant github
+agent-team pr findings example 42 --contributor human --grant edit --grant push --grant github \
+  --finding 'parser.py:88 drops the last field; keep it and add a test'
+agent-team pr update RUN_ID --contributor human
+agent-team pr show RUN_ID
+```
+
+Declare contributors truthfully, never from usernames. Report `pr show`; a
+review is not readiness. Inspect `stale` changes before `pr update`. During a
+local repair of an unpushable fork, `pr update` adopts only a moved base; the
+repair checkout, candidate, and budget stay, and `adopt` then needs fresh
+validation and review. Never open
+a replacement PR, force-push, merge, reopen, retarget, or change draft state.
+Unknown or mixed authorship withholds independent success.

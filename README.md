@@ -563,7 +563,8 @@ local review. New branch/commit work can enter at validation; it does not need a
 implementation pass. Individual publication, review, and readiness operations
 reuse a tracked run's compatible evidence. They refuse missing prerequisites;
 select validation first when there is no recorded evidence. Adopting an existing
-PR from outside Agent Team is companion issue #10. No command merges PRs.
+PR from outside Agent Team uses `agent-team pr` ([examples](skills/agent-team/SKILL.md#existing-pull-requests)).
+No command merges PRs.
 
 Grants are separate: `edit` permits local source edits and candidate commits,
 `push` permits topic-branch publication, `github` permits GitHub content and
@@ -659,8 +660,13 @@ publication, review, and readiness. Valid contributor declarations and a sequenc
 starting at validation or an earlier rebuilding stage invalidate old evidence
 and continue in one selection. Evidence-consuming entry points still refuse
 changed inputs until their prerequisites are rebuilt. Changed remote head/base commits invalidate
-readiness. External PR-head adoption remains subject to #10 and existing #7
-repair rules; it is never inferred from trailers alone.
+readiness. External PR-head adoption uses `pr update` and existing #7
+repair rules; it is never inferred from trailers alone. If the PR base moves
+while an unpushed candidate is repaired in a local repair checkout, `pr update
+RUN_ID --contributor ...` records the new base only. It verifies the exact PR
+head and base, refuses head, identity, or target changes, keeps the repair
+checkout (including uncommitted work), candidate, budget, and history, and
+merges nothing. The next `adopt` needs fresh validation and review.
 
 For unpublished base drift, use `agent-team refresh RUN_ID --grant edit`. It
 integrates the current base into a separate clone, preserves the old checkout,

@@ -17,6 +17,7 @@ this package or needs its workflow files.
 | `patches.py` | Complete, budget-bounded review patches and their completeness proof |
 | `cli.py` | Registration, scheduling, inspection, recovery |
 | `companions.py` | Companion declarations, manifest pins, and anonymous pinned clones |
+| `pull_requests.py` | Existing-PR adoption |
 
 Each project registers one repository. It may also declare public companion
 repositories that its validation needs (see the README). Companions are read-only
@@ -271,6 +272,14 @@ the issue, and the PR body lists adopted repairs and their contributors. A crash
 after the checkout swap but before the save leaves the run in `repair`; adopting
 again is safe.
 
+An adopted PR never merges its base, so a local repair refuses a moved PR base.
+`pr update` then adopts only the base: it verifies the exact PR head and base in
+a separate clone, refuses closure, retargeting, head identity changes, and head
+movement, and records the new base and merge base. It retires earlier evidence
+as history. It leaves the repair checkout and its uncommitted work, the
+candidate, the published head, grants, provenance, budget, and history
+unchanged. The later `adopt` validates and reviews against the adopted base.
+
 Candidate SHA and tree are checked again before publication. Git configuration,
 excludes, and local attributes are fingerprinted; changes stop orchestration
 before further coordinator Git calls. Revision requests that produce no new
@@ -299,6 +308,53 @@ helpers that build and render these CI records and review, rejected-review,
 superseded, and historical evidence from plain dictionaries. Rendered reviews
 keep their companion pins, and historical validation failures keep their
 complete feedback.
+
+For an adopted PR, every CI read saves its observation, then checks the complete
+binding again: PR head, head repository and branch, base branch and SHA,
+validation configuration, companion pins, and the local candidate. This applies
+to ready reconciliation, `checks`, and `ci`, including pending reads that return
+and failing reads that would block. The local candidate is compared with both its
+validated fingerprint and its fingerprint just before the read. Inputs can move
+during the CI read. If they did, evidence is retired before the operation
+returns, raises, or saves its successor. The observation stays only as history,
+and no "CI changed" status is queued. Its recorded `context` is the local
+fingerprint taken before the read, so an edit made during the read never
+appears in the observation's head, configuration, or working state. A local commit or edit stops the run with
+its contributors pending. The stopped baseline keeps the earlier fingerprint, so
+validation cannot continue until contributors are declared, and the edit is never
+attributed to the assigned author. Earlier pending declarations are kept.
+
+Local movement is checked on its own whenever adopted evidence is retired, not
+only when nothing else moved. If configuration, pins, head, or base move along
+with a local commit or edit, the same save records the pending declarations, and
+the retirement reason names both changes. Only the commit, tree, and working
+state count as a contribution. Configuration movement alone never does.
+
+Work attributed before the next validation commit, by the author's implementation
+or by `--contributor` declarations, is recorded with its exact fingerprint. Only
+that fingerprint is exempt. A later commit or edit, including one made during a
+CI read after an earlier declaration, awaits new declarations; the earlier
+declaration never covers it. A candidate already ahead of the published head is
+compared with its own fingerprint from before the read.
+
+Validation fingerprints the author checkout after the candidate commit, before any
+command runs, and checks it again before accepting a pass or a failure. If it moved,
+the result is kept only as history for that commit, the run stops on the earlier
+fingerprint, and a commit or edit awaits declarations.
+The fingerprint is saved before the clone and commands. Every run, including one
+resumed after a blocked validation, stops this way before staging if attributed or
+frozen work has since moved.
+
+Movement and pin changes retire evidence before any GitHub write. One save clears
+validation, review, and the readiness intent and status. The same save journals
+the movement or pin notice and a pending status that revokes earlier readiness.
+Review evidence for the old binding that was still queued is kept locally as
+unpublished evidence. A failed status write leaves the remaining writes in the
+outbox with the notification flag set. Later ticks retry them without restoring
+evidence. Runs without the `github` grant queue no writes. After a pin change,
+new validation, review, and `ci` for the same commit do not call `mark_ready` on
+a PR that is already ready for review. The new CI record reports no readiness
+change.
 
 This release does not provide a web UI, multi-host leases,
 GitHub Projects synchronization, automatic semantic issue deduplication,
@@ -330,7 +386,7 @@ issue drafts. Validation can enter from a remote branch or commit without an
 author pass. Publication, review, and readiness consume compatible tracked
 validation/review evidence. Review can run locally without a PR. It writes GitHub
 evidence only for a published candidate and with the content grant. Existing PR
-adoption from outside the coordinator remains companion #10.
+adoption from outside the coordinator uses `agent-team pr`.
 
 Selections record cumulative requested/performed/unperformed operations and each
 continuation segment. Completed endpoints and rejections stop before successor
