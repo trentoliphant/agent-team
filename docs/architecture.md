@@ -337,6 +337,11 @@ CI read after an earlier declaration, awaits new declarations; the earlier
 declaration never covers it. A candidate already ahead of the published head is
 compared with its own fingerprint from before the read.
 
+Validation fingerprints the author checkout after the candidate commit, before any
+command runs, and checks it again before accepting a pass or a failure. If it moved,
+the result is kept only as history for that commit, the run stops on the earlier
+fingerprint, and a commit or edit awaits declarations.
+
 Movement and pin changes retire evidence before any GitHub write. One save clears
 validation, review, and the readiness intent and status. The same save journals
 the movement or pin notice and a pending status that revokes earlier readiness.

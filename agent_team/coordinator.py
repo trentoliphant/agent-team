@@ -1542,6 +1542,7 @@ class Coordinator:
         if sha in run.get("rejected_shas", []):
             raise TeamError("Candidate is a previously rejected commit; rejected evidence cannot be replaced by a reroll")
         self.store.save(run, sha=sha, commit_contributors=None, attributed_context=None, **recorded)
+        frozen = self.evidence_context(project, run)
         # Outside the author root, so companions and the candidate sit side by side under fresh basenames.
         root, cwd = self.store.layout(run, f"validation-{run['round']}-{time.time_ns()}")
         cwd.parent.mkdir(parents=True, exist_ok=True)
@@ -1573,20 +1574,33 @@ class Coordinator:
             results.append({"command": command, "exit_code": result.returncode})
             if result.returncode:
                 # The failure is bound to this commit before the rejection is recorded.
+                failure = {"sha": sha, "tests": results,
+                           "feedback": "Validation failed:\n" + command + "\n" + output[-12000:]}
+                self.unmoved_validation(project, run, frozen, tests=results, validation_failure=failure)
                 self.store.save(run, tests=results, validation_plan=list(project["tests"]),
-                                evidence_retired=None, validation_failure={
-                    "sha": sha, "tests": results,
-                    "feedback": "Validation failed:\n" + command + "\n" + output[-12000:]})
+                                evidence_retired=None, validation_failure=failure)
                 self.record_validation_failure(project, run)
                 return
         git(cwd, "add", "--all")
         if git(cwd, "write-tree") != candidate_tree:
             raise TeamError("Validation changed candidate files; inspect changes and rerun validation")
-        self.store.save(run, validated_context=self.evidence_context(project, run))
+        self.unmoved_validation(project, run, frozen, tests=results, validated_tree=candidate_tree,
+                                validated_sha=sha, validated_context=frozen)
+        self.store.save(run, validated_context=frozen)
         self.store.save(run, tests=results, validation_plan=list(project["tests"]), validated_tree=candidate_tree,
                         validated_sha=sha, needs_revision=False,
                         evidence_retired=None,
                         stage=self.successor(run, "validate", "publish"))
+
+    def unmoved_validation(self, project, run, frozen, **result):
+        """Refuse a result when the author checkout moved from `frozen`, its state after the candidate
+        commit and before the commands ran. One save keeps the result as history for that candidate,
+        keeps `frozen` as the stopped baseline, and records a commit or edit for declarations."""
+        if self.evidence_context(project, run) == frozen:
+            return
+        run.update(result, validation_plan=list(project["tests"]), evidence_retired=None, evidence_context=frozen)
+        self.adopted_pr_moved(project, run, "stopped", "Inputs changed during validation", before=frozen)
+        raise ReentryRequired("Inputs changed during validation; declare contributors and select validation")
 
     @staticmethod
     def pending_validation_failure(run):
