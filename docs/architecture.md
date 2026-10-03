@@ -341,6 +341,9 @@ Validation fingerprints the author checkout after the candidate commit, before a
 command runs, and checks it again before accepting a pass or a failure. If it moved,
 the result is kept only as history for that commit, the run stops on the earlier
 fingerprint, and a commit or edit awaits declarations.
+The fingerprint is saved before the clone and commands. Every run, including one
+resumed after a blocked validation, stops this way before staging if attributed or
+frozen work has since moved.
 
 Movement and pin changes retire evidence before any GitHub write. One save clears
 validation, review, and the readiness intent and status. The same save journals
