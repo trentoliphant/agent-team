@@ -587,8 +587,10 @@ class Coordinator:
             self.adopted_pr_moved(project, run, *change)
         return bool(change)
 
-    def adopted_pr_moved(self, project, run, stage, reason):
+    def adopted_pr_moved(self, project, run, stage, reason, notice=()):
+        """Retire evidence and journal `notice` and readiness revocation in one save; `flush` sends them."""
         evidence = [i for i in run.get("outbox", []) if i.get("evidence")]
+        notice = [i for i in notice if i not in run.get("outbox", [])]
         changes, revoke = {}, []
         if (run.get("evidence_retired") or {}).get("reason") != reason:
             changes = retire_evidence(run, reason)
@@ -616,8 +618,8 @@ class Coordinator:
                            "validation to continue")
         if reason == LOCAL_CHANGE and not run.get("pending_contribution"):
             changes["pending_contribution"] = self.evidence_context(project, run)
-        if changes or evidence:
-            self.store.save(run, outbox=[i for i in run.get("outbox", []) if not i.get("evidence")] + revoke,
+        if changes or evidence or notice:
+            self.store.save(run, outbox=[i for i in run.get("outbox", []) if not i.get("evidence")] + notice + revoke,
                             unpublished_evidence=run.get("unpublished_evidence", []) +
                             [dict(i, withheld_reason=reason, at=time.time()) for i in evidence],
                             notification_pending=True, **changes)
@@ -1205,33 +1207,21 @@ class Coordinator:
             expected = pr["head"]["sha"]
             self.store.save(run, **(self.pushed(run, expected) if run.get("adopted_pr")
                                     else dict(published_sha=expected, pending_push_sha=None)))
-        if run.get("adopted_pr"):
-            change = self.adopted_pr_change(project, run, expected, pr)
-            if change and self.has_effect(run, "github"):
-                base = change[1].startswith("PR base")
-                self.github.status(project["repo"], expected if base else pr["head"]["sha"],
-                                   "failure" if base else "pending",
-                                   "Base changed; integration and review need renewal" if base else
-                                   "PR head changed; review invalidated" if "repository or branch" in change[1]
-                                   else "Changed outside coordinator; review invalidated")
-            change = change or (current_evidence(run) and
-                                self.binding_change(project, run, pr, local=run["stage"] == "ready"))
-            if change:
-                self.adopted_pr_moved(project, run, *change)
-                return False
+        if run.get("adopted_pr") and self.adopted_inputs_moved(project, run, expected, pr):
+            return False
         if pr["head"]["sha"] != expected:
-            if self.has_effect(run, "github"):
-                self.github.status(project["repo"], pr["head"]["sha"], "pending", "Changed outside coordinator; review invalidated")
             fix = ("Declare its contributors with agent-team adopt RUN_ID --contributor ..." if recovering(run)
                    else "Use refresh to adopt and revalidate.")
-            self.store.save(run, stage="stale", notification_pending=True,
-                            error=f"PR head changed outside coordinator. {fix}")
+            self.store.save(run, **{**self.queue_writes(run, {"type": "status", "sha": pr["head"]["sha"], "state": "pending",
+                                                              "description": "Changed outside coordinator; review invalidated"}),
+                                    "stage": "stale", "notification_pending": True,
+                                    "error": f"PR head changed outside coordinator. {fix}"})
             return False
         if pr["base"]["ref"] != base_ref(project, run) or pr["base"]["sha"] != run["base_sha"]:
-            if self.has_effect(run, "github"):
-                self.github.status(project["repo"], expected, "failure", "Base changed; integration and review need renewal")
-            self.store.save(run, stage="stale", notification_pending=True,
-                            error="PR base changed. Use refresh to integrate and revalidate.")
+            self.store.save(run, **{**self.queue_writes(run, {"type": "status", "sha": expected, "state": "failure",
+                                                              "description": "Base changed; integration and review need renewal"}),
+                                    "stage": "stale", "notification_pending": True,
+                                    "error": "PR base changed. Use refresh to integrate and revalidate."})
             return False
         if run["stage"] == "ready" and self.pins_changed(project, run):
             self.invalidate_pins(project, run)
@@ -1243,6 +1233,13 @@ class Coordinator:
             observation = ci_observation(run, state, "reconcile", sha=expected)
             changes = dict(ci_checks=run.get("ci_checks", []) + [observation]) if observation_changed(
                 run.get("ci_checks"), observation) else {}
+            # Inputs can move during the CI read. The observation is kept, then retired as history.
+            if run.get("adopted_pr"):
+                if changes:
+                    self.store.save(run, **changes)
+                    changes = {}
+                if self.adopted_inputs_moved(project, run, expected, self.github.pr(project["repo"], run["pr"])):
+                    return False
             if state != "success":
                 changes.update(self.queue_writes(run, {"type": "status", "sha": expected, "state": "pending",
                                                        "description": "CI changed; waiting for checks"}),
@@ -1252,6 +1249,24 @@ class Coordinator:
             if state != "success":
                 self.flush(project, run)
         return True
+
+    def adopted_inputs_moved(self, project, run, expected, pr):
+        """Retire evidence when the adopted binding moved. Retirement and the status notice are saved
+        together before any write; the next notification flush sends the notice."""
+        change = self.adopted_pr_change(project, run, expected, pr)
+        notice = []
+        if change and change[0] == "stale" and self.has_effect(run, "github"):
+            base = change[1].startswith("PR base")
+            notice = [{"type": "status", "sha": expected if base else pr["head"]["sha"],
+                       "state": "failure" if base else "pending",
+                       "description": "Base changed; integration and review need renewal" if base else
+                       "PR head changed; review invalidated" if "repository or branch" in change[1]
+                       else "Changed outside coordinator; review invalidated"}]
+        change = change or (current_evidence(run) and
+                            self.binding_change(project, run, pr, local=run["stage"] == "ready"))
+        if change:
+            self.adopted_pr_moved(project, run, *change, notice=notice)
+        return bool(change)
 
     def suite(self, project, run):
         """Whether this run validates with companions. Runs created before companions were
@@ -1302,10 +1317,12 @@ class Coordinator:
 
     def invalidate_pins(self, project, run):
         """Changed companion pins void earlier validation and review; the same commit is checked again.
-        Partial runs stop for explicit re-entry at validation instead of continuing on their own."""
-        if run.get("pr") and self.has_effect(run, "github"):
-            self.github.status(project["repo"], run.get("published_sha") or run["sha"], "pending",
-                               "Companion pins changed; validation and review need renewal")
+        Partial runs stop for explicit re-entry at validation instead of continuing on their own.
+        The status write is journaled with the invalidation; the next notification flush sends it."""
+        notice = self.queue_writes(run, {"type": "status", "sha": run.get("published_sha") or run["sha"],
+                                         "state": "pending",
+                                         "description": "Companion pins changed; validation and review need renewal"}
+                                   ) if run.get("pr") and self.has_effect(run, "github") else {}
         selected = {}
         if run.get("stop_after"):
             retired = retire_evidence(run, "Companion pins changed", before=run.get("validated_context"),
@@ -1314,9 +1331,9 @@ class Coordinator:
                             partial_result="Companion pins changed; evidence invalidated, explicit re-entry required",
                             evidence_invalidations=retired["evidence_invalidations"])
         self.store.save(run, **self.supersede(run), validated_sha=None, validated_tree=None,
-                        needs_revision=False, notification_pending=True, error=None,
+                        needs_revision=False, error=None,
                         evidence_generation=run.get("evidence_generation", 0) + 1,
-                        **{"stage": "validate", **selected})
+                        **{**notice, "notification_pending": True, "stage": "validate", **selected})
 
     def renew_pins(self, project, run):
         """Inside a stage: invalidate evidence gathered with other pins. A partial run must not
