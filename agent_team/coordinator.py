@@ -1519,6 +1519,11 @@ class Coordinator:
                 return
             # The failure was with other pins: keep it as history and validate with the current ones.
             self.store.save(run, **self.supersede(run))
+        if run.get("commit_contributors") and self.work_moved(project, run):
+            # Work moved after its attribution is never staged under it.
+            run.update(evidence_context=run["attributed_context"])
+            self.adopted_pr_moved(project, run, "stopped", "Inputs changed before validation")
+            raise ReentryRequired("Inputs changed; declare contributors and select validation")
         author = self.store.workspace(run)
         if git(author, "status", "--porcelain"):
             self.require_effect(run, "edit")
