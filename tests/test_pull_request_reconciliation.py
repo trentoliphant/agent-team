@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 # Module imports, so discovery collects neither fixture class nor other suites here.
 from tests import support_existing_pull_requests as existing
-from tests.support_existing_pull_requests import MOVES, unavailable
+from tests.support_existing_pull_requests import MOVES, READY, unavailable
 from tests.support_pull_requests import scenarios
 
 REVOKED = ("pending", "Evidence inputs changed; readiness invalidated")
@@ -40,7 +40,7 @@ class ReconciliationTests(existing.ExistingPullRequestFixture):
             run = self.tick_raising(run)
         # Retirement and every notice were saved before the failing write.
         self.assert_withdrawn(run, head, kind)
-        expected = [NOTICES[kind]] * (kind in NOTICES) + [REVOKED]
+        expected = ([NOTICES[kind]] if kind in NOTICES else []) + [REVOKED]
         self.assertEqual([(i["state"], i["description"]) for i in run["outbox"]], expected)
         self.assertTrue(run["notification_pending"])
         run = self.ticks(run)
@@ -71,8 +71,35 @@ class ReconciliationTests(existing.ExistingPullRequestFixture):
         head, run = self.stopped_review(grants=[])
         self.team.invalidate_pins(self.store.project("demo"), run)
         run = self.ticks(self.reload(run))
-        self.assert_fields(run, validated_sha=None, reviewed_sha=None, outbox=[])
+        self.assert_fields(run, validated_sha=None, reviewed_sha=None)
+        self.assertFalse(run.get("outbox"))
         self.assert_quiet()
+
+    def test_ready_pin_invalidation_retires_readiness(self):
+        head, run = self.ready_run()
+        # An interrupted earlier readiness change left its intent behind.
+        self.store.save(run, readiness_intent=head)
+        with patch.object(self.github, "status", side_effect=unavailable):
+            self.team.invalidate_pins(self.store.project("demo"), run)
+            run = self.reload(run)
+            self.assert_fields(run, stage="stopped", validated_sha=None, reviewed_sha=None, readiness_intent=None,
+                               readiness_status=None, notification_pending=True)
+            self.assertEqual([(i["sha"], i["state"], i["description"]) for i in run["outbox"]], [(head, *PINS)])
+            run = self.tick_raising(run)
+        self.assert_fields(run, validated_sha=None, reviewed_sha=None, readiness_intent=None, readiness_status=None)
+        self.assertEqual(len(run["outbox"]), 1)
+        run = self.ticks(run)
+        self.assertEqual(run["outbox"], [])
+        self.assertEqual(self.github.status_descriptions[-1], (head, *PINS))
+        # Fresh checks of the same commit on an already nondraft PR do not claim a readiness change.
+        run = self.revalidate(run)
+        self.assert_reviewed(run, head)
+        with patch.object(self.github, "mark_ready", wraps=self.github.mark_ready) as mark_ready:
+            run = self.ticks(self.select(run, ["ci"], READY))
+        self.assertEqual((run["stage"], mark_ready.call_count, self.pull()["draft"]), ("ready", 0, False))
+        check = self.report(run)["current_ci"]
+        self.assert_fields(check, operation="ci", head=head, state="success", readiness_changed=False)
+        self.assertEqual(self.github.statuses[-1], (head, "success"))
 
     @scenarios(("success", "head"), ("failure", "base"), ("pending", "identity"), ("failure", "configuration"),
                ("success", "local"), ("pending", "dirty"))

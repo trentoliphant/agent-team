@@ -1323,6 +1323,14 @@ class Coordinator:
                                          "state": "pending",
                                          "description": "Companion pins changed; validation and review need renewal"}
                                    ) if run.get("pr") and self.has_effect(run, "github") else {}
+        # Earlier readiness no longer counts. A queued pending notice replaces a success status on
+        # the same commit; a status on another commit is revoked explicitly.
+        readiness = dict(readiness_intent=None)
+        if notice.get("outbox") and run.get("readiness_status"):
+            if run["readiness_status"] != notice["outbox"][-1]["sha"]:
+                notice["outbox"].append({"type": "status", "sha": run["readiness_status"], "state": "pending",
+                                         "description": "Evidence inputs changed; readiness invalidated"})
+            readiness["readiness_status"] = None
         selected = {}
         if run.get("stop_after"):
             retired = retire_evidence(run, "Companion pins changed", before=run.get("validated_context"),
@@ -1331,7 +1339,7 @@ class Coordinator:
                             partial_result="Companion pins changed; evidence invalidated, explicit re-entry required",
                             evidence_invalidations=retired["evidence_invalidations"])
         self.store.save(run, **self.supersede(run), validated_sha=None, validated_tree=None,
-                        needs_revision=False, error=None,
+                        needs_revision=False, error=None, **readiness,
                         evidence_generation=run.get("evidence_generation", 0) + 1,
                         **{**notice, "notification_pending": True, "stage": "validate", **selected})
 
