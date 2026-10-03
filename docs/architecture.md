@@ -309,6 +309,23 @@ superseded, and historical evidence from plain dictionaries. Rendered reviews
 keep their companion pins, and historical validation failures keep their
 complete feedback.
 
+For an adopted PR, ready reconciliation saves the CI observation, then checks the
+complete binding again: PR head, head repository and branch, base branch and SHA,
+validation configuration, companion pins, and the local candidate. Inputs can
+move during the CI read. If they did, the observation stays only as history for
+the retired evidence, and no "CI changed" status is queued.
+
+Movement and pin changes retire evidence before any GitHub write. One save clears
+validation, review, and the readiness intent and status. The same save journals
+the movement or pin notice and a pending status that revokes earlier readiness.
+Review evidence for the old binding that was still queued is kept locally as
+unpublished evidence. A failed status write leaves the remaining writes in the
+outbox with the notification flag set. Later ticks retry them without restoring
+evidence. Runs without the `github` grant queue no writes. After a pin change,
+new validation, review, and `ci` for the same commit do not call `mark_ready` on
+a PR that is already ready for review. The new CI record reports no readiness
+change.
+
 This release does not provide a web UI, multi-host leases,
 GitHub Projects synchronization, automatic semantic issue deduplication,
 general-purpose plugin loading, autonomous prioritization, or automatic merge.
