@@ -2044,6 +2044,13 @@ class WorkflowTests(unittest.TestCase):
         self.project.update(tests=["test -f hidden.txt"], max_revisions=0)
         self.store.save_project(self.project)
         run = self.tick()
+        # The tracked .gitignore arrived after the author's attribution, so nothing is staged under it.
+        self.assertEqual(run["stage"], "stopped")
+        self.assertTrue(run["pending_contribution"])
+        with self.assertRaises(TeamError):
+            self.team.continue_run(run["id"], ["validate"])
+        self.team.continue_run(run["id"], ["validate"], ["human"])
+        run = self.tick()
         self.assertEqual(run["stage"], "handoff")
         self.assertEqual(self.github.creates, 0)
 
