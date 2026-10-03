@@ -579,14 +579,17 @@ class Coordinator:
             return "stopped", LOCAL_CHANGE
         return None
 
+    def attributed(self, run):
+        """Exact state attributed for the next validation commit, or frozen for `sha` before validation's
+        clone and commands: a declaration or a blocked validation never covers later edits."""
+        context = run.get("attributed_context")
+        return context if context and (run.get("commit_contributors") or context["head"] == run.get("sha")) else None
+
     def work_moved(self, project, run, before=None):
         """Whether the checkout's commit or working state moved from the attributed inputs or from
-        `before`, the inputs captured before a CI read, whatever commit they hold. Work attributed for
-        the next validation commit (`commit_contributors`) is compared with the exact state it was
-        attributed in (`attributed_context`), so an earlier declaration never covers later edits.
+        `before`, the inputs captured before a CI read, whatever commit they hold.
         Configuration, pins, scope and base are compared elsewhere; they are not contributions."""
-        attributed = run.get("attributed_context") if run.get("commit_contributors") else self.validated_inputs(run)
-        baselines = [c for c in (attributed, before) if c]
+        baselines = [c for c in (self.attributed(run) or self.validated_inputs(run), before) if c]
         if not baselines or not run.get("git_metadata") or not self.store.workspace(run).exists():
             return False
         now = self.evidence_context(project, run)
@@ -1519,9 +1522,10 @@ class Coordinator:
                 return
             # The failure was with other pins: keep it as history and validate with the current ones.
             self.store.save(run, **self.supersede(run))
-        if run.get("commit_contributors") and self.work_moved(project, run):
+        baseline = self.attributed(run)
+        if baseline and self.work_moved(project, run):
             # Work moved after its attribution is never staged under it.
-            run.update(evidence_context=run["attributed_context"])
+            run.update(evidence_context=baseline)
             self.adopted_pr_moved(project, run, "stopped", "Inputs changed before validation")
             raise ReentryRequired("Inputs changed; declare contributors and select validation")
         author = self.store.workspace(run)
@@ -1546,8 +1550,8 @@ class Coordinator:
             raise TeamError("Revision produced no new commit; rejected evidence cannot be replaced by a reroll")
         if sha in run.get("rejected_shas", []):
             raise TeamError("Candidate is a previously rejected commit; rejected evidence cannot be replaced by a reroll")
-        self.store.save(run, sha=sha, commit_contributors=None, attributed_context=None, **recorded)
         frozen = self.evidence_context(project, run)
+        self.store.save(run, sha=sha, commit_contributors=None, attributed_context=frozen, **recorded)
         # Outside the author root, so companions and the candidate sit side by side under fresh basenames.
         root, cwd = self.store.layout(run, f"validation-{run['round']}-{time.time_ns()}")
         cwd.parent.mkdir(parents=True, exist_ok=True)
@@ -1583,7 +1587,7 @@ class Coordinator:
                            "feedback": "Validation failed:\n" + command + "\n" + output[-12000:]}
                 self.unmoved_validation(project, run, frozen, tests=results, validation_failure=failure)
                 self.store.save(run, tests=results, validation_plan=list(project["tests"]),
-                                evidence_retired=None, validation_failure=failure)
+                                evidence_retired=None, validation_failure=failure, attributed_context=None)
                 self.record_validation_failure(project, run)
                 return
         git(cwd, "add", "--all")
@@ -1594,7 +1598,7 @@ class Coordinator:
         self.store.save(run, validated_context=frozen)
         self.store.save(run, tests=results, validation_plan=list(project["tests"]), validated_tree=candidate_tree,
                         validated_sha=sha, needs_revision=False,
-                        evidence_retired=None,
+                        evidence_retired=None, attributed_context=None,
                         stage=self.successor(run, "validate", "publish"))
 
     def unmoved_validation(self, project, run, frozen, **result):
