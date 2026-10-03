@@ -324,6 +324,19 @@ its contributors pending. The stopped baseline keeps the earlier fingerprint, so
 validation cannot continue until contributors are declared, and the edit is never
 attributed to the assigned author. Earlier pending declarations are kept.
 
+Local movement is checked on its own whenever adopted evidence is retired, not
+only when nothing else moved. If configuration, pins, head, or base move along
+with a local commit or edit, the same save records the pending declarations, and
+the retirement reason names both changes. Only the commit, tree, and working
+state count as a contribution. Configuration movement alone never does.
+
+Work attributed before the next validation commit, by the author's implementation
+or by `--contributor` declarations, is recorded with its exact fingerprint. Only
+that fingerprint is exempt. A later commit or edit, including one made during a
+CI read after an earlier declaration, awaits new declarations; the earlier
+declaration never covers it. A candidate already ahead of the published head is
+compared with its own fingerprint from before the read.
+
 Movement and pin changes retire evidence before any GitHub write. One save clears
 validation, review, and the readiness intent and status. The same save journals
 the movement or pin notice and a pending status that revokes earlier readiness.

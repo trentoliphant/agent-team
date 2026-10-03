@@ -26,6 +26,7 @@ STOP_POINTS = ("implement", "validate", "publish", "review", "ci")
 CONTRIBUTORS = ("openai", "anthropic", "human")
 PR_CONTRIBUTORS = CONTRIBUTORS + ("unknown",)
 LOCAL_CHANGE = "Local candidate changed after validation"
+WORK = ("head", "tree", "dirty", "working")
 BASE_OBJECT_REF = "refs/agent-team/base"
 MATCHES = {
     "first": "first rejection; no earlier findings to compare",
@@ -566,13 +567,30 @@ class Coordinator:
         reason = None if change else self.context_change(project, run, context)
         return change or (("stopped", reason) if reason else None)
 
-    def local_change(self, project, run):
+    def validated_inputs(self, run):
         failed = (run.get("validation_failure") or {}).get("sha") == run["sha"]
         expected = (run.get("validated_context") if run.get("validated_sha") == run["sha"]
                     else run.get("attempted_context") if failed else None)
-        if (expected or {}).get("head") == run["sha"] and self.evidence_context(project, run) != expected:
+        return expected if (expected or {}).get("head") == run["sha"] else None
+
+    def local_change(self, project, run):
+        expected = self.validated_inputs(run)
+        if expected and self.evidence_context(project, run) != expected:
             return "stopped", LOCAL_CHANGE
         return None
+
+    def work_moved(self, project, run, before=None):
+        """Whether the checkout's commit or working state moved from the attributed inputs or from
+        `before`, the inputs captured before a CI read, whatever commit they hold. Work attributed for
+        the next validation commit (`commit_contributors`) is compared with the exact state it was
+        attributed in (`attributed_context`), so an earlier declaration never covers later edits.
+        Configuration, pins, scope and base are compared elsewhere; they are not contributions."""
+        attributed = run.get("attributed_context") if run.get("commit_contributors") else self.validated_inputs(run)
+        baselines = [c for c in (attributed, before) if c]
+        if not baselines or not run.get("git_metadata") or not self.store.workspace(run).exists():
+            return False
+        now = self.evidence_context(project, run)
+        return any(now[k] != c.get(k) for c in baselines for k in WORK if k in c)
 
     def binding_change(self, project, run, pr=None, context=None, local=True):
         return self.evidence_change(project, run, context or binding(run), pr) or (
@@ -587,12 +605,18 @@ class Coordinator:
             self.adopted_pr_moved(project, run, *change)
         return bool(change)
 
-    def adopted_pr_moved(self, project, run, stage, reason, notice=()):
-        """Retire evidence and journal `notice` and readiness revocation in one save; `flush` sends them."""
+    def adopted_pr_moved(self, project, run, stage, reason, notice=(), before=None):
+        """Retire evidence and journal `notice` and readiness revocation in one save; `flush` sends them.
+        A local commit or edit is recorded for contributor declarations in the same save, even when
+        another input moved too, so the tick keeps the earlier baseline."""
+        local = reason == LOCAL_CHANGE or (not run.get("pending_contribution") and
+                                           self.work_moved(project, run, before))
+        if local and reason != LOCAL_CHANGE:
+            reason = f"{reason}; {LOCAL_CHANGE}"
         evidence = [i for i in run.get("outbox", []) if i.get("evidence")]
         notice = [i for i in notice if i not in run.get("outbox", [])]
         changes, revoke = {}, []
-        if (run.get("evidence_retired") or {}).get("reason") != reason:
+        if (run.get("evidence_retired") or {}).get("reason") not in {reason, f"{reason}; {LOCAL_CHANGE}"}:
             changes = retire_evidence(run, reason)
         if (run["stage"] == "ready" or run.get("readiness_status")) and self.has_effect(run, "github"):
             revoke = [{"type": "status", "sha": run.get("readiness_status") or run.get("published_sha") or run["sha"],
@@ -616,7 +640,7 @@ class Coordinator:
             changes.update(stage="stopped", next_stage=run["stage"] if run["stage"] in {"implement", "revision"}
                            else "validate", partial_result=f"{reason}; evidence retired as history. Select "
                            "validation to continue")
-        if reason == LOCAL_CHANGE and not run.get("pending_contribution"):
+        if local and not run.get("pending_contribution"):
             changes["pending_contribution"] = self.evidence_context(project, run)
         if changes or evidence or notice:
             self.store.save(run, outbox=[i for i in run.get("outbox", []) if not i.get("evidence")] + notice + revoke,
@@ -960,7 +984,7 @@ class Coordinator:
                                                      self.store.workspace(run), context["head"], "^" + previous["head"])
             self.store.save(run, **recorded,
                             contributors=sorted(set(run.get("contributors", [])) | set(contributors) | families),
-                            pending_contribution=None,
+                            pending_contribution=None, attributed_context=context,
                             commit_contributors=sorted(set(run.get("commit_contributors") or []) | set(contributors)),
                             contribution_history=run.get("contribution_history", []) +
                             [{"at": time.time(), "context": context, "declared": contributors}])
@@ -1251,9 +1275,10 @@ class Coordinator:
                 self.flush(project, run)
         return True
 
-    def adopted_inputs_moved(self, project, run, expected, pr):
-        """Retire evidence when the adopted binding moved. Retirement and the status notice are saved
-        together before any write; the next notification flush sends the notice."""
+    def adopted_inputs_moved(self, project, run, expected, pr, before=None):
+        """Retire evidence when the adopted binding moved. Retirement, the status notice and any
+        pending contributor declaration are saved together before any write; the next notification
+        flush sends the notice."""
         change = self.adopted_pr_change(project, run, expected, pr)
         notice = []
         if change and change[0] == "stale" and self.has_effect(run, "github"):
@@ -1266,7 +1291,7 @@ class Coordinator:
         change = change or (current_evidence(run) and
                             self.binding_change(project, run, pr, local=run["stage"] == "ready"))
         if change:
-            self.adopted_pr_moved(project, run, *change, notice=notice)
+            self.adopted_pr_moved(project, run, *change, notice=notice, before=before)
         return bool(change)
 
     def ci_baseline(self, project, run):
@@ -1277,14 +1302,19 @@ class Coordinator:
         """After a CI read whose observation is already saved: recheck the complete adopted binding
         before the caller returns, raises or saves its successor. A local commit or edit, including
         one made during the read, retires evidence and awaits contributor declarations, so the tick
-        keeps the earlier baseline and later validation cannot attribute the edit to the author."""
+        keeps the earlier baseline and later validation cannot attribute the edit to the author. This
+        holds when configuration, pins, head or base moved too; configuration alone is no contribution."""
         if not run.get("adopted_pr"):
             return False
-        if self.adopted_inputs_moved(project, run, expected, self.github.pr(project["repo"], run["pr"])):
+        if self.adopted_inputs_moved(project, run, expected, self.github.pr(project["repo"], run["pr"]), before):
             return True
-        if not self.local_change(project, run) and self.evidence_context(project, run) == before:
+        if self.work_moved(project, run, before):
+            reason = LOCAL_CHANGE
+        elif self.local_change(project, run) or self.evidence_context(project, run) != before:
+            reason = "Validation inputs changed during the CI read"
+        else:
             return False
-        self.adopted_pr_moved(project, run, "stopped", LOCAL_CHANGE)
+        self.adopted_pr_moved(project, run, "stopped", reason, before=before)
         return True
 
     def suite(self, project, run):
@@ -1478,7 +1508,7 @@ class Coordinator:
         # when a human contributes after an implementation stop boundary.
         self.store.save(run, commit_contributors=sorted(set(run.get("commit_contributors") or []) |
                                                        {FAMILIES[run["author"]]}),
-                        author_record=record, authored_rounds=run.get("authored_rounds", []) + [run["round"]],
+                        attributed_context=self.evidence_context(project, run), author_record=record, authored_rounds=run.get("authored_rounds", []) + [run["round"]],
                         stage=self.successor(run, "revision" if run["stage"] == "revision" else "implement", "validate"))
 
     def validate(self, project, run):
@@ -1511,7 +1541,7 @@ class Coordinator:
             raise TeamError("Revision produced no new commit; rejected evidence cannot be replaced by a reroll")
         if sha in run.get("rejected_shas", []):
             raise TeamError("Candidate is a previously rejected commit; rejected evidence cannot be replaced by a reroll")
-        self.store.save(run, sha=sha, commit_contributors=None, **recorded)
+        self.store.save(run, sha=sha, commit_contributors=None, attributed_context=None, **recorded)
         # Outside the author root, so companions and the candidate sit side by side under fresh basenames.
         root, cwd = self.store.layout(run, f"validation-{run['round']}-{time.time_ns()}")
         cwd.parent.mkdir(parents=True, exist_ok=True)
