@@ -363,9 +363,11 @@ and `resume` and `refresh` are refused. Before any GitHub write, the coordinator
 saves the rejected review, feedback, revision history, and handoff, with the
 review comment and statuses queued. A failed GitHub write cannot block the
 handoff; queued writes are retried later. It then posts a handoff
-comment on the PR (or on the issue if no PR exists). The comment lists the run,
-issue, PR, candidate commit, validation results, and every remaining finding.
-It also includes the history and links to evidence. Each finding is labeled
+comment on the PR (or on the issue if no PR exists). There is one handoff comment
+per run, updated in place at each later handoff and decision. It lists the run,
+issue, PR, candidate commit, validation results, every remaining finding, and
+the operator decisions so far. The revision history and links to evidence are
+collapsed below them. Each finding is labeled
 `repeated` (same location and request as an earlier round), `uncertain` (an earlier
 round flagged the same file with different wording), `new`, or `first`. If
 validation fails after a review rejection, no review has checked that rejection's
@@ -382,7 +384,7 @@ agent-team decide RUN_ID stop                   # stop; issue, PR, and work are 
 ```
 
 `--note TEXT` adds an operator note to the published decision. Each decision is
-saved in the run and posted as a PR (or issue) comment. History is never reset.
+saved in the run and added to the handoff comment's decision list. History is never reset.
 A rejected commit can never be validated or reviewed again, so every extension
 or repair must add a new commit. `extend --revisions N` always allows exactly N
 more revisions after the handoff round, even after an adoption. The limit is

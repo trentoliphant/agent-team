@@ -29,7 +29,14 @@ Removing the label stops further work on the next active stage. Discovered issue
 remain unready until triaged. One registered project corresponds to one repository.
 
 Status is maintained in one marked comment per issue. Review evidence and the
-ready-for-maintainer summary are marked comments on the PR. Duplicate suppression
+ready-for-maintainer summary are marked comments on the PR. A failed validation
+gets its own comment naming the failing tests; raw output stays local. A run that
+reaches its revision limit keeps one handoff comment, updated in place at each
+handoff and operator decision. When the PR is merged or closed, an outcome comment
+records the revisions, rejections, findings, and decisions the run took. Review,
+validation, handoff, and outcome comments end with a collapsed machine-readable
+record. Revision commits name the rejection they answer in their subject.
+Duplicate suppression
 only trusts comments written by the coordinator's current GitHub identity. Avoid
 switching identities mid-run if you want to retain a single status comment.
 

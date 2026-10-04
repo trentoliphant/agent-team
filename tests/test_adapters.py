@@ -15,7 +15,7 @@ class AdapterTests(unittest.TestCase):
         self.commands = []
         self.environments = []
         self.workspaces = []
-        report = ({"message": "Status"} if role == "status" else
+        report = ({"message": "Status"} if role == "status" else 
                   {"verdict": "pass", "summary": "ok", "findings": []})
 
         def fake_execute(args, **kwargs):
@@ -112,9 +112,14 @@ class AdapterTests(unittest.TestCase):
             self.call("claude", {"is_error": False, "result": "Looks good!"})
 
     def test_passing_review_with_findings_rejected(self):
-        with self.assertRaises(TeamError):
+        with self.assertRaisesRegex(TeamError, "unambiguous verdict"):
             self.call("claude", {"structured_output": {"verdict": "pass", "summary": "ok", "findings": [
                 {"severity": "high", "location": "a:1", "evidence": "bad", "request": "fix"}]}})
+
+    def test_review_severity_uses_fixed_values(self):
+        finding = {"severity": "P1", "location": "a:1", "evidence": "bad", "request": "fix"}
+        with self.assertRaisesRegex(TeamError, "value outside"):
+            self.call("claude", {"structured_output": {"verdict": "changes_requested", "summary": "s", "findings": [finding]}})
 
 
 class GitHubTests(unittest.TestCase):

@@ -6,6 +6,7 @@ import re
 from .process import execute, worker_env, TeamError, QuotaError
 
 FAMILIES = {"codex": "openai", "claude": "anthropic"}
+SEVERITIES = ("high", "medium", "low")
 AUTHOR_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {"summary": {"type": "string"}, "limitations": {"type": "string"}},
@@ -18,7 +19,8 @@ REVIEW_SCHEMA = {
         "summary": {"type": "string"},
         "findings": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "properties": {k: {"type": "string"} for k in ["severity", "location", "evidence", "request"]},
+            "properties": {"severity": {"type": "string", "enum": list(SEVERITIES)},
+                           **{k: {"type": "string"} for k in ["location", "evidence", "request"]}},
             "required": ["severity", "location", "evidence", "request"],
         }},
     }, "required": ["verdict", "summary", "findings"],
@@ -45,7 +47,7 @@ def validate_report(value, schema):
     if not valid:
         raise TeamError(f"Agent report expected {kind}")
     if "enum" in schema and value not in schema["enum"]:
-        raise TeamError("Agent report has invalid verdict")
+        raise TeamError(f"Agent report has a value outside {', '.join(schema['enum'])}")
     if kind == "object":
         if set(value) != set(schema["required"]):
             raise TeamError("Agent report has missing or unexpected fields")
