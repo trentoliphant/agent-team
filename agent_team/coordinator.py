@@ -36,7 +36,9 @@ MATCHES = {
     "new": "new: no earlier finding in this file (a reworded earlier finding cannot be ruled out)",
 }
 
-COMMANDS = ("You may run commands in this checkout. It is a copy made for you and there is no network access. ")
+COMMANDS = ("You may run commands in this checkout. It is a copy made for you and there is no network access. "
+            "A test that needs the network or opens a local network port cannot pass here. If a test fails only "
+            "for that reason, say so in your report; do not change code or tests to work around it. ")
 SEVERITY = ("Label each finding blocking or minor. Blocking means it must be fixed before merge: incorrect "
             "behavior, a missed acceptance criterion, a regression, a weakened safeguard, or changed behavior "
             "without a test. Minor means worth fixing but safe to merge without. Return changes_requested if any "

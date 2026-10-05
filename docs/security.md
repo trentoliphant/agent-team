@@ -25,7 +25,10 @@ write only inside that checkout. Claude runs them through its command sandbox,
 which also refuses to read credential stores such as `~/.ssh`, `~/.aws`, and the
 GitHub CLI configuration; the sandbox is required, never optional. Codex authors
 and reviewers use workspace-write sandboxing. Neither uses approval bypass.
-Discovery and status wording keep read-only tools and a read-only sandbox.
+One command may run for as long as the project timeout, so a full test suite can
+finish. A test that needs the network or opens a local network port cannot pass
+inside the sandbox; agents are told to report such a failure and not to work
+around it. Discovery and status wording keep read-only tools and a read-only sandbox.
 The coordinator still runs the configured validation itself, in a fresh clone, and
 only its results are published. A reviewer may leave its clone dirty; the
 coordinator checks that the clone still points at the candidate commit. The installed CLI versions and policies still

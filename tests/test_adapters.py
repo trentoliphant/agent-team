@@ -86,6 +86,9 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn("network", sandbox)  # no domain is allowed
         for secret in ("~/.ssh", "~/.aws", "~/.config/gh"):
             self.assertIn(secret, sandbox["filesystem"]["denyRead"])
+        # One command may run as long as the call itself (30 seconds here), not Claude's two-minute default.
+        environment = self.environments[-1]
+        self.assertEqual((environment["BASH_DEFAULT_TIMEOUT_MS"], environment["BASH_MAX_TIMEOUT_MS"]), ("30000", "30000"))
         self.assertEqual(result["observed_models"], ["a-model"])
 
     def test_claude_status_has_no_shell_or_edit_tools(self):
@@ -94,6 +97,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
         self.assertNotIn("--settings", command)
         self.assertEqual(command[command.index("--max-turns") + 1], "40")
+        self.assertNotIn("BASH_MAX_TIMEOUT_MS", self.environments[-1])
         self.assertNotIn("--add-dir", command)
 
     def test_claude_can_read_companion_checkouts_without_new_tools(self):

@@ -2055,10 +2055,12 @@ class WorkflowTests(unittest.TestCase):
         self.tick(2)
         first = self.agents.prompts["implement"]
         for text in ("Run the configured validation commands before you finish", "there is no network access",
+                     "opens a local network port cannot pass here", "do not change code or tests to work around it",
                      "Your summary and limitations become the PR description"):
             self.assertIn(text, first)
         self.assertNotIn("Findings from earlier rounds", first)
         self.tick(8)
+        self.assertIn("opens a local network port cannot pass here", self.agents.prompts["review"])
         prompt = self.agents.prompts["implement"]
         self.assertIn("The PR description is already written", prompt)
         self.assertIn("Findings from earlier rounds, already answered; keep those fixes in place:\n"
