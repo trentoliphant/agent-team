@@ -6,11 +6,24 @@ import re
 from .process import execute, worker_env, TeamError, QuotaError
 
 FAMILIES = {"codex": "openai", "claude": "anthropic"}
-SEVERITIES = ("high", "medium", "low")
+# A blocking finding must be fixed before the change is ready; a minor one does not hold it back.
+SEVERITIES = ("blocking", "minor")
+# Roles that run commands. They work in a checkout made for them, with no network access.
+COMMAND_ROLES = ("implement", "review")
+# Claude's command sandbox: writes stay in the working directory, the network is closed, and
+# credential stores cannot be read. Codex's workspace-write sandbox gives the same write and network limits.
+CLAUDE_SANDBOX = {"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False,
+                              "filesystem": {"denyRead": ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.netrc",
+                                                          "~/.docker", "~/.kube"]}}}
 AUTHOR_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "properties": {"summary": {"type": "string"}, "limitations": {"type": "string"}},
-    "required": ["summary", "limitations"],
+    "properties": {"summary": {"type": "string"}, "limitations": {"type": "string"},
+                   # One answer per finding in the feedback: what changed, or why the author disagrees.
+                   "responses": {"type": "array", "items": {
+                       "type": "object", "additionalProperties": False,
+                       "properties": {"finding": {"type": "string"}, "response": {"type": "string"}},
+                       "required": ["finding", "response"]}}},
+    "required": ["summary", "limitations", "responses"],
 }
 REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -100,7 +113,7 @@ class Agents:
             args = ["codex", "--no-daemon", "-a", "never", "exec", "--ignore-user-config",
                     "--ignore-rules", "--ephemeral", "--color", "never", "--json",
                     "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"',
-                    "--sandbox", "workspace-write" if role == "implement" else "read-only",
+                    "--sandbox", "workspace-write" if role in COMMAND_ROLES else "read-only",
                     "--output-schema", str(schema_file), "-o", str(output_file)]
             if role == "status":
                 args += ["--skip-git-repo-check"]
@@ -109,13 +122,17 @@ class Agents:
             args += ["-"]
         else:
             # --bare deliberately NOT used: it disables subscription authentication.
-            toolset = "Read,Glob,Grep,Edit,Write" if role == "implement" else "Read,Glob,Grep"
+            commands = role in COMMAND_ROLES
+            toolset = "Read,Glob,Grep,Edit,Write,Bash" if commands else "Read,Glob,Grep"
             args = ["claude", "--safe-mode", "--restricted", "--strict-mcp-config",
                     "--mcp-config", '{"mcpServers":{}}', "--setting-sources", "",
                     "--no-session-persistence", "--permission-mode", "dontAsk",
                     "--tools", toolset, "--allowedTools", toolset,
-                    "--max-turns", "40", "-p", "--output-format", "json",
+                    "--max-turns", "120" if commands else "40", "-p", "--output-format", "json",
                     "--json-schema", json.dumps(schema)]
+            if commands:
+                # Bash is named in --tools, so restricted mode keeps it; it runs only inside the sandbox.
+                args += ["--settings", json.dumps(CLAUDE_SANDBOX)]
             # Claude only reads inside its working directories. Codex sandboxes already allow
             # reads anywhere and restrict writes to the workspace, so they need no extra grant.
             for directory in readable:
@@ -159,8 +176,10 @@ class Agents:
                 raise TeamError("Codex returned malformed JSON") from exc
             models = sorted({e["model"] for e in events if isinstance(e.get("model"), str)})
         validate_report(report, schema)
-        if role == "review" and report["verdict"] == "pass" and report["findings"]:
-            raise TeamError("Review claims pass but contains findings; require an unambiguous verdict")
+        blocking = role == "review" and any(f["severity"] == "blocking" for f in report["findings"])
+        if role == "review" and (report["verdict"] == "pass") == blocking:
+            # A pass may list minor findings; it may not carry a blocking one, and a rejection needs one.
+            raise TeamError("Review verdict does not match its blocking findings; require an unambiguous verdict")
         record = dict(agent=agent, family=FAMILIES[agent], cli_version=version,
                       requested_model=model or "CLI default", observed_models=models,
                       report=report)

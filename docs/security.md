@@ -15,11 +15,20 @@ authentication files and never switches to API billing.
 
 Claude uses safe/restricted mode, explicit tools, no persistent session, and an
 empty MCP configuration. It intentionally does not use `--bare`, which requires
-API/provider credentials instead of the subscription keychain. Claude authors
-get file read/edit tools; reviewers get read tools only. The coordinator runs
-validation commands for both families so Claude needs no shell permission.
-Codex authors use workspace-write sandboxing, reviewers use read-only sandboxing,
-and neither uses approval bypass. The installed CLI versions and policies still
+API/provider credentials instead of the subscription keychain.
+
+Authors and reviewers run commands, so an author can run the configured
+validation before handing off and a reviewer can run it and write throwaway tests.
+Each works in a checkout made for it: the author's own workspace, or a fresh clone
+of the candidate that is never published. Commands have no network access and can
+write only inside that checkout. Claude runs them through its command sandbox,
+which also refuses to read credential stores such as `~/.ssh`, `~/.aws`, and the
+GitHub CLI configuration; the sandbox is required, never optional. Codex authors
+and reviewers use workspace-write sandboxing. Neither uses approval bypass.
+Discovery and status wording keep read-only tools and a read-only sandbox.
+The coordinator still runs the configured validation itself, in a fresh clone, and
+only its results are published. A reviewer may leave its clone dirty; the
+coordinator checks that the clone still points at the candidate commit. The installed CLI versions and policies still
 determine their exact behavior; unsupported flags fail rather than being removed
 automatically. The initial adapters were exercised with Codex 0.157.1 and Claude
 Code 2.1.283.

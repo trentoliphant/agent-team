@@ -36,6 +36,15 @@ MATCHES = {
     "new": "new: no earlier finding in this file (a reworded earlier finding cannot be ruled out)",
 }
 
+COMMANDS = ("You may run commands in this checkout. It is a copy made for you and there is no network access. ")
+SEVERITY = ("Label each finding blocking or minor. Blocking means it must be fixed before merge: incorrect "
+            "behavior, a missed acceptance criterion, a regression, a weakened safeguard, or changed behavior "
+            "without a test. Minor means worth fixing but safe to merge without. Return changes_requested if any "
+            "finding is blocking; otherwise pass, listing any minor findings.\n")
+FIRST_REVIEW = ("This is the first review of this change. Report every problem you can find in this one review, "
+                "not only the first few: later reviews only confirm fixes and check what changed. " + COMMANDS +
+                "Run the configured validation commands, and write and run throwaway tests that try to break the "
+                "change. Judge the committed candidate; nothing you write here is kept.\n")
 REVIEW_SCOPE = ("The published comment already states the commit, base, reviewer, and validation results. "
                 "Do not restate them or recite the acceptance criteria. Say what you checked and what you "
                 "did not verify.\n")
@@ -126,15 +135,75 @@ def validation_comment(run, entry, index):
                                               tests=entry["tests"], failing_tests=names)
 
 
+def cleanup_round(run):
+    """The cleanup this round answers, if the last review passed with minor findings."""
+    cleanup = run.get("cleanup")
+    return cleanup if cleanup and cleanup["round"] == run["round"] - 1 else None
+
+
+def previous_review(run):
+    """The most recent earlier review of this run, rejected or passed with minor findings: its round,
+    commit and findings. A re-review confirms those findings are fixed and checks what changed since."""
+    reviews = [e for e in run.get("revision_history") or [] if e["kind"] == "review"]
+    if run.get("cleanup") and run["cleanup"]["sha"] != run["sha"]:
+        reviews.append(run["cleanup"])
+    last = max(reviews, key=lambda e: e["round"], default=None)
+    if not last:
+        return None
+    report = last.get("review_report") or {"findings": last["findings"]}
+    return {"round": last["round"], "sha": last["sha"],
+            "findings": [{k: f[k] for k in ("severity", "location", "evidence", "request")} for f in report["findings"]]}
+
+
+def rereview_prompt(previous):
+    return (f"This is a re-review. The previous review, of commit {previous['sha']}, left the findings below. "
+            "Confirm each one is fixed; report any that is not as a finding again. Then review what changed "
+            f"since that commit (`git diff {previous['sha']}..HEAD`) for new problems. You need not repeat the "
+            "full review of unchanged code, but report any blocking problem you notice. " + COMMANDS +
+            "Run the configured validation commands and throwaway tests where they help. Judge the committed "
+            "candidate; nothing you write here is kept.\n"
+            f"Previous findings:\n{json.dumps(previous['findings'], indent=1, ensure_ascii=False)}\n")
+
+
+def earlier_findings(run):
+    """One line per review finding from rounds before the latest feedback, so the author keeps earlier
+    fixes in place while answering the newest ones."""
+    history = run.get("revision_history") or []
+    # In a cleanup round the feedback is the passing review's minor findings, so every rejection is earlier.
+    reviews = [e for e in (history if cleanup_round(run) else history[:-1]) if e["kind"] == "review"]
+    lines = [f"- revision {e['round']}, {f['location']}: {' '.join(f['request'].split())}"
+             for e in reviews for f in (e.get("review_report") or {"findings": e["findings"]})["findings"]]
+    return ("Findings from earlier rounds, already answered; keep those fixes in place:\n" + "\n".join(lines) + "\n"
+            if lines else "")
+
+
+def response_comment(run, sha):
+    """The author's answer to each finding, published with the commit that carries the fixes."""
+    responses = run["author_record"]["report"].get("responses") or []
+    lines = [f"**Author response in `{sha}`**", "",
+             f"Author `{run['author']}` ({FAMILIES[run['author']]}), revision {run['round']}."]
+    for number, entry in enumerate(responses, 1):
+        lines += ["", f"**{number}. {entry['finding']}**", "", entry["response"]]
+    return "\n".join(lines)
+
+
+def minor_findings(run):
+    """Minor findings the passing review of the current commit left open."""
+    record = run.get("review_record") or {}
+    return record.get("report", {}).get("findings", []) if run.get("reviewed_sha") == run.get("sha") else []
+
+
 def commit_message(run, trailers):
     """The first commit carries the task title. A revision names the rejection it answers, so the log
     reads as a history instead of repeating one subject."""
     history = run.get("revision_history") or []
-    if not (run.get("needs_revision") and history):
+    cleanup = cleanup_round(run)
+    if not cleanup and not (run.get("needs_revision") and history):
         return f"{run['title'][:150]}\n\n{trailers}"
-    last = history[-1]
+    last = cleanup or history[-1]
     count = len(last["findings"])
-    what = ("failed validation" if last["kind"] == "validation"
+    what = (f"{count} minor finding{'' if count == 1 else 's'}" if cleanup
+            else "failed validation" if last["kind"] == "validation"
             else f"{count} review finding{'' if count == 1 else 's'}")
     addressed = "".join(f"- {f['severity']}: {' '.join(f['location'].split())[:120]}\n" for f in last["findings"])
     return (f"Revision {run['round']}: address {what} on {last['sha'][:7]}\n\n{run['title'][:150]}\n\n"
@@ -170,7 +239,8 @@ def outcome_comment(run, stage):
 
 
 def pr_body(run):
-    report = run["author_record"]["report"]
+    # The description is the author's first report. Later rounds answer findings in comments instead.
+    report = run.get("description") or run["author_record"]["report"]
     partial = (f"Selected operations: {', '.join(run.get('requested_operations', []))}. "
                f"Unperformed operations: {', '.join(run.get('unperformed_operations', run.get('omitted_operations', []))) or 'none'}. "
                "Publication does not certify unperformed checks.\n\n") if run.get("stop_after") else ""
@@ -532,6 +602,10 @@ def status_forms(project, run):
 
 def ready_forms(run):
     validation = f"Validation: {validation_text(run['tests'])}\n\n" + companion_line(run.get("validated_companions"))
+    minor = minor_findings(run)
+    if minor:
+        validation += (f"Minor findings left open ({len(minor)}):\n\n" + "".join(
+            f"- {f['location']}: {' '.join(f['request'].split())}\n" for f in minor) + "\n")
     detailed = (f"**Ready for maintainer decision**\n\nCommit `{run['sha']}` passed the configured "
                 "local validation, observed GitHub checks, and independent review.\n\n"
                 f"{validation}The coordinator will not merge this PR.")
@@ -1596,12 +1670,18 @@ class Coordinator:
                      "; ".join(f"../{companions.basename(p['repo'])} = {p['repo']} at {p['rev']}" for p in pins) +
                      (f". Pins come from the committed manifest {manifest}" if manifest else "") + ".\n")
         prompt = (GUIDANCE + self.style(project, "pr") +
-                  "Your summary and limitations become the PR description.\n"
+                  ("The PR description is already written. Your summary describes this revision only.\n"
+                   if run.get("description") else "Your summary and limitations become the PR description.\n") +
                   f"\n{'Revise' if run.get('adopted_pr') else 'Implement'} {subject(run)}: "
                   f"{run['title']}\n\n{run['body']}\n\n"
                   f"Configured validation commands: {json.dumps(project['tests'])}\n" + suite +
+                  earlier_findings(run) +
                   f"Feedback from previous validation/review:\n{run['feedback']}\n"
-                  "Edit files directly. Tests are run by the coordinator after you finish. "
+                  "Edit files directly. " + COMMANDS + "Run the configured validation commands before you finish "
+                  "and fix what fails. The coordinator runs them again afterwards, and its results are the ones "
+                  "published. For each review finding in the feedback, return one responses entry that names the "
+                  "finding by its location and says in one or two sentences what you changed, or why you disagree. "
+                  "Return an empty responses list when the feedback has no review findings. "
                   "Report limitations honestly; do not claim tests you did not run.")
         record = self.call_agent(run["author"], "implement", prompt, cwd,
                                  self.store.artifacts(run) / f"author-{run['round']}", project, readable=readable)
@@ -1612,7 +1692,9 @@ class Coordinator:
         # when a human contributes after an implementation stop boundary.
         self.store.save(run, commit_contributors=sorted(set(run.get("commit_contributors") or []) |
                                                        {FAMILIES[run["author"]]}),
-                        attributed_context=self.evidence_context(project, run), author_record=record, authored_rounds=run.get("authored_rounds", []) + [run["round"]],
+                        attributed_context=self.evidence_context(project, run), author_record=record,
+                        description=run.get("description") or {k: record["report"][k] for k in ("summary", "limitations")},
+                        authored_rounds=run.get("authored_rounds", []) + [run["round"]],
                         stage=self.successor(run, "revision" if run["stage"] == "revision" else "implement", "validate"))
 
     def validate(self, project, run):
@@ -1646,6 +1728,13 @@ class Coordinator:
                 c["commit"] for c in info.get("contributions", [])]:
             recorded["adopted_pr"] = contributed(info, "coordinator_commit", sha, run["commit_contributors"],
                                                  author, sha, f"^{sha}^")
+        cleanup = cleanup_round(run)
+        if cleanup and sha == cleanup["sha"]:
+            # The author left the reviewed commit as it is. Its passing review stands, and the minor
+            # findings stay listed on the ready comment.
+            self.store.save(run, review_record=cleanup["record"], review_sha=sha, reviewed_sha=sha,
+                            commit_contributors=None, stage="ci")
+            return
         if run.get("needs_revision") and sha == run.get("published_sha"):
             raise TeamError("Revision produced no new commit; rejected evidence cannot be replaced by a reroll")
         if sha in run.get("rejected_shas", []):
@@ -1845,6 +1934,10 @@ class Coordinator:
                     and run.get("review_record") and run["review_record"]["report"]["verdict"] == "pass")
         if reviewed:
             writes = self.queue_writes(run, self.review_write(run, run["review_record"]))
+        if run["author_record"]["report"].get("responses") and run["round"] in run.get("authored_rounds", []):
+            writes = self.queue_writes(dict(run, **writes), {
+                "type": "comment", "number": run["pr"], "marker": f"{run['id']}-response-{run['round']}-{sha}",
+                "body": response_comment(run, sha), "heading": f"Author response in `{sha}`"})
         self.store.save(run, stage=self.successor(run, "publish", "review"), **writes)
         description = ("Independent review passed; readiness not checked" if reviewed
                        else "Awaiting independent cross-family review")
@@ -1919,6 +2012,7 @@ class Coordinator:
             raise TeamError("Review checkout changed; inspect before retry")
         diff, patch_evidence = review_patch(git, cwd, run["base_sha"], run["sha"],
                                             separator="..." if run.get("adopted_pr") else "..")
+        previous = previous_review(run)
         prompt = (GUIDANCE + self.style(project, "review") +
                   "Your summary and findings are published as the review comment.\n" + REVIEW_SCOPE +
                   f"\nIndependently review {subject(run)}: "
@@ -1929,16 +2023,18 @@ class Coordinator:
                    "; ".join(f"../{companions.basename(p['repo'])} = {p['repo']} at {p['rev']}" for p in pins) +
                    "\n" if pins else "") +
                   "Inspect source and applicable instructions. Check correctness, missing acceptance criteria, "
-                  "regressions, and inadequate tests. Do not modify files. Do not assume passing tests prove correctness. "
-                  "Return changes_requested for actionable findings, otherwise pass with an empty findings list.\n"
+                  "regressions, and inadequate tests. Do not assume passing tests prove correctness. "
+                  + SEVERITY + (rereview_prompt(previous) if previous else FIRST_REVIEW)
                   + (COMPACT_NOTICE if patch_evidence["format"] == "compact" else "") +
                   f"Diff:\n{diff}")
         record = self.call_agent(run["reviewer"], "review", prompt, cwd,
                                  self.store.artifacts(run) / f"review-{run['round']}", project,
                                  readable=companions.paths(root, pins))
         assert_metadata(cwd, baseline)
-        if git(cwd, "rev-parse", "HEAD") != run["sha"] or git(cwd, "status", "--porcelain"):
-            raise TeamError("Reviewer modified candidate; evidence rejected")
+        # The reviewer may run and write throwaway tests in this copy, so its working tree may be dirty.
+        # The copy is never published; the commit it judged must still be the candidate.
+        if git(cwd, "rev-parse", "HEAD") != run["sha"]:
+            raise TeamError("Reviewer changed the candidate commit; evidence rejected")
         companions.verify(root, pins, baselines)
         record = dict(record, patch=patch_evidence)
         return dict(record, companions=pins) if pins else record
@@ -2008,8 +2104,24 @@ class Coordinator:
         elif withheld(run):
             self.store.save(run, review_withheld={"sha": run["sha"], "reason": withheld(run)},
                             stage=self.successor(run, "review", "ci"), **self.queue_writes(run, comment))
+        elif record["report"]["findings"] and self.cleanup_allowed(project, run):
+            # The review passed with minor findings: one cleanup round fixes them, and a re-review
+            # confirms. The passing verdict is kept, so an author who changes nothing leaves it standing.
+            minor = list(record["report"]["findings"])
+            self.store.save(run, reviewed_sha=run["sha"], round=run["round"] + 1, reserved_round=run["round"] + 1,
+                            cleanup={"round": run["round"], "sha": run["sha"], "kind": "review", "findings": minor,
+                                     "record": record},
+                            feedback=("The independent review passed and left these minor findings. Address each one:\n"
+                                      + json.dumps(minor, indent=2, ensure_ascii=False)),
+                            stage="implement", needs_revision=False, **self.queue_writes(run, comment))
         else:
             self.store.save(run, reviewed_sha=run["sha"], stage=self.successor(run, "review", "ci"), **self.queue_writes(run, comment))
+
+    @staticmethod
+    def cleanup_allowed(project, run):
+        """One cleanup round per run, for ordinary issue runs with revision budget left."""
+        return not (run.get("cleanup") or run.get("selection") or run.get("adopted_pr") or run.get("stop_after")
+                    or run["round"] >= revision_limit(project, run))
 
     def finalize_rejection(self, project, run):
         """Record a rejection whose verdict or failed validation was persisted but not yet recorded

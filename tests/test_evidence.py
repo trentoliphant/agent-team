@@ -6,7 +6,7 @@ import unittest
 from agent_team import evidence
 
 ROOT = Path(__file__).resolve().parents[1]
-FINDING = {"severity": "high", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}
+FINDING = {"severity": "blocking", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}
 PATCH = {"format": "compact", "default_characters": 90000, "files": 3, "changed_lines": 40}
 RECORD = {"agent": "claude", "family": "anthropic", "cli_version": "2.1", "requested_model": "opus",
           "observed_models": ["opus"], "patch": PATCH, "session": "not a reviewer field",
