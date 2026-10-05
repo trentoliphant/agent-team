@@ -66,6 +66,18 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(QuotaError):
             self.call("codex", {"type": "error", "message": "Usage limit reached"})
 
+    def test_model_at_capacity_is_retryable(self):
+        message = "Selected model is at capacity. Please try a different model."
+        with self.assertRaises(QuotaError):
+            self.call("codex", {"type": "turn.failed", "error": {"message": message}})
+        with self.assertRaises(QuotaError):
+            self.call("claude", {"is_error": True, "result": message})
+        # A transcript that only discusses capacity is still an ordinary failure.
+        with self.assertRaises(TeamError) as raised:
+            self.call("codex", {"type": "item.completed", "item": {"text": "The model is at capacity handling"}},
+                      exit_code=1, stderr="Process failed")
+        self.assertNotIsInstance(raised.exception, QuotaError)
+
     def test_transcript_mention_of_rate_limit_does_not_trigger_retry(self):
         with self.assertRaises(TeamError) as raised:
             self.call("codex", {"type": "item.completed", "item": {"text": "Implement rate limit handling"}},
