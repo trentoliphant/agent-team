@@ -1078,7 +1078,7 @@ class WorkflowTests(unittest.TestCase):
         self.agents.reject = 2
         self.agents.findings = [
             [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}],
-            [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Still", "request": " fix"},
+            [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Still", "request": " Fix"},
              {"severity": "minor", "location": "feature.txt:4", "evidence": "Style", "request": "Rename"},
              {"severity": "blocking", "location": "other.py:2", "evidence": "Regression", "request": "Test"}]]
         run = self.tick(9)
