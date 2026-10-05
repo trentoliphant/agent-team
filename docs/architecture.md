@@ -190,7 +190,11 @@ correctness or eliminate correlated model errors.
 The candidate is committed locally and cloned into a fresh validation directory.
 Configured commands execute sequentially there, without ignored files or caches
 from the author checkout. Their results
-are recorded locally and summarized on GitHub; raw test logs stay local. Failed
+are recorded locally and summarized on GitHub; raw test logs stay local. A failed
+validation is published as a comment that names the command and the failing test
+identifiers only. Review severities are `high`, `medium`, or `low`. The first commit
+of a run carries the task title; each revision commit names the rejection it answers
+and lists the findings addressed. Failed
 validation and review findings share the bounded revision budget. Each rejection
 appends a revision-history entry: the round, rejected commit, validation results,
 feedback, reviewer metadata, and findings. Findings are labeled against earlier
@@ -200,7 +204,8 @@ validation and review refuse those commits.
 
 Exhausting the budget moves the run to `handoff`. A single SQLite write records
 the rejection, the handoff text, and its pending GitHub writes (the review
-comment, failure statuses, and handoff comment) in an `outbox`. Every review
+comment, failure statuses, and handoff comment) in an `outbox`. The handoff comment
+has one marker per run, so later handoffs and operator decisions update it in place. Every review
 outcome is saved this way before any GitHub write is attempted. Notification
 ticks publish the outbox with idempotent marked comments. A crash or GitHub
 failure therefore delays publication but never loses or duplicates it, and

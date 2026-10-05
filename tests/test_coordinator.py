@@ -426,7 +426,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["stage"], "handoff")
         self.assertIsNone(run["issue"])
         self.assertEqual(run["pr"], 7)
-        body = self.github.comments[(7, f"{run['id']}-handoff-0")]
+        body = self.github.comments[(7, f"{run['id']}-handoff")]
         self.assertIn(f"Run `{run['id']}` · explicit task scope · PR #7", body)
         self.assertIn(f"Explicit task scope: `{run['issue_digest']}`", body)
         self.assertNotIn("issue #None", body)
@@ -1105,7 +1105,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Regression", run["feedback"])
         self.assertEqual([f["match"] for f in history[0]["findings"]], ["first"])
         self.assertEqual([f["match"] for f in history[1]["findings"]], ["repeated", "uncertain", "new"])
-        body = self.github.comments[(7, f"{run['id']}-handoff-1")]
+        body = self.github.comments[(7, f"{run['id']}-handoff")]
         for text in (run["id"], "issue #1", "PR #7", f"Candidate commit `{run['sha']}`", "`test -f feature.txt` exit 0",
                      "Evidence: Regression", "repeated: an earlier round", "uncertain: an earlier round",
                      "new: no earlier finding", "Revision 0: review by `claude` (anthropic)", "Revision 1: review",
@@ -1138,17 +1138,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(run["decisions"][0]["action"], "extend")
         self.assertEqual(len(run["revision_history"]), 2)
         self.assertIn("Regression", run["feedback"])
-        decision = self.github.comments[(7, f"{run['id']}-decision-1")]
+        decision = self.github.comments[(7, f"{run['id']}-handoff")]
         self.assertIn("1 more revision(s); the limit is now 2", decision)
-        self.assertIn("Operator note: One more try", decision)
+        self.assertIn("Note: One more try", decision)
         with self.assertRaises(TeamError):
             self.team.decide(run["id"], "extend", 1)  # decisions apply only at a handoff
         # Using up the extension hands off again instead of retrying.
         self.agents.reject = True
         run = self.tick(4)
         self.assertEqual((run["stage"], len(run["revision_history"])), ("handoff", 3))
-        self.assertIn("Operator decision after revision 1: extend (1 more)",
-                      self.github.comments[(7, f"{run['id']}-handoff-2")])
+        self.assertIn("): extend, 1 more (limit 2)",
+                      self.github.comments[(7, f"{run['id']}-handoff")])
         self.team.decide(run["id"], "extend", 1)
         self.assertEqual(self.tick(5)["stage"], "ready")
 
@@ -1162,7 +1162,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["round"], run["revision_limit"], run["extension"]),
                          ("implement", 2, 2, 1))
         self.assertEqual(run["decisions"][0]["limit"], 2)
-        self.assertIn("the limit is now 2", self.github.comments[(7, f"{run['id']}-decision-1")])
+        self.assertIn("the limit is now 2", self.github.comments[(7, f"{run['id']}-handoff")])
         # The one authorized revision is used up: a rejection hands off again.
         self.agents.reject = True
         run = self.tick(4)
@@ -1176,7 +1176,7 @@ class WorkflowTests(unittest.TestCase):
         self.agents.reject = True
         run = self.tick(4)
         self.assertEqual((run["stage"], run["round"], run["revision_limit"]), ("handoff", 2, 2))
-        self.assertIn("revision 2/2", self.github.comments[(7, f"{run['id']}-handoff-2")])
+        self.assertIn("revision 2/2", self.github.comments[(7, f"{run['id']}-handoff")])
         # Lowering the configuration cannot shrink an authorized extension either.
         self.team.decide(run["id"], "extend", 1)
         self.project["max_revisions"] = 0
@@ -1204,7 +1204,7 @@ class WorkflowTests(unittest.TestCase):
                 run = self.store.get(run["id"])
                 self.assertEqual(run["stage"], "closed")
                 self.assertEqual(self.github.pull["state"], "open")
-                self.assertIn(f"Agent Team decision: {action}", self.github.comments[(7, f"{run['id']}-decision-1")])
+                self.assertIn(f"Agent Team decision: {action}", self.github.comments[(7, f"{run['id']}-handoff")])
                 self.assertEqual(len(run["revision_history"]), 2)
 
     def test_direct_repair_is_adopted_revalidated_and_independently_reviewed(self):
@@ -1248,7 +1248,7 @@ class WorkflowTests(unittest.TestCase):
                 break
         self.assertEqual(run["stage"], "handoff")
         self.assertEqual([e["kind"] for e in run["revision_history"]], ["review", "validation"])
-        body = self.github.comments[(7, f"{run['id']}-handoff-1")]
+        body = self.github.comments[(7, f"{run['id']}-handoff")]
         for text in ("Remaining findings from validation (1)", "`false` exit 1",
                      "Earlier review findings with unverified resolution (1)",
                      f"Review of revision 0 rejected `{run['revision_history'][0]['sha']}`",
@@ -1262,7 +1262,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_handoff_after_review_lists_only_latest_review_findings(self):
         run = self.exhaust()
-        self.assertNotIn("unverified resolution", self.github.comments[(7, f"{run['id']}-handoff-1")])
+        self.assertNotIn("unverified resolution", self.github.comments[(7, f"{run['id']}-handoff")])
 
     def test_force_pushed_repair_that_drops_rejected_history_is_refused(self):
         run = self.exhaust()
@@ -1377,7 +1377,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["round"], run["extension"]), ("implement", 3, 3))
         self.assertEqual([(d["action"], d["revisions"], d["limit"]) for d in run["decisions"]],
                          [("repair", None, 1), ("extend", 2, 4)])
-        self.assertIn("2 more revision(s); the limit is now 4", self.github.comments[(7, f"{run['id']}-decision-2")])
+        self.assertIn("2 more revision(s); the limit is now 4", self.github.comments[(7, f"{run['id']}-handoff")])
         # Both authorized revisions are usable: a rejection at round 3 revises instead of handing off.
         self.agents.reject = True
         run = self.tick(4)
@@ -1402,7 +1402,7 @@ class WorkflowTests(unittest.TestCase):
                         self.team.decide(run["id"], *refused)
                 real = self.github.comment
                 def fail_decision(repo, number, marker, *args, **kwargs):
-                    if "-decision-" in marker:
+                    if marker.endswith("-handoff"):
                         raise TeamError("GitHub unavailable")
                     return real(repo, number, marker, *args, **kwargs)
                 with patch.object(self.github, "comment", side_effect=fail_decision):
@@ -1413,13 +1413,13 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(run["stage"], "closed")
                 self.assertEqual([d["action"] for d in run["decisions"]], ["extend", action])
                 self.assertEqual(len(run["revision_history"]), 2)
-                self.assertEqual([w["marker"] for w in run["outbox"]], [f"{run['id']}-decision-2"])
+                self.assertEqual([w["marker"] for w in run["outbox"]], [f"{run['id']}-handoff"])
                 self.tick()
                 run = self.store.get(run["id"])
                 self.assertEqual(run["outbox"], [])
-                body = self.github.comments[(7, f"{run['id']}-decision-2")]
+                body = self.github.comments[(7, f"{run['id']}-handoff")]
                 self.assertIn(f"Agent Team decision: {action}", body)
-                self.assertIn("Operator note: Reviewer family repaired it", body)
+                self.assertIn("Note: Reviewer family repaired it", body)
                 self.assertEqual(self.github.pull["state"], "open")
                 self.assertEqual(self.agents.calls[calls:], [])
 
@@ -1441,7 +1441,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.tick()["stage"], "waiting")
         run = self.store.get(run["id"])
         self.assertEqual((run["stage"], run["in_flight"], run["outbox"]), ("handoff", False, []))
-        self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+        self.assertIn((7, f"{run['id']}-handoff"), self.github.comments)
         self.assertEqual(len(self.agents.calls), calls)
         with self.assertRaises(TeamError):
             self.team.refresh(run["id"])
@@ -1457,7 +1457,7 @@ class WorkflowTests(unittest.TestCase):
     def test_interrupted_handoff_publication_is_retried_without_agents(self):
         real = self.github.comment
         def fail_handoff(repo, number, marker, *args, **kwargs):
-            if "-handoff-" in marker:
+            if marker.endswith("-handoff"):
                 raise TeamError("GitHub unavailable")
             return real(repo, number, marker, *args, **kwargs)
         with patch.object(self.github, "comment", side_effect=fail_handoff):
@@ -1470,7 +1470,7 @@ class WorkflowTests(unittest.TestCase):
         self.tick()
         run = self.store.get(run["id"])
         self.assertEqual(run["outbox"], [])
-        self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
+        self.assertIn((7, f"{run['id']}-handoff"), self.github.comments)
         self.assertEqual(len(self.agents.calls), calls)
 
     def test_failed_review_writes_at_exhaustion_still_record_handoff(self):
@@ -1508,8 +1508,8 @@ class WorkflowTests(unittest.TestCase):
                 run = self.store.get(run["id"])
                 self.assertEqual(run["outbox"], [])
                 self.assertIn((7, f"{run['id']}-review-1-{run['sha']}"), self.github.comments)
-                self.assertIn((7, f"{run['id']}-handoff-1"), self.github.comments)
-                self.assertIn((7, f"{run['id']}-decision-1"), self.github.comments)
+                self.assertIn((7, f"{run['id']}-handoff"), self.github.comments)
+                self.assertIn((7, f"{run['id']}-handoff"), self.github.comments)
                 self.assertIn((run["sha"], "failure"), self.github.statuses)
                 self.assertEqual(len(self.agents.calls), calls)
 
@@ -1598,7 +1598,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.exhaust()
         real = self.github.comment
         def fail_decision(repo, number, marker, *args, **kwargs):
-            if "-decision-" in marker:
+            if marker.endswith("-handoff"):
                 raise TeamError("GitHub unavailable")
             return real(repo, number, marker, *args, **kwargs)
         with patch.object(self.github, "comment", side_effect=fail_decision):
@@ -1607,7 +1607,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.store.get(run["id"])
         self.assertEqual((run["stage"], len(run["decisions"]), len(run["outbox"])), ("implement", 1, 1))
         self.tick()
-        self.assertIn((7, f"{run['id']}-decision-1"), self.github.comments)
+        self.assertIn((7, f"{run['id']}-handoff"), self.github.comments)
         self.assertEqual(self.store.get(run["id"])["outbox"], [])
 
     def test_handoff_cli_shows_record(self):
@@ -1636,7 +1636,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.tick(3)
         self.assertEqual(run["stage"], "handoff")
         self.assertEqual(self.github.creates, 0)
-        handoff = self.github.comments[(1, f"{run['id']}-handoff-0")]  # no PR: the issue gets the handoff
+        handoff = self.github.comments[(1, f"{run['id']}-handoff")]  # no PR: the issue gets the handoff
         for text in (run["sha"], "local only; never pushed", "`exit 1` exit 1", "no PR yet",
                      "direct repair of the candidate in a local repair checkout"):
             self.assertIn(text, handoff)
@@ -1678,7 +1678,7 @@ class WorkflowTests(unittest.TestCase):
                     self.assertEqual(self.github.creates, 0)
                     if stage == "handoff":
                         self.assertEqual(len(run["handoffs"]), 1)
-                        self.assertIn((1, f"{run['id']}-handoff-0"), self.github.comments)
+                        self.assertIn((1, f"{run['id']}-handoff"), self.github.comments)
                         self.assertEqual(self.tick()["stage"], "waiting")
                     else:
                         self.assertTrue(run["needs_revision"])
@@ -1709,7 +1709,7 @@ class WorkflowTests(unittest.TestCase):
         checkout = Path(run["repair_checkout"]["path"])
         self.assertEqual((run["stage"], run["decisions"][0]["checkout"]), ("repair", str(checkout)))
         self.assertEqual(git(checkout, "rev-parse", "HEAD"), rejected)
-        self.assertIn("unpublished candidate", self.github.comments[(1, f"{run['id']}-decision-1")])
+        self.assertIn("unpublished candidate", self.github.comments[(1, f"{run['id']}-handoff")])
         self.assertEqual(self.tick()["stage"], "waiting")
         with self.assertRaises(TeamError):  # still the rejected commit
             self.team.adopt(run["id"], ["human"])
@@ -1909,6 +1909,69 @@ class WorkflowTests(unittest.TestCase):
         self.github.pull.update(state="closed", merged=True)
         self.tick()
         self.assertEqual(self.store.get(run["id"])["stage"], "merged")
+
+    def test_merge_publishes_one_outcome_record(self):
+        self.agents.reject = 1
+        run = self.tick(10)
+        self.assertEqual(run["stage"], "ready")
+        self.github.pull.update(state="closed", merged=True)
+        self.tick(2)
+        run = self.store.get(run["id"])
+        body = self.github.comments[(7, f"{run['id']}-outcome")]
+        for text in ("Agent Team outcome: merged", f"final candidate `{run['sha']}`", "- Revisions: 1",
+                     "- Rejections: 1 by review, 0 by validation", "- Review findings raised: 1 (1 high)",
+                     f"- Reviewed commit: `{run['sha']}`", '"kind": "outcome"'):
+            self.assertIn(text, body)
+        self.assertEqual((run["stage"], run["outbox"]), ("merged", []))
+
+    def test_revision_commit_subject_names_the_rejection_it_answers(self):
+        self.agents.reject = 1
+        run = self.tick(9)
+        rejected = run["revision_history"][0]["sha"]
+        subjects = git(self.store.workspace(run), "log", "--format=%s", f"{run['base_sha']}..HEAD").splitlines()
+        self.assertEqual(subjects, [f"Revision 1: address 1 review finding on {rejected[:7]}", "Add feature"])
+        message = git(self.store.workspace(run), "log", "-1", "--format=%B")
+        for text in ("Add feature", "Addresses:\n- high: feature.txt:1", "Agent-Family: ", f"Agent-Team-Run: {run['id']}"):
+            self.assertIn(text, message)
+
+    def test_validation_rejection_is_published_with_failing_test_names_only(self):
+        from agent_team.coordinator import failing_tests
+        output = ("FAIL: test_a (tests.test_x.Cases.test_a)\n  File \"secret/path.py\", line 3\n"
+                  "ERROR: test_b (tests.test_x.Cases.test_b) (limit=0)\nERROR: test_b (tests.test_x.Cases.test_b) (limit=1)\n"
+                  "FAILED tests/test_y.py::test_c - AssertionError: secret/path.py\nFAILED (failures=1, errors=2)\n")
+        self.assertEqual(failing_tests(output), ["test_a tests.test_x.Cases.test_a", "test_b tests.test_x.Cases.test_b",
+                                                 "tests/test_y.py::test_c"])
+        self.project["tests"] = ["echo 'FAIL: test_a (tests.test_x.Cases.test_a)'; pwd; exit 1"]
+        self.project["max_revisions"] = 1
+        self.store.save_project(self.project)
+        run = self.tick(3)
+        entry = run["revision_history"][0]
+        self.assertEqual((entry["kind"], run["pr"]), ("validation", None))
+        body = self.github.comments[(1, f"{run['id']}-validation-0-{entry['sha']}")]  # no PR yet: the issue gets it
+        for text in (f"Validation of `{entry['sha']}`: failed", "this commit was not pushed", "exit 1",
+                     "Failing tests (1)", "`test_a tests.test_x.Cases.test_a`", "artifacts/test-0-0.log"):
+            self.assertIn(text, body)
+        self.assertIn(str(self.root), entry["feedback"])  # the raw output, with its local path, stays local
+        self.assertNotIn(str(self.root), body)
+
+    def test_handoff_is_one_comment_updated_with_each_decision(self):
+        run = self.exhaust()
+        marker = (7, f"{run['id']}-handoff")
+        self.assertIn("Operator decision required", self.github.comments[marker])
+        self.team.decide(run["id"], "extend", 1, "One more try")
+        body = self.github.comments[marker]
+        for text in ("Agent Team decision: extend", "Operator decisions (1)", "Note: One more try",
+                     "<details><summary>Revision history (2 rejections)</summary>", "Remaining findings from review",
+                     '"kind": "handoff"'):
+            self.assertIn(text, body)
+        self.assertNotIn("Operator decision required", body)
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual(run["stage"], "handoff")
+        body = self.github.comments[marker]
+        self.assertIn("revision limit reached (revision 2/2)", body)
+        self.assertIn("Operator decision required", body)
+        self.assertEqual([m for _, m in self.github.comments if "handoff" in m or "decision" in m], [marker[1]])
 
     def test_stale_pr_is_still_observed_when_merged(self):
         run = self.tick(6)
