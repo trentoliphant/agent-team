@@ -177,6 +177,22 @@ compact patch is used, the reviewer prompt and the published review comment stat
 that surrounding context was omitted and that the reviewer must inspect the full
 source in the checkout.
 
+The first review of a run is asked to report every problem it can find and to
+run the validation commands and throwaway tests against its clone. Later reviews
+are re-reviews: the reviewer receives the previous review's findings and its
+commit, confirms each fix, and checks what changed since. An author revision
+receives the latest findings in full and one line for each earlier finding, runs
+the validation commands before handing off, and answers each finding; the answers
+are published as a comment with the new commit. The PR description is the
+author's first report and is not replaced by later rounds.
+
+A review that passes with minor findings starts one cleanup round, when the run
+is an ordinary issue run with revision budget left. The author addresses the
+minor findings and a re-review of the new commit follows. A blocking finding
+there is an ordinary rejection. Minor findings from that re-review, or from a
+pass with no cleanup available, are listed on the ready comment. If the author
+changes nothing, the earlier passing review stands.
+
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without
 blocking new issue intake. `refresh`
@@ -192,7 +208,8 @@ Configured commands execute sequentially there, without ignored files or caches
 from the author checkout. Their results
 are recorded locally and summarized on GitHub; raw test logs stay local. A failed
 validation is published as a comment that names the command and the failing test
-identifiers only. Review severities are `high`, `medium`, or `low`. The first commit
+identifiers only. A review finding is `blocking` or `minor`; a pass may list minor
+findings, and a rejection needs a blocking one. The first commit
 of a run carries the task title; each revision commit names the rejection it answers
 and lists the findings addressed. Failed
 validation and review findings share the bounded revision budget. Each rejection

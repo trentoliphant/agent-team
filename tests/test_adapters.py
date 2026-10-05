@@ -15,7 +15,8 @@ class AdapterTests(unittest.TestCase):
         self.commands = []
         self.environments = []
         self.workspaces = []
-        report = ({"message": "Status"} if role == "status" else 
+        report = ({"message": "Status"} if role == "status" else {"issues": []} if role == "discover" else
+                  
                   {"verdict": "pass", "summary": "ok", "findings": []})
 
         def fake_execute(args, **kwargs):
@@ -33,13 +34,19 @@ class AdapterTests(unittest.TestCase):
                 return Agents().run(agent, role, "Review", Path(temp), Path(temp) / "artifacts", {"timeout": 30},
                                     readable=readable)
 
-    def test_codex_uses_subscription_and_read_only_sandbox(self):
+    def test_codex_uses_subscription_and_a_sandbox_for_every_role(self):
         result = self.call("codex", {"type": "turn.completed"})
         command = self.commands[-1]
         self.assertIn('forced_login_method="chatgpt"', command)
-        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        # Author and reviewer run commands in a workspace-write sandbox, which has no network access.
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertFalse([a for a in command if "network_access" in a or "danger-full-access" in a])
         self.assertEqual(result["family"], "openai")
+        for role in ("discover", "status"):
+            with self.subTest(role=role):
+                self.call("codex", {"type": "turn.completed"}, role=role)
+                self.assertEqual(self.commands[-1][self.commands[-1].index("--sandbox") + 1], "read-only")
 
     def test_codex_status_runs_read_only_outside_git(self):
         result = self.call("codex", {"type": "turn.completed"}, role="status")
@@ -65,15 +72,28 @@ class AdapterTests(unittest.TestCase):
                       exit_code=1, stderr="Process failed")
         self.assertNotIsInstance(raised.exception, QuotaError)
 
-    def test_claude_review_has_no_shell_or_edit_tools(self):
+    def test_claude_review_runs_commands_only_inside_the_sandbox(self):
         result = self.call("claude", {"is_error": False, "modelUsage": {"a-model": {}},
                                      "structured_output": {"verdict": "pass", "summary": "ok", "findings": []}})
         command = self.commands[-1]
         self.assertIn("--restricted", command)
         self.assertIn("--safe-mode", command)
         self.assertNotIn("--bare", command)
-        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
+        sandbox = json.loads(command[command.index("--settings") + 1])["sandbox"]
+        self.assertEqual((sandbox["enabled"], sandbox["allowUnsandboxedCommands"]), (True, False))
+        self.assertNotIn("network", sandbox)  # no domain is allowed
+        for secret in ("~/.ssh", "~/.aws", "~/.config/gh"):
+            self.assertIn(secret, sandbox["filesystem"]["denyRead"])
         self.assertEqual(result["observed_models"], ["a-model"])
+
+    def test_claude_status_has_no_shell_or_edit_tools(self):
+        self.call("claude", {"is_error": False, "structured_output": {"message": "Status"}}, role="status")
+        command = self.commands[-1]
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertNotIn("--settings", command)
+        self.assertEqual(command[command.index("--max-turns") + 1], "40")
         self.assertNotIn("--add-dir", command)
 
     def test_claude_can_read_companion_checkouts_without_new_tools(self):
@@ -89,11 +109,11 @@ class AdapterTests(unittest.TestCase):
         extra = [a for i, a in enumerate(command) if a == "--add-dir" or (i and command[i - 1] == "--add-dir")]
         remaining = [a for a in command if a not in extra]
         self.assertEqual(remaining[:remaining.index("--json-schema")], single[:single.index("--json-schema")])
-        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash")
         self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
-        self.call("claude", {"is_error": False, "structured_output": {"summary": "s", "limitations": "l"}},
+        self.call("claude", {"is_error": False, "structured_output": {"summary": "s", "limitations": "l", "responses": []}},
                   role="implement", readable=companions)
-        self.assertEqual(self.commands[-1][self.commands[-1].index("--tools") + 1], "Read,Glob,Grep,Edit,Write")
+        self.assertEqual(self.commands[-1][self.commands[-1].index("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash")
 
     def test_codex_needs_no_companion_grant(self):
         self.call("codex", {"type": "turn.completed"})
@@ -114,7 +134,17 @@ class AdapterTests(unittest.TestCase):
     def test_passing_review_with_findings_rejected(self):
         with self.assertRaisesRegex(TeamError, "unambiguous verdict"):
             self.call("claude", {"structured_output": {"verdict": "pass", "summary": "ok", "findings": [
-                {"severity": "high", "location": "a:1", "evidence": "bad", "request": "fix"}]}})
+                {"severity": "blocking", "location": "a:1", "evidence": "bad", "request": "fix"}]}})
+
+    def test_pass_may_list_minor_findings_and_a_rejection_needs_a_blocking_one(self):
+        minor = {"severity": "minor", "location": "a:1", "evidence": "style", "request": "rename"}
+        accepted = self.call("claude", {"is_error": False, "structured_output": {
+            "verdict": "pass", "summary": "ok", "findings": [minor]}})
+        self.assertEqual(accepted["report"]["findings"], [minor])
+        for findings in ([], [minor]):
+            with self.subTest(findings=findings), self.assertRaisesRegex(TeamError, "unambiguous verdict"):
+                self.call("claude", {"is_error": False, "structured_output": {
+                    "verdict": "changes_requested", "summary": "s", "findings": findings}})
 
     def test_review_severity_uses_fixed_values(self):
         finding = {"severity": "P1", "location": "a:1", "evidence": "bad", "request": "fix"}
@@ -202,7 +232,7 @@ class GitHubTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, json.dumps(result), "")
 
         sha = "c" * 40
-        findings = [{"severity": "high", "location": f"file.py:{n}", "evidence": f"evidence-{n} " + "x" * 30000,
+        findings = [{"severity": "blocking", "location": f"file.py:{n}", "evidence": f"evidence-{n} " + "x" * 30000,
                      "request": f"request-{n}"} for n in range(4)]
         record = {"agent": "claude", "family": "anthropic", "cli_version": "test", "requested_model": "test",
                   "observed_models": [], "report": {"verdict": "changes_requested", "summary": "s" * 70000,

@@ -81,6 +81,9 @@ class FakeAgents:
         self.quota = False
         self.summary = "Added feature"
         self.readable = {}
+        self.minor = []  # per-pass minor findings; a pass with none is used when exhausted
+        self.idle = False  # True: the author changes nothing
+        self.responses = []
 
     def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
         self.calls.append((agent, role))
@@ -91,8 +94,9 @@ class FakeAgents:
             raise QuotaError("quota exhausted")
         if role == "implement":
             path = Path(cwd) / "feature.txt"
-            path.write_text(path.read_text() + "fixed\n" if path.exists() else "feature\n")
-            report = {"summary": self.summary, "limitations": "None"}
+            if not self.idle:
+                path.write_text(path.read_text() + "fixed\n" if path.exists() else "feature\n")
+            report = {"summary": self.summary, "limitations": "None", "responses": list(self.responses)}
         elif role == "discover":
             report = {"issues": [{"title": "Found gap", "evidence": self.summary, "acceptance": "Gap closed"}]}
         elif role == "status":
@@ -100,8 +104,9 @@ class FakeAgents:
             style = prompt.split("Writing standard for each status comment", 1)[1].split("Never omit", 1)[0]
             report = {"message": "Drafted: " + " ".join(style.splitlines()[1:])}
         else:
-            default = [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}]
-            findings = (self.findings.pop(0) if self.findings else default) if self.reject else []
+            default = [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}]
+            findings = ((self.findings.pop(0) if self.findings else default) if self.reject
+                        else self.minor.pop(0) if self.minor else [])
             report = {"verdict": "changes_requested" if self.reject else "pass", "summary": self.summary,
                       "findings": findings}
             self.reject = max(int(self.reject) - 1, 0)
@@ -1072,10 +1077,10 @@ class WorkflowTests(unittest.TestCase):
         self.store.save_project(self.project)
         self.agents.reject = 2
         self.agents.findings = [
-            [{"severity": "high", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}],
-            [{"severity": "high", "location": "feature.txt:1", "evidence": "Still", "request": " fix"},
-             {"severity": "low", "location": "feature.txt:4", "evidence": "Style", "request": "Rename"},
-             {"severity": "medium", "location": "other.py:2", "evidence": "Regression", "request": "Test"}]]
+            [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix"}],
+            [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Still", "request": " fix"},
+             {"severity": "minor", "location": "feature.txt:4", "evidence": "Style", "request": "Rename"},
+             {"severity": "blocking", "location": "other.py:2", "evidence": "Regression", "request": "Test"}]]
         run = self.tick(9)
         self.assertEqual(run["stage"], "handoff")
         return run
@@ -1236,7 +1241,7 @@ class WorkflowTests(unittest.TestCase):
         self.project["max_revisions"] = 1
         self.store.save_project(self.project)
         self.agents.reject = 1
-        self.agents.findings = [[{"severity": "high", "location": "feature.txt:1", "evidence": "Bug",
+        self.agents.findings = [[{"severity": "blocking", "location": "feature.txt:1", "evidence": "Bug",
                                   "request": "Fix the bug"}]]
         run = self.tick(5)
         self.assertEqual((run["stage"], run["round"]), ("implement", 1))
@@ -1919,7 +1924,7 @@ class WorkflowTests(unittest.TestCase):
         run = self.store.get(run["id"])
         body = self.github.comments[(7, f"{run['id']}-outcome")]
         for text in ("Agent Team outcome: merged", f"final candidate `{run['sha']}`", "- Revisions: 1",
-                     "- Rejections: 1 by review, 0 by validation", "- Review findings raised: 1 (1 high)",
+                     "- Rejections: 1 by review, 0 by validation", "- Review findings raised: 1 (1 blocking)",
                      f"- Reviewed commit: `{run['sha']}`", '"kind": "outcome"'):
             self.assertIn(text, body)
         self.assertEqual((run["stage"], run["outbox"]), ("merged", []))
@@ -1931,7 +1936,7 @@ class WorkflowTests(unittest.TestCase):
         subjects = git(self.store.workspace(run), "log", "--format=%s", f"{run['base_sha']}..HEAD").splitlines()
         self.assertEqual(subjects, [f"Revision 1: address 1 review finding on {rejected[:7]}", "Add feature"])
         message = git(self.store.workspace(run), "log", "-1", "--format=%B")
-        for text in ("Add feature", "Addresses:\n- high: feature.txt:1", "Agent-Family: ", f"Agent-Team-Run: {run['id']}"):
+        for text in ("Add feature", "Addresses:\n- blocking: feature.txt:1", "Agent-Family: ", f"Agent-Team-Run: {run['id']}"):
             self.assertIn(text, message)
 
     def test_validation_rejection_is_published_with_failing_test_names_only(self):
@@ -1972,6 +1977,107 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("revision limit reached (revision 2/2)", body)
         self.assertIn("Operator decision required", body)
         self.assertEqual([m for _, m in self.github.comments if "handoff" in m or "decision" in m], [marker[1]])
+
+    MINOR = {"severity": "minor", "location": "feature.txt:2", "evidence": "Unclear name", "request": "Rename it"}
+
+    def test_pass_with_minor_findings_gets_one_cleanup_round_and_a_re_review(self):
+        self.agents.minor = [[self.MINOR], [dict(self.MINOR, location="feature.txt:3")]]
+        self.agents.responses = [{"finding": "feature.txt:2", "response": "Renamed."}]
+        run = self.tick(5)
+        first = run["cleanup"]["sha"]
+        # The first review passed, so nothing is rejected; the run goes back to the author once.
+        self.assertEqual((run["stage"], run["round"], run["reviewed_sha"], run.get("revision_history")),
+                         ("implement", 1, first, None))
+        self.assertIn("Rename it", run["feedback"])
+        self.assertIn("first review of this change", self.agents.prompts["review"])
+        self.assertIn(": pass**", self.github.comments[(7, f"{run['id']}-review-0-{first}")])
+        self.agents.summary = "Renamed a variable"
+        run = self.tick(5)
+        self.assertEqual((run["stage"], run["round"], run["rejected_shas"] if "rejected_shas" in run else []),
+                         ("ready", 1, []))
+        self.assertNotEqual(run["sha"], first)
+        self.assertEqual(run["reviewed_sha"], run["sha"])
+        # The second review was a re-review of the first one's findings and of what changed since.
+        prompt = self.agents.prompts["review"]
+        for text in ("This is a re-review", f"git diff {first}..HEAD", '"request": "Rename it"'):
+            self.assertIn(text, prompt)
+        self.assertNotIn("first review of this change", prompt)
+        # Cleanup happens once: minor findings from the re-review are listed for the maintainer.
+        self.assertEqual(self.agents.calls, [("codex", "implement"), ("claude", "review")] * 2)
+        ready = self.github.comments[(7, f"{run['id']}-ready")]
+        self.assertIn("Minor findings left open (1):", ready)
+        self.assertIn("- feature.txt:3: Rename it", ready)
+        response = self.github.comments[(7, f"{run['id']}-response-1-{run['sha']}")]
+        for text in (f"Author response in `{run['sha']}`", "**1. feature.txt:2**", "Renamed."):
+            self.assertIn(text, response)
+        self.assertEqual(git(self.store.workspace(run), "log", "-1", "--format=%s"),
+                         f"Revision 1: address 1 minor finding on {first[:7]}")
+        # The description is the author's first report; the cleanup summary does not replace it.
+        self.assertIn("Added feature", self.github.pull["body"])
+        self.assertNotIn("Renamed a variable", self.github.pull["body"])
+
+    def test_cleanup_round_without_changes_keeps_the_passing_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["sha"], run["reviewed_sha"]), ("ready", reviewed, reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 1)
+        self.assertIn("- feature.txt:2: Rename it", self.github.comments[(7, f"{run['id']}-ready")])
+
+    def test_blocking_finding_in_the_cleanup_re_review_is_an_ordinary_rejection(self):
+        self.agents.minor = [[self.MINOR]]
+        self.tick(5)
+        self.agents.reject = 1
+        run = self.tick(4)
+        entry = run["revision_history"][0]
+        self.assertEqual((run["stage"], run["round"], entry["round"], entry["kind"]), ("implement", 2, 1, "review"))
+        self.assertEqual(run["rejected_shas"], [entry["sha"]])
+        run = self.tick(5)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", run["sha"]))
+
+    def test_no_cleanup_round_without_revision_budget(self):
+        self.project["max_revisions"] = 0
+        self.store.save_project(self.project)
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(6)
+        self.assertEqual((run["stage"], run["round"], run.get("cleanup")), ("ready", 0, None))
+        self.assertIn("Minor findings left open (1):", self.github.comments[(7, f"{run['id']}-ready")])
+
+    def test_author_runs_validation_and_answers_findings_with_earlier_ones_in_view(self):
+        self.project["max_revisions"] = 3
+        self.store.save_project(self.project)
+        self.agents.reject = 2
+        self.agents.findings = [
+            [{"severity": "blocking", "location": "feature.txt:1", "evidence": "Bug", "request": "Fix the bug"}],
+            [{"severity": "blocking", "location": "feature.txt:9", "evidence": "Gap", "request": "Add a test"}]]
+        self.tick(2)
+        first = self.agents.prompts["implement"]
+        for text in ("Run the configured validation commands before you finish", "there is no network access",
+                     "Your summary and limitations become the PR description"):
+            self.assertIn(text, first)
+        self.assertNotIn("Findings from earlier rounds", first)
+        self.tick(8)
+        prompt = self.agents.prompts["implement"]
+        self.assertIn("The PR description is already written", prompt)
+        self.assertIn("Findings from earlier rounds, already answered; keep those fixes in place:\n"
+                      "- revision 0, feature.txt:1: Fix the bug", prompt)
+        self.assertIn('"request": "Add a test"', prompt)  # the latest feedback, in full
+        self.assertIn("return one responses entry", prompt)
+
+    def test_reviewer_may_leave_its_disposable_checkout_dirty(self):
+        real = self.agents.run
+        def scribble(agent, role, prompt, cwd, *args, **kwargs):
+            if role == "review":
+                (Path(cwd) / "throwaway_test.py").write_text("assert True\n")
+                (Path(cwd) / "feature.txt").write_text("broken on purpose\n")
+            return real(agent, role, prompt, cwd, *args, **kwargs)
+        with patch.object(self.agents, "run", side_effect=scribble):
+            run = self.tick(6)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", run["sha"]))
+        self.assertEqual(git(self.store.workspace(run), "status", "--porcelain"), "")
+        self.assertEqual(git(self.remote, "show", f"{run['branch']}:feature.txt"), "feature")
 
     def test_stale_pr_is_still_observed_when_merged(self):
         run = self.tick(6)
@@ -2239,7 +2345,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Closes #1", body)
         self.assertIn("`test -f feature.txt` exit 0", body)
         comment = self.github.comments[(7, f"{run['id']}-review-0-{run['published_sha']}")]
-        for text in (run["published_sha"], "changes requested", self.agents.summary, "high: feature.txt:1",
+        for text in (run["published_sha"], "changes requested", self.agents.summary, "blocking: feature.txt:1",
                      "Evidence: Bug", "Request: Fix", "`claude` (anthropic)", "CLI test"):
             self.assertIn(text, comment)
         run = self.tick(5)
