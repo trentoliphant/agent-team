@@ -1630,10 +1630,18 @@ class WorkflowTests(unittest.TestCase):
     def test_classification_marks_uncertainty(self):
         from agent_team.coordinator import classify
         earlier = [{"location": "a.py:1", "request": "Fix X"}]
-        current = [{"location": "A.py:1", "request": "fix  x"}, {"location": "a.py:9", "request": "Other"},
+        current = [{"location": " a.py:1 ", "request": "Fix  X"}, {"location": "a.py:9", "request": "Other"},
                    {"location": "b.py", "request": "Fix X"}]
         self.assertEqual([f["match"] for f in classify(current, earlier)], ["repeated", "uncertain", "new"])
         self.assertEqual([f["match"] for f in classify(current, [])], ["first"] * 3)
+
+    def test_classification_is_case_sensitive(self):
+        from agent_team.coordinator import classify
+        earlier = [{"location": "A.py:3", "request": "Rename Foo"}]
+        current = [{"location": "A.py:3", "request": "Rename Foo"}, {"location": "a.py:3", "request": "rename foo"},
+                   {"location": "a.py:3", "request": "Rename Foo"}, {"location": "A.py:3", "request": "rename foo"}]
+        # A.py and a.py are different files, so a.py is new; Foo and foo are different requests.
+        self.assertEqual([f["match"] for f in classify(current, earlier)], ["repeated", "new", "new", "uncertain"])
 
     def test_validation_failure_never_publishes(self):
         self.project.update(tests=["exit 1"], max_revisions=0)
