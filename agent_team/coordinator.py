@@ -2010,6 +2010,12 @@ class Coordinator:
                     adopted_pr=dict(info, pushed=info.get("pushed", []) + [sha]), **self.queue_writes(run, *writes))
 
     def independent_review(self, project, run):
+        # Reserve capacity before creating any checkout, and keep it through the call.
+        # A preflight check alone would race with another repository's worker.
+        with self.store.subscription(run["reviewer"], project["quota_cooldown"]):
+            return self.review_with_capacity(project, run)
+
+    def review_with_capacity(self, project, run):
         root, cwd = self.store.layout(run, f"review-{run['round']}-{time.time_ns()}")
         cwd.parent.mkdir(parents=True, exist_ok=True)
         execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
@@ -2045,7 +2051,7 @@ class Coordinator:
                   + SEVERITY + (rereview_prompt(previous) if previous else FIRST_REVIEW)
                   + (COMPACT_NOTICE if patch_evidence["format"] == "compact" else "") +
                   f"Diff:\n{diff}")
-        record = self.call_agent(run["reviewer"], "review", prompt, cwd,
+        record = self.agents.run(run["reviewer"], "review", prompt, cwd,
                                  self.store.artifacts(run) / f"review-{run['round']}", project,
                                  readable=companions.paths(root, pins))
         assert_metadata(cwd, baseline)

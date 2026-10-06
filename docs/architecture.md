@@ -142,6 +142,11 @@ retries. Diagnostic smoke calls serialize and respect existing cooldowns but
 never persist a cooldown on failure. Other families and stages remain available. Optional status rewrites
 retain their one-attempt fallback when capacity is unavailable.
 
+Review reserves family capacity before creating its checkout and holds it through
+the review call. Busy-family and cooldown deferrals therefore create no review
+clones. Once capacity is available, review creates a clean clone at the exact
+candidate commit.
+
 This coordination boundary is one host and one shared local state directory.
 Independent directories, remote filesystems, GitHub repository aliases caused by
 renames, and mixed coordinator versions are outside the boundary. Stop all workers
