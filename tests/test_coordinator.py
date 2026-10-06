@@ -2065,6 +2065,65 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
         self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
 
+    def assert_cleanup_evidence_requires_fresh_review(self, field, value):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick()
+        context = run["validated_context"]
+        # Change only this evidence field; the candidate and its context stay current.
+        if callable(value):
+            value = value(run)
+        self.store.save(run, **{field: value})
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertEqual(run["validated_context"], context)
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_cleanup_with_missing_validated_tree_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("validated_tree", None)
+
+    def test_cleanup_with_missing_validation_plan_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("validation_plan", None)
+
+    def test_cleanup_with_failed_test_evidence_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review(
+            "tests", [{"command": command, "exit_code": 1} for command in self.project["tests"]])
+
+    def test_cleanup_with_retired_evidence_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("evidence_retired", True)
+
+    def test_cleanup_with_missing_review_sha_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("review_sha", None)
+
+    def test_cleanup_with_missing_reviewed_sha_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("reviewed_sha", None)
+
+    def test_cleanup_with_nonpassing_saved_verdict_requires_fresh_review(self):
+        def rejected_cleanup(run):
+            cleanup = run["cleanup"]
+            # Keep the records equal so only the verdict prevents reuse.
+            cleanup["record"]["report"]["verdict"] = "reject"
+            self.store.save(run, review_record=cleanup["record"])
+            return cleanup
+
+        self.assert_cleanup_evidence_requires_fresh_review("cleanup", rejected_cleanup)
+
+    def test_cleanup_with_review_companion_mismatch_requires_fresh_review(self):
+        def mismatched_cleanup(run):
+            cleanup = run["cleanup"]
+            # Keep the saved records equal and current validation pins unchanged.
+            cleanup["record"]["companions"] = [{"repo": "example/lib", "rev": "1" * 40}]
+            self.store.save(run, review_record=cleanup["record"])
+            return cleanup
+
+        self.assert_cleanup_evidence_requires_fresh_review("cleanup", mismatched_cleanup)
+
     def test_unchanged_cleanup_with_changed_passing_command_gets_fresh_review(self):
         self.agents.minor = [[self.MINOR]]
         run = self.tick(5)
