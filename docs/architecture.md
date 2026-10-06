@@ -191,7 +191,9 @@ is an ordinary issue run with revision budget left. The author addresses the
 minor findings and a re-review of the new commit follows. A blocking finding
 there is an ordinary rejection. Minor findings from that re-review, or from a
 pass with no cleanup available, are listed on the ready comment. If the author
-changes nothing, the earlier passing review stands.
+changes nothing, the earlier passing review stands only while validation commands,
+companion pins, and exact-commit validation and review evidence remain current.
+Otherwise the same commit goes through fresh validation and review.
 
 Reviews are explicitly committed to a SHA. The base SHA is recorded too. New
 remote head/base changes make the run stale and invalidate readiness without

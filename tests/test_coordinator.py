@@ -2031,8 +2031,39 @@ class WorkflowTests(unittest.TestCase):
         self.agents.idle = True
         run = self.tick(3)
         self.assertEqual((run["stage"], run["sha"], run["reviewed_sha"]), ("ready", reviewed, reviewed))
-        self.assertEqual(self.agents.calls.count(("claude", "review")), 1)
+        self.assertEqual(self.agents.calls,
+                         [("codex", "implement"), ("claude", "review"), ("codex", "implement")])
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 1)
         self.assertIn("- feature.txt:2: Rename it", self.github.comments[(7, f"{run['id']}-ready")])
+
+    def test_unchanged_cleanup_with_changed_validation_runs_the_new_command(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        self.tick()
+        self.project["tests"] = ["false"]
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual(run["sha"], reviewed)
+        self.assertEqual(run["tests"], [{"command": "false", "exit_code": 1}])
+        self.assertNotEqual(run["stage"], "blocked")
+        self.assertNotEqual(run["stage"], "ready")
+        self.assertIsNone(run.get("reviewed_sha"))
+
+    def test_unchanged_cleanup_with_retired_validation_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick()
+        self.store.save(run, validated_sha=None)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertIsNone(run.get("review_record"))
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
 
     def test_blocking_finding_in_the_cleanup_re_review_is_an_ordinary_rejection(self):
         self.agents.minor = [[self.MINOR]]
