@@ -2065,6 +2065,61 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
         self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
 
+    def test_unchanged_cleanup_with_changed_passing_command_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        self.tick()
+        command = "test -f feature.txt && test -f README.md"
+        self.project["tests"] = [command]
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertEqual(run["tests"], [{"command": command, "exit_code": 0}])
+        self.assertEqual(run["validation_plan"], [command])
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["sha"], run["reviewed_sha"]), ("ready", reviewed, reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_unchanged_cleanup_with_changed_timeout_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        old_context = run["validated_context"]
+        self.agents.idle = True
+        self.tick()
+        self.project["timeout"] += 1
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertNotEqual(run["validated_context"], old_context)
+        self.assertEqual(run["validated_context"]["configuration"]["timeout"], self.project["timeout"])
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_unchanged_cleanup_with_different_saved_review_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick()
+        record = json.loads(json.dumps(run["review_record"]))
+        record["report"]["summary"] = "A different saved review"
+        self.store.save(run, review_record=record)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
     def test_blocking_finding_in_the_cleanup_re_review_is_an_ordinary_rejection(self):
         self.agents.minor = [[self.MINOR]]
         self.tick(5)

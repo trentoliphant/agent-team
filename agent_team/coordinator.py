@@ -2124,7 +2124,8 @@ class Coordinator:
                             stage=self.successor(run, "review", "ci"), **self.queue_writes(run, comment))
         elif record["report"]["findings"] and self.cleanup_allowed(project, run):
             # The review passed with minor findings: one cleanup round fixes them, and a re-review
-            # confirms. The passing verdict is kept, so an author who changes nothing leaves it standing.
+            # confirms. Unchanged work keeps the verdict only while validation configuration,
+            # companion pins, and exact-commit validation and review evidence remain current.
             minor = list(record["report"]["findings"])
             self.store.save(run, reviewed_sha=run["sha"], round=run["round"] + 1, reserved_round=run["round"] + 1,
                             cleanup={"round": run["round"], "sha": run["sha"], "kind": "review", "findings": minor,
