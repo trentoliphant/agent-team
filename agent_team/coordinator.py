@@ -1732,11 +1732,27 @@ class Coordinator:
                                                  author, sha, f"^{sha}^")
         cleanup = cleanup_round(run)
         if cleanup and sha == cleanup["sha"]:
-            # The author left the reviewed commit as it is. Its passing review stands, and the minor
-            # findings stay listed on the ready comment.
-            self.store.save(run, review_record=cleanup["record"], review_sha=sha, reviewed_sha=sha,
-                            commit_contributors=None, stage="ci")
-            return
+            context = self.evidence_context(project, run)
+            reusable = (run.get("validated_sha") == sha
+                        and run.get("validated_tree") == context["tree"]
+                        and run.get("validated_context") == context
+                        and run.get("validation_plan") == project["tests"]
+                        and run.get("tests") == [{"command": command, "exit_code": 0}
+                                                  for command in project["tests"]]
+                        and not run.get("evidence_retired")
+                        and not self.pins_changed(project, run)
+                        and run.get("review_sha") == sha and run.get("reviewed_sha") == sha
+                        and run.get("review_record") == cleanup["record"]
+                        and cleanup["record"]["report"]["verdict"] == "pass"
+                        and (cleanup["record"].get("companions") or [])
+                        == (run.get("validated_companions") or []))
+            if reusable:
+                # Unchanged work keeps its passing review only while its inputs and evidence match.
+                self.store.save(run, commit_contributors=None, stage="ci")
+                return
+            # Do not let publication or review consume the saved verdict after fresh validation.
+            self.store.save(run, **self.supersede(run), validated_sha=None, validated_tree=None,
+                            validated_context=None)
         if run.get("needs_revision") and sha == run.get("published_sha"):
             raise TeamError("Revision produced no new commit; rejected evidence cannot be replaced by a reroll")
         if sha in run.get("rejected_shas", []):
@@ -2108,7 +2124,8 @@ class Coordinator:
                             stage=self.successor(run, "review", "ci"), **self.queue_writes(run, comment))
         elif record["report"]["findings"] and self.cleanup_allowed(project, run):
             # The review passed with minor findings: one cleanup round fixes them, and a re-review
-            # confirms. The passing verdict is kept, so an author who changes nothing leaves it standing.
+            # confirms. Unchanged work keeps the verdict only while validation configuration,
+            # companion pins, and exact-commit validation and review evidence remain current.
             minor = list(record["report"]["findings"])
             self.store.save(run, reviewed_sha=run["sha"], round=run["round"] + 1, reserved_round=run["round"] + 1,
                             cleanup={"round": run["round"], "sha": run["sha"], "kind": "review", "findings": minor,

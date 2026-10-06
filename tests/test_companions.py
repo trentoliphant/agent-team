@@ -109,6 +109,47 @@ class CompanionTests(unittest.TestCase):
         self.fail(f"run did not reach {stage}: {run['stage']} {run.get('error') or run.get('reason')}; "
                   f"runs: {stored}")
 
+    def test_unchanged_cleanup_with_changed_pin_validates_and_reviews_again(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        self.agents.minor = [[{"severity": "minor", "location": "feature.txt:1",
+                               "evidence": "Unclear name", "request": "Rename it"}]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        self.tick()
+        self.project["companions"][0]["rev"] = self.lib_v2
+        self.store.save_project(self.project)
+        run = self.tick()
+        pins = [{"repo": "example/lib", "rev": self.lib_v2}]
+        self.assertEqual((run["stage"], run["sha"], run["validated_sha"]),
+                         ("publish", reviewed, reviewed))
+        self.assertEqual(run["validated_companions"], pins)
+        self.assertIsNone(run.get("review_record"))
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(run["review_record"]["companions"], pins)
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_unchanged_cleanup_with_stale_pin_cache_validates_and_reviews_again(self):
+        self.primary({}, [{"repo": "example/lib", "rev": self.lib_v1}])
+        self.agents.minor = [[{"severity": "minor", "location": "feature.txt:1",
+                               "evidence": "Unclear name", "request": "Rename it"}]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        context = run["validated_context"]
+        self.agents.idle = True
+        run = self.tick()
+        cached = dict(run["companion_manifest"], sha="0" * 40)
+        self.store.save(run, companion_manifest=cached)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertEqual(run["validated_context"], context)
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
     def test_manifest_pinned_suite_preserves_basenames_and_records_pins(self):
         manifest = {"companions": [{"repo": "example/lib", "rev": self.lib_v1}]}
         self.primary({"companions.json": json.dumps(manifest)}, [{"repo": "example/lib", "rev": None}],

@@ -2031,8 +2031,153 @@ class WorkflowTests(unittest.TestCase):
         self.agents.idle = True
         run = self.tick(3)
         self.assertEqual((run["stage"], run["sha"], run["reviewed_sha"]), ("ready", reviewed, reviewed))
-        self.assertEqual(self.agents.calls.count(("claude", "review")), 1)
+        self.assertEqual(self.agents.calls,
+                         [("codex", "implement"), ("claude", "review"), ("codex", "implement")])
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 1)
         self.assertIn("- feature.txt:2: Rename it", self.github.comments[(7, f"{run['id']}-ready")])
+
+    def test_unchanged_cleanup_with_changed_validation_runs_the_new_command(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        self.tick()
+        self.project["tests"] = ["false"]
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual(run["sha"], reviewed)
+        self.assertEqual(run["tests"], [{"command": "false", "exit_code": 1}])
+        self.assertNotEqual(run["stage"], "blocked")
+        self.assertNotEqual(run["stage"], "ready")
+        self.assertIsNone(run.get("reviewed_sha"))
+
+    def test_unchanged_cleanup_with_retired_validation_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick()
+        self.store.save(run, validated_sha=None)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertIsNone(run.get("review_record"))
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def assert_cleanup_evidence_requires_fresh_review(self, field, value):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick()
+        context = run["validated_context"]
+        # Change only this evidence field; the candidate and its context stay current.
+        if callable(value):
+            value = value(run)
+        self.store.save(run, **{field: value})
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertEqual(run["validated_context"], context)
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_cleanup_with_missing_validated_tree_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("validated_tree", None)
+
+    def test_cleanup_with_missing_validation_plan_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("validation_plan", None)
+
+    def test_cleanup_with_failed_test_evidence_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review(
+            "tests", [{"command": command, "exit_code": 1} for command in self.project["tests"]])
+
+    def test_cleanup_with_retired_evidence_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("evidence_retired", True)
+
+    def test_cleanup_with_missing_review_sha_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("review_sha", None)
+
+    def test_cleanup_with_missing_reviewed_sha_requires_fresh_review(self):
+        self.assert_cleanup_evidence_requires_fresh_review("reviewed_sha", None)
+
+    def test_cleanup_with_nonpassing_saved_verdict_requires_fresh_review(self):
+        def rejected_cleanup(run):
+            cleanup = run["cleanup"]
+            # Keep the records equal so only the verdict prevents reuse.
+            cleanup["record"]["report"]["verdict"] = "reject"
+            self.store.save(run, review_record=cleanup["record"])
+            return cleanup
+
+        self.assert_cleanup_evidence_requires_fresh_review("cleanup", rejected_cleanup)
+
+    def test_cleanup_with_review_companion_mismatch_requires_fresh_review(self):
+        def mismatched_cleanup(run):
+            cleanup = run["cleanup"]
+            # Keep the saved records equal and current validation pins unchanged.
+            cleanup["record"]["companions"] = [{"repo": "example/lib", "rev": "1" * 40}]
+            self.store.save(run, review_record=cleanup["record"])
+            return cleanup
+
+        self.assert_cleanup_evidence_requires_fresh_review("cleanup", mismatched_cleanup)
+
+    def test_unchanged_cleanup_with_changed_passing_command_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        self.tick()
+        command = "test -f feature.txt && test -f README.md"
+        self.project["tests"] = [command]
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertEqual(run["tests"], [{"command": command, "exit_code": 0}])
+        self.assertEqual(run["validation_plan"], [command])
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["sha"], run["reviewed_sha"]), ("ready", reviewed, reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_unchanged_cleanup_with_changed_timeout_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        old_context = run["validated_context"]
+        self.agents.idle = True
+        self.tick()
+        self.project["timeout"] += 1
+        self.store.save_project(self.project)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertNotEqual(run["validated_context"], old_context)
+        self.assertEqual(run["validated_context"]["configuration"]["timeout"], self.project["timeout"])
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
+
+    def test_unchanged_cleanup_with_different_saved_review_gets_fresh_review(self):
+        self.agents.minor = [[self.MINOR]]
+        run = self.tick(5)
+        reviewed = run["sha"]
+        self.agents.idle = True
+        run = self.tick()
+        record = json.loads(json.dumps(run["review_record"]))
+        record["report"]["summary"] = "A different saved review"
+        self.store.save(run, review_record=record)
+        run = self.tick()
+        self.assertEqual((run["stage"], run["validated_sha"]), ("publish", reviewed))
+        self.assertIsNone(run.get("review_record"))
+        self.assertEqual(len(list(self.store.run_root(run).glob("validation-*"))), 2)
+        run = self.tick(3)
+        self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", reviewed))
+        self.assertEqual(self.agents.calls.count(("claude", "review")), 2)
 
     def test_blocking_finding_in_the_cleanup_re_review_is_an_ordinary_rejection(self):
         self.agents.minor = [[self.MINOR]]
