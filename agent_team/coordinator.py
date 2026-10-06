@@ -261,7 +261,7 @@ def pr_body(run):
 
 
 def normalized(text):
-    return " ".join(str(text).split()).casefold()
+    return " ".join(str(text).split())
 
 
 def classify(findings, earlier):
