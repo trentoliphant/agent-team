@@ -133,6 +133,10 @@ class Agents:
             if commands:
                 # Bash is named in --tools, so restricted mode keeps it; it runs only inside the sandbox.
                 args += ["--settings", json.dumps(CLAUDE_SANDBOX)]
+                # Claude stops a command after two minutes by default, which is shorter than many test
+                # suites. One command may take as long as the whole call is allowed to.
+                limit = str(int(project["timeout"]) * 1000)
+                env.update(BASH_DEFAULT_TIMEOUT_MS=limit, BASH_MAX_TIMEOUT_MS=limit)
             # Claude only reads inside its working directories. Codex sandboxes already allow
             # reads anywhere and restrict writes to the workspace, so they need no extra grant.
             for directory in readable:
