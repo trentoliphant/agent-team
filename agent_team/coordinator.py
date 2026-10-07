@@ -451,6 +451,14 @@ def recovering(run):
     return bool(run.get("decisions") or run.get("adoptions"))
 
 
+def adoption_round(run):
+    """The round an adopted repair takes. A revision that was scheduled but never authored gives its
+    round to the repair, so the adoption does not use up an authorized revision that was never run."""
+    unstarted = (run.get("needs_revision") and run.get("reserved_round") == run["round"]
+                 and run["round"] not in run.get("authored_rounds", []))
+    return run["round"] if unstarted else run["round"] + 1
+
+
 def revision_limit(project, run):
     """The run's effective revision limit. The first handoff freezes it on the run; after that only
     operator decisions change it, so later project configuration changes cannot widen a recovery."""
@@ -2558,7 +2566,8 @@ class Coordinator:
         contributed; Agent-Family commit trailers add to that. The reviewer's family must not
         appear, and the candidate needs new validation and review within the revision limit.
         A recovered run (extended or already adopted) whose head changed (stale) is adopted the
-        same way; its decisions and extension are kept."""
+        same way; its decisions and extension are kept. A repair adopted in place of a scheduled
+        revision the author never ran takes that revision's round."""
         run = self.store.get(run_id)
         project = self.store.project(run["project"])
         if run.get("pending_swap"):
@@ -2579,6 +2588,7 @@ class Coordinator:
             return self.adopt_local(project, run, declared)
         fresh, changes, (families, unresolved) = self.integrate(
             project, run, self.contributor_check(run, declared, adopting=True))
+        changes["round"] = adoption_round(run)
         if run.get("adopted_pr"):
             changes = {**retire_evidence(run, "Adopted external repair"), **changes}
         changes.update(self.reassess(dict(run, **changes), declared, families, unresolved))
@@ -2667,7 +2677,7 @@ class Coordinator:
             raise TeamError(f"The repair conflicts with current base {base_sha}; merge it in the repair checkout "
                             "and adopt again (repair checkout retained)") from None
         sha = git(fresh, "rev-parse", "HEAD")
-        round_ = run["round"] + 1
+        round_ = adoption_round(run)
         adoption = {"head": candidate, "sha": sha, "base_sha": base_sha, "declared": declared,
                     "families": sorted(families), "unresolved_trailers": unresolved, "round": round_,
                     "local": True, "at": time.time()}

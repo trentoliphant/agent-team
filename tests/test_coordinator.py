@@ -1348,11 +1348,55 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.agents.calls[calls:], [])
         self.team.adopt(run["id"], ["human"])
         run = self.store.get(run["id"])
-        self.assertEqual((run["stage"], run["sha"], run["round"]), ("validate", head, 3))
+        # The repair takes the scheduled round 2, which the author never ran.
+        self.assertEqual((run["stage"], run["sha"], run["round"]), ("validate", head, 2))
         self.assertEqual((run["extension"], len(run["decisions"]), len(run["adoptions"])), (1, 1, 1))
         run = self.tick(4)
         self.assertEqual((run["stage"], run["reviewed_sha"]), ("ready", head))
         self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def test_adoption_before_the_author_runs_does_not_consume_an_extension_revision(self):
+        run = self.exhaust()
+        handed_off = (run["rejected_shas"], run["revision_history"])
+        self.team.decide(run["id"], "extend", 2)
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["round"], run["revision_limit"]), ("implement", 2, 3))
+        calls = len(self.agents.calls)
+        head = self.push_repair(run)
+        self.assertEqual(self.tick()["stage"], "stale")
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"], run["revision_limit"]), ("validate", head, 2, 3))
+        self.assertEqual((run["adoptions"][0]["round"], run["needs_revision"]), (2, False))
+        self.assertEqual(run.get("authored_rounds"), [0, 1])
+        self.assertIn("revision 2, limit 3", self.github.comments[(7, f"{run['id']}-adopt-2")])
+        # The adopted candidate is validated and independently reviewed; its rejection leaves one revision.
+        self.agents.reject = True
+        run = self.tick(3)
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+        self.assertEqual((run["stage"], run["round"], run["needs_revision"]), ("implement", 3, True))
+        self.assertEqual((run["rejected_shas"], run["revision_history"][:-1]), (handed_off[0] + [head], handed_off[1]))
+        self.assertEqual([(e["round"], e["sha"]) for e in run["revision_history"][-1:]], [(2, head)])
+        # The second authorized candidate is the author's; its rejection reaches the limit.
+        self.agents.reject = True
+        run = self.tick(4)
+        self.assertEqual(self.agents.calls[calls + 1:], [("codex", "implement"), ("claude", "review")])
+        self.assertEqual((run["stage"], run["round"], len(run["handoffs"])), ("handoff", 3, 2))
+        self.assertEqual([e["round"] for e in run["revision_history"]], [0, 1, 2, 3])
+
+    def test_second_adoption_in_a_round_still_advances_and_cannot_pass_the_limit(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 1)
+        self.push_repair(run)
+        self.tick()
+        self.team.adopt(run["id"], ["human"])
+        head = self.push_repair(run, "Second repair", "repaired again\n")
+        self.assertEqual(self.tick()["stage"], "stale")
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["sha"], run["round"], [a["round"] for a in run["adoptions"]]), (head, 3, [2, 3]))
+        self.agents.reject = True
+        self.assertEqual(self.tick(3)["stage"], "handoff")
 
     def test_second_human_repair_after_adoption_is_adopted_again(self):
         run = self.exhaust()
