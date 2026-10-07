@@ -389,7 +389,8 @@ A rejected commit can never be validated or reviewed again, so every extension
 or repair must add a new commit. `extend --revisions N` always allows exactly N
 more revisions after the handoff round, even after an adoption. A repair adopted
 before the author runs a scheduled revision takes that revision's place and does
-not use up another. The limit is
+not use up another. Adoptions count toward the extension: once it is used up,
+`adopt` refuses another repair until `decide RUN_ID repair` authorizes it. The limit is
 stored on the run at the first handoff, so changing the project's
 `max_revisions` later does not widen or shrink it. When an extension
 is used up, the run returns to `handoff` for a new decision.

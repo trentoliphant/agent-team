@@ -1384,14 +1384,48 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((run["stage"], run["round"], len(run["handoffs"])), ("handoff", 3, 2))
         self.assertEqual([e["round"] for e in run["revision_history"]], [0, 1, 2, 3])
 
-    def test_second_adoption_in_a_round_still_advances_and_cannot_pass_the_limit(self):
+    def test_repeated_adoption_cannot_pass_an_extension_limit_without_a_repair_decision(self):
         run = self.exhaust()
         self.team.decide(run["id"], "extend", 1)
+        first = self.push_repair(run)
+        self.tick()
+        self.team.adopt(run["id"], ["human"])
+        head = self.push_repair(run, "Second repair", "repaired again\n")
+        self.assertEqual(self.tick()["stage"], "stale")
+        before = self.store.get(run["id"])
+        calls = len(self.agents.calls)
+        # The reviewer would pass, but the extension of one already went to the first adoption.
+        with self.assertRaisesRegex(TeamError, "allows no further candidate.*decide .* repair"):
+            self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"], run["revision_limit"]), ("stale", first, 2, 2))
+        self.assertEqual((run["adoptions"], run["revision_history"]), (before["adoptions"], before["revision_history"]))
+        self.tick()
+        self.assertEqual((self.store.get(run["id"])["stage"], self.agents.calls[calls:]), ("stale", []))
+        with self.assertRaisesRegex(TeamError, "Cannot extend"):
+            self.team.decide(run["id"], "extend", 1)
+        # An explicit repair decision authorizes the extra candidate; it still needs validation and review.
+        self.team.decide(run["id"], "repair")
+        self.assertEqual(self.store.get(run["id"])["stage"], "repair")
+        self.team.adopt(run["id"], ["human"])
+        run = self.store.get(run["id"])
+        self.assertEqual((run["stage"], run["sha"], run["round"], [a["round"] for a in run["adoptions"]]),
+                         ("validate", head, 3, [2, 3]))
+        self.assertEqual([d["action"] for d in run["decisions"]], ["extend", "repair"])
+        run = self.tick(4)
+        self.assertEqual((run["stage"], run["reviewed_sha"], run["revision_limit"]), ("ready", head, 2))
+        self.assertEqual(self.agents.calls[calls:], [("claude", "review")])
+
+    def test_second_adoption_within_an_extension_limit_advances_and_is_reviewed(self):
+        run = self.exhaust()
+        self.team.decide(run["id"], "extend", 2)
         self.push_repair(run)
         self.tick()
         self.team.adopt(run["id"], ["human"])
         head = self.push_repair(run, "Second repair", "repaired again\n")
         self.assertEqual(self.tick()["stage"], "stale")
+        with self.assertRaisesRegex(TeamError, "Cannot repair"):
+            self.team.decide(run["id"], "repair")
         self.team.adopt(run["id"], ["human"])
         run = self.store.get(run["id"])
         self.assertEqual((run["sha"], run["round"], [a["round"] for a in run["adoptions"]]), (head, 3, [2, 3]))
