@@ -71,7 +71,8 @@ The independent review requested changes; its material findings are incorporated
 
 - Approval uses immutable GitHub user IDs resolved when configuring approvers,
   `User` account type, exact template equality, and equal nonempty creation/update
-  timestamps. `approve` creates a new comment, never edits another approval.
+  timestamps. Normalize CRLF line endings and trailing whitespace before the
+  exact template comparison. `approve` creates a new comment, never edits another approval.
   Renaming a trusted login preserves identity. Edited/quoted/bot evidence fails.
   Record the approval comment/user/timestamps in the journal and recheck before
   each active stage. On upgrade, bot-approved queued and active work stops until

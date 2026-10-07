@@ -413,6 +413,14 @@ class PreviewWorkflowTests(unittest.TestCase):
             coordinator.return_value.tick.assert_not_called()
             save.assert_not_called()
 
+    def test_discovery_artifacts_do_not_create_unreachable_run_events(self):
+        artifacts = self.store.home/'discovery'/'demo'/'stamp'/'artifacts'
+        with patch.object(self.agents,'run',return_value={'report':{'issues':[]}}):
+            result = self.team.call_agent('codex','discover','',self.root,artifacts,self.project)
+        self.assertEqual(result,{'report':{'issues':[]}})
+        self.assertEqual(len(list(artifacts.glob('attempt-*'))),1)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM events WHERE run IS NULL').fetchone()[0],0)
+
     def test_transient_retries_are_bounded_separately_and_resume_resets_them(self):
         self.preview()
         self.tick()

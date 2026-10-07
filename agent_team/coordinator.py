@@ -928,7 +928,8 @@ class Coordinator:
             run = self.store.get(run_id) if run_id else {"round": None}
             info = {"agent": agent, "role": role, "round": run["round"], "sha": run.get("sha"),
                     "artifacts": str(artifacts), "started": time.time()}
-            self.store.record_event(run_id, call_started=info)
+            if run_id:
+                self.store.record_event(run_id, call_started=info)
             started, outcome, record = time.monotonic(), "interrupted", None
             try:
                 record = self.agents.run(agent, role, prompt, cwd, artifacts, project, **options)
@@ -938,8 +939,9 @@ class Coordinator:
                 outcome = f"{type(exc).__name__}: {exc}"
                 raise
             finally:
-                self.store.record_event(run_id, call_finished={**info, "outcome": outcome,
-                                        "duration_seconds": time.monotonic() - started, "record": record})
+                if run_id:
+                    self.store.record_event(run_id, call_finished={**info, "outcome": outcome,
+                                            "duration_seconds": time.monotonic() - started, "record": record})
 
     @staticmethod
     def operation_plan(operations, grants):
