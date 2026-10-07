@@ -113,3 +113,8 @@ The independent review requested changes; its material findings are incorporated
 Plan review: Claude Code 2.1.292, requested and observed `claude-opus-5-5`,
 fresh session, read-only tools. No tests or edits performed by the plan reviewer.
 A second plan review was not required by the reviewer after these amendments.
+
+The implementation also checks GraphQL `lastEditedAt == null` and rereads the
+comment author/body to reject edits within the same REST timestamp second. The
+query shape was checked against GitHub's official Issues schema and live read-only
+schema introspection; authorization tests use fixtures only.

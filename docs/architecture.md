@@ -186,7 +186,8 @@ the validation commands before handing off, and answers each finding; the answer
 are published as a comment with the new commit. The PR description is the
 author's first report and is not replaced by later rounds.
 
-A review that passes with minor findings starts one cleanup round, when the run
+When minor cleanup is enabled (or on legacy registrations), a review that
+passes with minor findings starts one cleanup round, when the run
 is an ordinary issue run with revision budget left. The author addresses the
 minor findings and a re-review of the new commit follows. A blocking finding
 there is an ordinary rejection. Minor findings from that re-review, or from a
@@ -442,3 +443,29 @@ change readiness. The separate `ci` operation retains exact validation, independ
 review, and readiness prerequisites. Publication follows the selected successor,
 so an already reviewed local candidate can enter `publish ci` without a new review.
 Continuation segments retain their grants and effects alongside their revisions.
+
+## 0.2 execution policy and trace
+
+See [the preview guide](preview.md) for new defaults and migration. New projects
+store explicit status, cleanup and capacity policy; missing keys retain 0.1
+behavior. These keys do not enter validation fingerprints. A family reservation
+is held before review cloning, so capacity deferrals create no checkout. Explicit
+model saturation has a separate short cooldown and bounded counter; longer
+subscription cooldowns are never shortened. Watch caps consecutive immediate
+active-stage transitions at twelve; all waits and same-stage results poll.
+
+`trace.py` reads the existing append-only SQLite events and run evidence, without
+GitHub/model calls. Call/test start and finish events bind unique artifact paths
+to role, round and commit. Direct subprocess file descriptors preserve streaming
+logs on interruption. Claude stream-json requires exactly one final result at
+the end; malformed/missing/ambiguous results fail closed. Readiness still uses
+validated and independently reviewed exact-commit evidence, never trace prose.
+
+All primary worker metadata rejects replacement refs, grafts, shallow boundaries
+and alternates before coordinator Git reads. Coordinator Git disables replacement
+objects. The review clone's complete Git store is compared before/after the
+review, excluding only its index. Primary staging/stashing/object writes are
+prohibited; scratch repositories under the working tree are permitted. A paid
+review that mutates primary Git metadata is rejected with its report retained
+in the attempt journal. Restored transient changes cannot always be detected;
+these integrity checks are evidence guards, not an adversarial process sandbox.

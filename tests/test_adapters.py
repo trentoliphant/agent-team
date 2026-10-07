@@ -174,12 +174,15 @@ class GitHubTests(unittest.TestCase):
         github = GitHub()
         github._login = "operator"
         issue = {"number": 1, "title": "Task", "body": "Original"}
-        comment = {"body": f"<!-- agent-team:approval-1 -->\nIssue content SHA-256: `{issue_fingerprint(issue)}`",
-                   "user": {"login": "operator"}}
-        with patch.object(github, "pages", return_value=[comment]):
+        github._identity = {"id": 1, "type": "User", "login": "operator"}
+        comment = {"id": 5, "node_id": "comment5", "body": github.approval_text(issue), "created_at": "now", "updated_at": "now",
+                   "user": {"id": 1, "login": "operator", "type": "User"}}
+        with patch.object(github, "pages", return_value=[comment]), patch.object(github, "api", return_value={
+                "data": {"node": {"body": comment["body"], "lastEditedAt": None,
+                                  "author": {"__typename": "User", "databaseId": 1}}}}):
             self.assertTrue(github.authorized({"repo": "example/repo"}, issue))
             self.assertFalse(github.authorized({"repo": "example/repo"}, dict(issue, body="Edited")))
-            comment["user"]["login"] = "outsider"
+            comment["user"]["id"] = 2
             self.assertFalse(github.authorized({"repo": "example/repo"}, issue))
 
     def test_identity_uses_graphql_viewer_for_app_compatibility(self):

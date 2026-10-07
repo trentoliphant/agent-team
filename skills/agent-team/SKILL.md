@@ -302,3 +302,22 @@ repair checkout, candidate, and budget stay, and `adopt` then needs fresh
 validation and review. Never open
 a replacement PR, force-push, merge, reopen, retarget, or change draft state.
 Unknown or mixed authorship withholds independent success.
+
+## Preview defaults and development trace
+
+For 0.2, `agent-team trace RUN_ID` is a local read-only human history; `--json`
+includes all journaled model/test attempts and original reports. Use it to show
+remaining findings and unanswered responses without inferring fixes. No remote
+currency check or model call occurs. New registrations use four bounded
+correction rounds, deterministic status prose and no automatic minor cleanup.
+Existing registrations preserve their policy until explicitly configured.
+Human approvals require trusted User IDs and exact unedited comments. A bot
+coordinator prints `agent-team approval-text PROJECT ISSUE` for a configured
+human to post as a new GitHub comment and add the ready label. Never post that
+approval for the human. Active stages recheck approval; revoked approval blocks.
+
+An isolated `agent-team-preview` wrapper is installed by the repository's preview
+installer at a reviewed SHA. It selects separate state. Never register the same
+target repository in both stable and preview registries; their locks and claims
+are independent. The preview works from any current directory. Final merge stays
+with a human. Check actual CLI help before applying these options to older builds.

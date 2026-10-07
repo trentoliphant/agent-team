@@ -32,6 +32,9 @@ class FakeGitHub:
     def issues(self, project, ready=True):
         return self.items
 
+    def approval_evidence(self, project, issue):
+        return {"comment_id": 99, "user_id": 1, "login": "human", "created_at": "now", "updated_at": "now"} if self.authorized(project, issue) else None
+
     def authorized(self, project, issue):
         return issue.get("approved", True)
 
@@ -128,7 +131,8 @@ class WorkflowTests(unittest.TestCase):
         self.remote = self.root / "remote.git"
         execute(["git", "clone", "--bare", str(source), str(self.remote)])
         self.store = Store(self.root / "state")
-        self.project = self.store.register("demo", "example/demo", "main", ["test -f feature.txt"])
+        self.project = self.store.register("demo", "example/demo", "main", ["test -f feature.txt"],
+                                           max_revisions=2, minor_cleanup=True, status_mode="model")
         self.github = FakeGitHub(self.remote)
         self.agents = FakeAgents()
         self.team = Coordinator(self.store, self.github, self.agents)

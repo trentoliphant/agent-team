@@ -11,7 +11,8 @@ import time
 import uuid
 
 from .companions import basename, configure as configure_companions
-from .process import TeamError, QuotaError
+from .process import TeamError, QuotaError, ModelCapacityError
+from . import __version__
 
 ACTIVE = {"discovery", "issue_prepare", "revision", "prepare", "implement", "validate", "publish", "review", "checks", "ci"}
 TERMINAL = {"merged", "closed"}
@@ -46,6 +47,12 @@ class Store:
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(self.home / "state.sqlite3", timeout=30)
         self.db.row_factory = sqlite3.Row
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
+            row = self.db.execute("SELECT value FROM meta WHERE key='registry_version'").fetchone()
+            version = lambda v: tuple(int(x) for x in v.split(".")[:2])
+            if row and version(row[0]) > version(__version__):
+                self.db.close()
+                raise TeamError("Registry was written by a newer Agent Team version; upgrade the CLI")
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -66,6 +73,8 @@ class Store:
                                 "issue INTEGER, data TEXT NOT NULL, UNIQUE(project, issue))")
                 self.db.execute("INSERT INTO runs SELECT * FROM issue_runs")
                 self.db.execute("DROP TABLE issue_runs")
+        self.db.commit()
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('registry_version', ?)", (__version__,))
         self.db.commit()
 
     @contextmanager
@@ -128,10 +137,12 @@ class Store:
     def repository_runs(self, name):
         repo = self.project(name)["repo"].lower()
         names = {p["name"] for p in self.projects() if p["repo"].lower() == repo}
-        return [r for r in self.runs() if r["project"] in names]
+        placeholders = ",".join("?" for _ in names)
+        return [json.loads(row[0]) for row in self.db.execute(
+            f"SELECT data FROM runs WHERE project IN ({placeholders})", tuple(names))]
 
     @contextmanager
-    def subscription(self, agent, cooldown=None):
+    def subscription(self, agent, cooldown=None, capacity_cooldown=None):
         """Serialize calls and respect cooldowns; None does not record failures."""
         lock = self.file_lock(f"subscription-{agent}.lock")
         try:
@@ -145,10 +156,13 @@ class Store:
                 raise CapacityWait(float(row[0]))
             try:
                 yield
-            except QuotaError:
-                if cooldown is not None:
-                    self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)",
-                                    (key, str(time.time() + cooldown)))
+            except QuotaError as exc:
+                delay = capacity_cooldown if isinstance(exc, ModelCapacityError) and capacity_cooldown is not None else cooldown
+                if delay is not None:
+                    # A transient failure must never shorten a longer shared cooldown.
+                    row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+                    until = max(float(row[0]) if row else 0, time.time() + delay)
+                    self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(until)))
                     self.db.commit()
                 raise
         finally:
@@ -195,7 +209,9 @@ class Store:
         if not tests:
             raise TeamError("At least one --test command is required")
         project = dict(name=name, repo=repo, base=base, tests=tests, paused=False,
-                       ready_label="agent:ready", timeout=1800, max_revisions=2,
+                       ready_label="agent:ready", timeout=1800, max_revisions=4,
+                       minor_cleanup=False, status_mode="template", status_timeout=60,
+                       capacity_cooldown=60, max_capacity_retries=3,
                        quota_cooldown=3600, max_quota_retries=3, codex_model=None, claude_model=None)
         project.update(options)
         configure_companions(repo, project.get("companions", []), project.get("companion_manifest"))
@@ -240,6 +256,15 @@ class Store:
                             (run["id"], run["project"], run["issue"], json.dumps(run)))
             self.db.execute("INSERT INTO events(run,at,data) VALUES (?,?,?)",
                             (run["id"], time.time(), json.dumps(changes)))
+
+    def record_event(self, run_id, **data):
+        with self.db:
+            self.db.execute("INSERT INTO events(run,at,data) VALUES (?,?,?)",
+                            (run_id, time.time(), json.dumps(data)))
+
+    def events(self, run_id):
+        return [{"at": row[0], "changes": json.loads(row[1])} for row in self.db.execute(
+            "SELECT at,data FROM events WHERE run=? ORDER BY id", (run_id,))]
 
     def create(self, project, issue, plan=None):
         with self.db:

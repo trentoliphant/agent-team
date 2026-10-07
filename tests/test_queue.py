@@ -25,6 +25,9 @@ class Issues:
             raise TeamError('Missing issue')
         return self.items[number]
 
+    def approval_evidence(self, project, issue):
+        return {"comment_id": 99, "user_id": 1, "login": "human", "created_at": "now", "updated_at": "now"} if self.authorized(project, issue) else None
+
     def authorized(self, project, issue):
         return issue.get('approved', True)
 

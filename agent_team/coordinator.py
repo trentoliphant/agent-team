@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import time
 import tempfile
+from contextlib import nullcontext
 
 from .agents import Agents, FAMILIES
 from . import companions
@@ -13,7 +14,7 @@ from . import evidence
 from .evidence import ci_observation, observation_changed, validation_checks
 from .github import GitHub
 from .patches import COMPACT_NOTICE, review_patch
-from .process import execute, git, clone_repository, TeamError, QuotaError, worker_env, git_env, metadata, assert_metadata
+from .process import execute, git, clone_repository, TeamError, QuotaError, ModelCapacityError, worker_env, git_env, metadata, assert_metadata
 from .state import ACTIVE, RECOVERY, CapacityWait, issue_fingerprint
 from .writing import DEFAULTS, effective, guidance
 from .pull_requests import PR_GRANTS, PR_MODES, REFUSED_REVISION, PullRequests, closure, pull_number
@@ -46,7 +47,9 @@ SEVERITY = ("Label each finding blocking or minor. Blocking means it must be fix
 FIRST_REVIEW = ("This is the first review of this change. Report every problem you can find in this one review, "
                 "not only the first few: later reviews only confirm fixes and check what changed. " + COMMANDS +
                 "Run the configured validation commands, and write and run throwaway tests that try to break the "
-                "change. Judge the committed candidate; nothing you write here is kept.\n")
+                "change. Judge the committed candidate; nothing you write here is kept. "
+                "Do not stage, stash, commit, or write objects/refs in the primary review checkout. "
+                "Create separate scratch repositories under the working tree if a test needs Git writes.\n")
 REVIEW_SCOPE = ("The published comment already states the commit, base, reviewer, and validation results. "
                 "Do not restate them or recite the acceptance criteria. Say what you checked and what you "
                 "did not verify.\n")
@@ -179,6 +182,11 @@ def earlier_findings(run):
             if lines else "")
 
 
+def feedback_findings(run):
+    entry = cleanup_round(run) or ((run.get("revision_history") or [None])[-1])
+    return (entry or {}).get("findings", [])
+
+
 def response_comment(run, sha):
     """The author's answer to each finding, published with the commit that carries the fixes."""
     responses = run["author_record"]["report"].get("responses") or []
@@ -186,6 +194,10 @@ def response_comment(run, sha):
              f"Author `{run['author']}` ({FAMILIES[run['author']]}), revision {run['round']}."]
     for number, entry in enumerate(responses, 1):
         lines += ["", f"**{number}. {entry['finding']}**", "", entry["response"]]
+    answered = {entry["finding"].strip() for entry in responses}
+    for finding in feedback_findings(run):
+        if finding["location"].strip() not in answered:
+            lines += ["", f"**No response matched by location: {finding['location']}**", finding["request"]]
     return "\n".join(lines)
 
 
@@ -216,7 +228,14 @@ def outcome_comment(run, stage):
     """The terminal record: what the run took, so the PR's end state does not have to be reconstructed."""
     history = run.get("revision_history") or []
     reviews = [e for e in history if e["kind"] == "review"]
-    raised = [f for e in reviews for f in (e.get("review_report") or {"findings": e["findings"]})["findings"]]
+    reports = [e["record"]["report"] for e in run.get("review_history", [])]
+    if not reports:
+        reports = [(e.get("review_report") or {"findings": e["findings"]}) for e in reviews]
+        if run.get("cleanup"):
+            reports.append(run["cleanup"]["record"]["report"])
+        if run.get("review_record") and run.get("review_sha") not in [e["sha"] for e in reviews]:
+            reports.append(run["review_record"]["report"])
+    raised = [f for report in reports for f in report["findings"]]
     severities = {}
     for finding in raised:
         severities[finding["severity"]] = severities.get(finding["severity"], 0) + 1
@@ -645,7 +664,7 @@ class Coordinator:
         template = fit(detailed, compact, policy["status"]["words"])
         custom = (policy["shared"] != DEFAULTS["shared"] or
                   policy["status"]["instructions"] != DEFAULTS["status"]["instructions"])
-        if not custom or run["stage"] == "quota_wait":
+        if project.get("status_mode", "model") == "template" or not custom or run["stage"] == "quota_wait":
             return template
         style = guidance(policy, "status")
         key = hashlib.sha256(json.dumps([kind, detailed, style]).encode()).hexdigest()
@@ -668,7 +687,8 @@ class Coordinator:
         self.store.save(run, status_drafts={**run.get("status_drafts", {}),
                                            kind: {"key": key, "state": "attempted"}})
         try:
-            record = self.call_agent(run["author"], "status", prompt, artifacts, artifacts, project)
+            status_project = dict(project, timeout=project.get("status_timeout", project["timeout"]))
+            record = self.call_agent(run["author"], "status", prompt, artifacts, artifacts, status_project)
             message = record["report"]["message"].strip()
         except (TeamError, OSError, ValueError, KeyError, TypeError, AttributeError):
             # Includes quota exhaustion: do not retry optional wording on each tick.
@@ -861,13 +881,13 @@ class Coordinator:
         for number in order + [i["number"] for i in issues if i["number"] not in order]:
             issue = by_number.get(number)
             run = issue_runs.get(number)
-            if issue is None:
+            if run:
+                reason = f"existing run: {run['stage']}"
+            elif issue is None:
                 # Listed closed/missing issues are absent from the open-issue listing.
                 reason = "missing or closed issue"
             else:
                 reason = self.ineligible(project, issue)
-            if run:
-                reason = f"existing run: {run['stage']}"
             entries.append({"issue": number, "listed": number in order,
                             "eligible": reason is None, "reason": reason})
         return {"project": name, "saved_order": order, "entries": entries,
@@ -877,9 +897,29 @@ class Coordinator:
                                   if r["stage"] in RECOVERY or r.get("in_flight")],
                 "paused": project["paused"]}
 
-    def call_agent(self, agent, role, prompt, cwd, artifacts, project, **options):
-        with self.store.subscription(agent, project["quota_cooldown"]):
-            return self.agents.run(agent, role, prompt, cwd, artifacts, project, **options)
+    def subscription(self, agent, project):
+        return self.store.subscription(agent, project["quota_cooldown"], project.get("capacity_cooldown"))
+
+    def call_agent(self, agent, role, prompt, cwd, artifacts, project, reserved=False, **options):
+        with nullcontext() if reserved else self.subscription(agent, project):
+            artifacts = Path(artifacts) / f"attempt-{time.time_ns()}"
+            artifacts.mkdir(parents=True, exist_ok=True)
+            run_id = artifacts.relative_to(self.store.home / "runs").parts[0] if artifacts.is_relative_to(self.store.home / "runs") else None
+            run = self.store.get(run_id) if run_id else {"round": None}
+            info = {"agent": agent, "role": role, "round": run["round"], "sha": run.get("sha"),
+                    "artifacts": str(artifacts), "started": time.time()}
+            self.store.record_event(run_id, call_started=info)
+            started, outcome, record = time.monotonic(), "interrupted", None
+            try:
+                record = self.agents.run(agent, role, prompt, cwd, artifacts, project, **options)
+                outcome = "completed"
+                return record
+            except Exception as exc:
+                outcome = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                self.store.record_event(run_id, call_finished={**info, "outcome": outcome,
+                                        "duration_seconds": time.monotonic() - started, "record": record})
 
     @staticmethod
     def operation_plan(operations, grants):
@@ -1043,7 +1083,20 @@ class Coordinator:
 
     def tick(self, name, issue_number=None, stop_after=None, run_id=None):
         with self.store.worker(name):
-            return self._tick(name, issue_number, stop_after, run_id)
+            before = {r["id"]: r["stage"] for r in self.store.runs(name)}
+            started, result = time.monotonic(), None
+            try:
+                result = self._tick(name, issue_number, stop_after, run_id)
+                previous = before.get(result.get("id"), "prepare")
+                progressed = (result["stage"] in ACTIVE and result["stage"] != previous
+                              and previous in ACTIVE and not result.get("error"))
+                return dict(result, progressed=progressed)
+            finally:
+                # Additive journal entries do not change run state or recovery decisions.
+                if result and result.get("id"):
+                    self.store.record_event(result["id"], tick={"stage": before.get(result["id"], "prepare"),
+                        "output_stage": result["stage"], "round": result["round"],
+                        "duration_seconds": time.monotonic() - started})
 
     def enforce_boundary(self, run, stage=None):
         """Recover a completed endpoint before executing or resuming its successor.
@@ -1231,7 +1284,7 @@ class Coordinator:
             raise TeamError("Only blocked or quota-waiting runs can be resumed")
         if not self.enforce_boundary(run, run["resume_stage"]):
             self.store.save(run, stage=run["resume_stage"], error=None,
-                            in_flight=False, quota_attempts=0)
+                            in_flight=False, quota_attempts=0, capacity_attempts=0)
         return run
 
     def _tick(self, name, issue_number=None, stop_after=None, run_id=None):
@@ -1343,6 +1396,8 @@ class Coordinator:
                 raise TeamError("Ready label removed; no further development is authorized")
             elif issue_fingerprint(issue) != run["issue_digest"]:
                 raise TeamError("Issue content changed since assignment; restore approved content or close this run and create a linked issue")
+            elif run["issue"] is not None and not (approval := self.github.approval_evidence(project, issue)):
+                raise TeamError("Current human approval is missing or revoked; approve the unchanged issue before resuming")
             elif run.get("pr") and not self.reconcile(project, run):
                 pass
             else:
@@ -1355,6 +1410,8 @@ class Coordinator:
                         self.store.save(run, stage="stopped", next_stage=stage, in_flight=False,
                                         partial_result="Input changed during handoff; declare contributors and reselect")
                         return run
+                if run["issue"] is not None:
+                    self.store.save(run, approval=approval)
                 getattr(self, stage)(project, run)
                 if run.get("stop_after") and run["stage"] != stage:
                     performed = list(dict.fromkeys(run.get("performed_operations", []) + [stage]))
@@ -1373,16 +1430,18 @@ class Coordinator:
             if (run.get("stop_after") and run.get("git_metadata") and not run.get("pending_contribution")
                     and run["stage"] not in {"prepare", "blocked", "quota_wait", "closed", "merged"}):
                 self.store.save(run, evidence_context=self.evidence_context(project, run))
-            self.store.save(run, in_flight=False, quota_attempts=0)
+            self.store.save(run, in_flight=False, quota_attempts=0, capacity_attempts=0)
         except CapacityWait as exc:
             self.store.save(run, stage="quota_wait", resume_stage=stage, in_flight=False,
                             retry_at=exc.retry_at, error=str(exc))
         except QuotaError as exc:
-            attempts = run.get("quota_attempts", 0) + 1
-            waiting = attempts < project.get("max_quota_retries", 3)
+            transient = isinstance(exc, ModelCapacityError) and "capacity_cooldown" in project
+            counter = "capacity_attempts" if transient else "quota_attempts"
+            attempts = run.get(counter, 0) + 1
+            waiting = attempts < project.get("max_capacity_retries" if transient else "max_quota_retries", 3)
             self.store.save(run, stage="quota_wait" if waiting else "blocked", resume_stage=stage, in_flight=False,
-                            quota_attempts=attempts,
-                            retry_at=time.time() + project["quota_cooldown"],
+                            **{counter: attempts},
+                            retry_at=time.time() + project["capacity_cooldown" if transient else "quota_cooldown"],
                             error=str(exc) if waiting else "Subscription retries exhausted; explicit resume required")
         except ReentryRequired as exc:
             self.store.save(run, stage="stale" if exc.stale else "stopped", next_stage="validate",
@@ -1779,10 +1838,8 @@ class Coordinator:
         results = []
         for index, command in enumerate(project["tests"]):
             # Commands are supplied by the operator at registration, never by an agent or issue.
-            result = execute(["/bin/sh", "-c", command], cwd=cwd, env=worker_env(),
-                             timeout=project["timeout"], check=False)
+            result = self.validation_command(project, run, cwd, index, command)
             output = result.stdout + result.stderr
-            (self.store.artifacts(run) / f"test-{run['round']}-{index}.log").write_text(output)
             assert_metadata(cwd, baseline)
             assert_metadata(author, run["git_metadata"])
             # Evidence names the pins, so the companions must still be exactly the pinned commits.
@@ -1807,6 +1864,29 @@ class Coordinator:
                         validated_sha=sha, needs_revision=False,
                         evidence_retired=None, attributed_context=None,
                         stage=self.successor(run, "validate", "publish"))
+
+    def validation_command(self, project, run, cwd, index, command):
+        artifacts = self.store.artifacts(run) / f"test-{run['round']}-{index}-{time.time_ns()}"
+        artifacts.mkdir()
+        info = {"round": run["round"], "sha": run.get("sha"), "command": command,
+                "artifacts": str(artifacts), "started": time.time()}
+        self.store.record_event(run["id"], test_started=info)
+        started, result = time.monotonic(), None
+        try:
+            result = execute(["/bin/sh", "-c", command], cwd=cwd, env=worker_env(),
+                             timeout=project["timeout"], check=False,
+                             stdout_path=artifacts / "stdout.log", stderr_path=artifacts / "stderr.log")
+            return result
+        finally:
+            output = "".join(p.read_text(errors="replace") for p in
+                             (artifacts / "stdout.log", artifacts / "stderr.log") if p.exists())
+            # Adapter fixtures return strings without writing file handles.
+            if result:
+                output = result.stdout + result.stderr
+            (self.store.artifacts(run) / f"test-{run['round']}-{index}.log").write_text(output)
+            self.store.record_event(run["id"], test_finished={**info,
+                "duration_seconds": time.monotonic() - started,
+                "exit_code": result.returncode if result else None})
 
     def unmoved_validation(self, project, run, frozen, **result):
         """Refuse a result when the author checkout moved from `frozen`, its state after the candidate
@@ -1952,7 +2032,7 @@ class Coordinator:
                     and run.get("review_record") and run["review_record"]["report"]["verdict"] == "pass")
         if reviewed:
             writes = self.queue_writes(run, self.review_write(run, run["review_record"]))
-        if run["author_record"]["report"].get("responses") and run["round"] in run.get("authored_rounds", []):
+        if (run["author_record"]["report"].get("responses") or feedback_findings(run)) and run["round"] in run.get("authored_rounds", []):
             writes = self.queue_writes(dict(run, **writes), {
                 "type": "comment", "number": run["pr"], "marker": f"{run['id']}-response-{run['round']}-{sha}",
                 "body": response_comment(run, sha), "heading": f"Author response in `{sha}`"})
@@ -2030,6 +2110,7 @@ class Coordinator:
             raise TeamError("Review checkout changed; inspect before retry")
         diff, patch_evidence = review_patch(git, cwd, run["base_sha"], run["sha"],
                                             separator="..." if run.get("adopted_pr") else "..")
+        git_store = companions.git_tree(cwd)
         previous = previous_review(run)
         prompt = (GUIDANCE + self.style(project, "review") +
                   "Your summary and findings are published as the review comment.\n" + REVIEW_SCOPE +
@@ -2047,8 +2128,10 @@ class Coordinator:
                   f"Diff:\n{diff}")
         record = self.call_agent(run["reviewer"], "review", prompt, cwd,
                                  self.store.artifacts(run) / f"review-{run['round']}", project,
-                                 readable=companions.paths(root, pins))
+                                 readable=companions.paths(root, pins), reserved=True)
         assert_metadata(cwd, baseline)
+        if companions.git_tree(cwd) != git_store:
+            raise TeamError("Reviewer changed Git metadata or objects; evidence rejected; inspect retained artifacts")
         # The reviewer may run and write throwaway tests in this copy, so its working tree may be dirty.
         # The copy is never published; the commit it judged must still be the candidate.
         if git(cwd, "rev-parse", "HEAD") != run["sha"]:
@@ -2077,8 +2160,11 @@ class Coordinator:
         record = run.get("review_record")
         # A verdict persisted for this exact commit is reused after an interruption, never rerolled.
         if not (record and run.get("review_sha") == run["sha"]):
-            record = self.independent_review(project, run)
-            self.store.save(run, review_record=record, review_sha=run["sha"])
+            with self.subscription(run["reviewer"], project):
+                record = self.independent_review(project, run)
+            self.store.save(run, review_record=record, review_sha=run["sha"],
+                            review_history=run.get("review_history", []) + [{"round": run["round"],
+                                "sha": run["sha"], "base": run["base_sha"], "at": time.time(), "record": record}])
         self.record_review(project, run, record)
         self.recheck_adopted(project, run)
 
@@ -2139,7 +2225,7 @@ class Coordinator:
     @staticmethod
     def cleanup_allowed(project, run):
         """One cleanup round per run, for ordinary issue runs with revision budget left."""
-        return not (run.get("cleanup") or run.get("selection") or run.get("adopted_pr") or run.get("stop_after")
+        return project.get("minor_cleanup", True) and not (run.get("cleanup") or run.get("selection") or run.get("adopted_pr") or run.get("stop_after")
                     or run["round"] >= revision_limit(project, run))
 
     def finalize_rejection(self, project, run):

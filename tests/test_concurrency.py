@@ -19,6 +19,9 @@ class GitHub:
         return dict(number=number, title='Work', body='', state='open',
                     labels=[{'name': 'agent:ready'}])
 
+    def approval_evidence(self, project, issue):
+        return {"comment_id": 99, "user_id": 1, "login": "human", "created_at": "now", "updated_at": "now"}
+
     def authorized(self, project, issue):
         return True
 

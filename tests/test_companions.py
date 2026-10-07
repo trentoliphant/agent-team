@@ -89,7 +89,7 @@ class CompanionTests(unittest.TestCase):
         # Passes only in a checkout named `demo` with the pinned companion beside it.
         test = test or 'test "$(basename "$PWD")" = demo && test -f ../lib/lib.txt && test -f feature.txt'
         self.project = self.store.register("demo", "example/demo", "main", [test],
-                                           companions=companion_list,
+                                           companions=companion_list, max_revisions=2, minor_cleanup=True, status_mode="model",
                                            **({"companion_manifest": manifest} if manifest else {}))
         return self.project
 
@@ -424,9 +424,9 @@ class CompanionTests(unittest.TestCase):
         baselines = companions.populate(self.root, pins, 60)
         lib = self.root / "lib"
         git(lib, "replace", self.lib_v2, self.lib_v1)
-        # Git reads through the replacement return other contents under the pinned name.
+        # Coordinator Git reads ignore replacements even before the metadata guard rejects them.
         self.assertEqual(git(lib, "rev-parse", "HEAD"), self.lib_v2)
-        self.assertEqual(git(lib, "show", "HEAD:lib.txt"), "v1")
+        self.assertEqual(git(lib, "show", "HEAD:lib.txt"), "v2")
         self.assertEqual(companions.substitutions(lib), ["refs/replace"])
         with self.assertRaisesRegex(TeamError, "Companion example/lib changed"):
             companions.verify(self.root, pins, baselines)

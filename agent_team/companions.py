@@ -12,12 +12,10 @@ import re
 import stat
 import tempfile
 
-from .process import TeamError, assert_metadata, execute, git, metadata
+from .process import TeamError, assert_metadata, execute, git, metadata, substitutions
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVISION = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-# Files that make Git reads return other objects or history than the pinned commit's.
-SUBSTITUTES = ("info/grafts", "shallow", "objects/info/alternates", "objects/info/http-alternates")
 
 
 def basename(repo):
@@ -147,20 +145,6 @@ def git_tree(checkout):
     refs, grafts, alternates, and added or edited objects or refs all change it, even if they
     are removed after use: objects they wrote remain."""
     return tree(checkout / ".git", {"index"})
-
-
-def substitutions(checkout):
-    """Replacement refs, grafts, shallow boundaries, and alternate object stores, found on the
-    filesystem without running Git."""
-    root = checkout / ".git"
-    found = [rel for rel in SUBSTITUTES if os.path.lexists(root / rel)]
-    replace = root / "refs" / "replace"
-    if replace.is_symlink() or (replace.is_dir() and any(replace.rglob("*"))):
-        found.append("refs/replace")
-    packed = root / "packed-refs"
-    if packed.is_symlink() or (packed.is_file() and b" refs/replace/" in packed.read_bytes()):
-        found.append("packed-refs")
-    return found
 
 
 def replacement_refs(checkout):
