@@ -49,10 +49,18 @@ class Store:
         self.db.row_factory = sqlite3.Row
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
             row = self.db.execute("SELECT value FROM meta WHERE key='registry_version'").fetchone()
-            version = lambda v: tuple(int(x) for x in v.split(".")[:2])
-            if row and version(row[0]) > version(__version__):
+            def generation(value):
+                parts = value.split(".")[:2]
+                matches = [re.match(r"[0-9]+", p) for p in parts]
+                if len(matches) != 2 or not all(matches):
+                    raise TeamError("Registry version is unrecognized; use a newer compatible CLI")
+                return tuple(int(m[0]) for m in matches)
+            try:
+                if row and generation(row[0]) > generation(__version__):
+                    raise TeamError("Registry was written by a newer Agent Team generation; upgrade the CLI")
+            except TeamError:
                 self.db.close()
-                raise TeamError("Registry was written by a newer Agent Team version; upgrade the CLI")
+                raise
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -74,8 +82,10 @@ class Store:
                 self.db.execute("INSERT INTO runs SELECT * FROM issue_runs")
                 self.db.execute("DROP TABLE issue_runs")
         self.db.commit()
-        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('registry_version', ?)", (__version__,))
-        self.db.commit()
+        stamp = self.db.execute("SELECT value FROM meta WHERE key='registry_version'").fetchone()
+        if not stamp or stamp[0] != __version__:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES ('registry_version', ?)", (__version__,))
+            self.db.commit()
 
     @contextmanager
     def file_lock(self, name, shared=False):

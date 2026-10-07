@@ -7,7 +7,18 @@ isolated venv, installs that exact commit from public GitHub, and writes
 `agent-team-preview` in your user executable directory. It installs no skill or
 provider credentials. It makes no model calls and no GitHub writes.
 
-From this checkout, substitute the SHA from the PR:
+From a new directory, substitute the full reviewed SHA supplied in the PR. The
+same SHA selects the installer and the installed package:
+
+```sh
+git clone https://github.com/trentoliphant/agent-team.git agent-team-preview-source
+cd agent-team-preview-source
+git checkout --detach FULL_REVIEWED_COMMIT_SHA
+python3 scripts/install_preview.py --ref FULL_REVIEWED_COMMIT_SHA
+```
+
+After installation you can remove that source checkout; the installed command
+works from any directory. If you already have this preview checkout, use:
 
 ```sh
 python3 scripts/install_preview.py --ref FULL_REVIEWED_COMMIT_SHA
@@ -23,7 +34,9 @@ coordinate claims or locks with each other. Do not point an older CLI at preview
 state. Newer registry stamps are rejected by this version, but old releases do
 not understand the stamp. Updating this preview uses the same installer with a
 new reviewed SHA. Removing it means removing the wrapper and venv; retain state
-and artifacts if you want the history.
+and artifacts if you want the history. The default uninstall paths are
+`$HOME/.local/bin/agent-team-preview` and
+`$HOME/.local/share/agent-team-preview/venv`; retain the sibling `state` directory.
 
 Choose a repository you own and trust to execute locally, with a small open issue
 and clear acceptance criteria. Use its documented validation commands:
@@ -55,7 +68,10 @@ agent-team-preview trace RUN_ID
 Under a dedicated bot coordinator identity, `approve` intentionally fails. Use
 `agent-team-preview approval-text trial ISSUE_NUMBER`, copy its entire output
 into a **new** GitHub issue comment signed in as a configured human approver,
-and add `agent:ready` on GitHub. The comment must remain unedited. To renew an
+and add `agent:ready` on GitHub. CRLF line endings and trailing whitespace are normalized; all substantive text
+must exactly match the template. The comment must remain unedited. Edited 0.1
+approval comments (including those re-approved in place) need a new human approval
+after upgrading. To renew an
 approval, post a new comment. A quoted template or a bot-authored/edited comment
 cannot authorize execution. Active work rechecks approval before each stage;
 deleting it or removing its approver blocks further work. Removing the ready
@@ -90,7 +106,10 @@ and all workers continue sharing per-family locks. No automatic model/API switch
 
 `trace RUN_ID --json` exposes the durable reports and journal for further analysis.
 The human form lists approval, model rounds, findings and responses, configured
-validation (including omitted commands), attempts, stage time and artifact paths.
+validation (including omitted commands), attempts, stage time and artifact paths. Author
+rounds distinguish their input commit from the subsequent candidate. Missing
+responses remain recorded after validation and readiness; validation-only
+feedback does not create a missing review response.
 It is a local snapshot; it does not verify current remote state or certify that
 an author's response resolved a finding. Missing legacy history is marked as
 unrecorded. Unique per-attempt stdout/stderr logs retain partial output on timeouts

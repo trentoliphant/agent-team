@@ -112,7 +112,8 @@ adoption is a separate companion feature. No partial operation permits merging.
 ## Human issue approval in 0.2
 
 Configured approvers resolve to immutable numeric GitHub User IDs. Approval
-evidence requires exact template equality and nonempty equal creation/update
+evidence requires exact template equality after normalizing CRLF line endings
+and trailing whitespace and nonempty equal creation/update
 timestamps plus GraphQL `lastEditedAt == null` (REST timestamps have second
 precision). The GraphQL reread must match the same human author and exact body;
 quoting a template or editing another person's comment cannot grant

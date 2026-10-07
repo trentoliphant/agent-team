@@ -110,6 +110,12 @@ class GitHub:
         self.api(f"repos/{project['repo']}/issues/{number}/labels", "POST", {"labels": [project["ready_label"]]})
         return {"issue": number, "digest": issue_fingerprint(issue), "approver": actor["login"]}
 
+    @staticmethod
+    def normalized_approval(body):
+        # Browser paste/form encoding may use CRLF or append whitespace. Interior
+        # text and the marker remain exact: quoting or adding claims still fails.
+        return body.replace("\r\n", "\n").rstrip() if isinstance(body, str) else ""
+
     def approval_evidence(self, project, issue):
         trusted = {u["id"] for u in self.trusted_approvers(project)}
         text = self.approval_text(issue)
@@ -117,7 +123,7 @@ class GitHub:
         for comment in reversed(comments):
             user = comment.get("user") or {}
             if (user.get("type") == "User" and type(user.get("id")) is int and user["id"] in trusted
-                    and comment.get("body") == text and comment.get("created_at")
+                    and self.normalized_approval(comment.get("body")) == text and comment.get("created_at")
                     and comment["created_at"] == comment.get("updated_at")):
                 # REST timestamps have second precision. GraphQL records edits even within
                 # the creation second, and binds the reread to the same author and body.
@@ -130,7 +136,7 @@ class GitHub:
                 node = (result.get("data") or {}).get("node") or {}
                 author = node.get("author") or {}
                 if (result.get("errors") or "lastEditedAt" not in node or node["lastEditedAt"] is not None
-                        or node.get("body") != text or author.get("__typename") != "User"
+                        or self.normalized_approval(node.get("body")) != text or author.get("__typename") != "User"
                         or author.get("databaseId") != user["id"]):
                     continue
                 return {"comment_id": comment["id"], "user_id": user["id"], "login": user["login"],

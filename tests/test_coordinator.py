@@ -2220,7 +2220,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("opens a local network port cannot pass here", self.agents.prompts["review"])
         prompt = self.agents.prompts["implement"]
         self.assertIn("The PR description is already written", prompt)
-        self.assertIn("Findings from earlier rounds, already answered; keep those fixes in place:\n"
+        self.assertIn("Findings from earlier rounds; keep existing fixes and note any unanswered or disputed requests:\n"
                       "- revision 0, feature.txt:1: Fix the bug", prompt)
         self.assertIn('"request": "Add a test"', prompt)  # the latest feedback, in full
         self.assertIn("return one responses entry", prompt)

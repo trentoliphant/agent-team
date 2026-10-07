@@ -35,7 +35,10 @@ Logins resolve to immutable numeric User IDs, so renaming a login does not trans
 trust. Under a bot coordinator identity, use `approval-text PROJECT ISSUE`; a human
 posts its output verbatim as a new GitHub issue comment and adds the ready label.
 Legacy personal registrations without a list trust their authenticated User
-identity. Legacy bot-approved queued and active work requires new human approval.
+identity. Legacy bot-approved queued and active work requires new human approval. Edited
+0.1 approvals, including re-approvals made in place, also need a new human comment.
+Browser CRLF line endings and trailing whitespace are normalized; substantive
+template text must remain exact in both REST and GraphQL reads.
 GitHub machine-user PATs have User type; exclude them from the trusted list.
 Shared human credentials cannot prove human intent. Use a dedicated coordinator
 identity and enforce human merges with repository branch rules.

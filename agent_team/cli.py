@@ -420,8 +420,9 @@ def dispatch(args, store):
 def main(argv=None):
     os.umask(0o077)
     args = parser().parse_args(argv)
-    store = Store(args.home)
+    store = None
     try:
+        store = Store(args.home)
         if args.command in {"continue", "resume", "close", "decide", "adopt", "refresh"}:
             with store.repository_lock(store.get(args.run_id)["project"]):
                 code = dispatch(args, store)
@@ -457,5 +458,6 @@ def main(argv=None):
         print("Stopped. State retained; inspect before resuming.", file=sys.stderr)
         code = 130
     finally:
-        store.db.close()
+        if store is not None:
+            store.db.close()
     raise SystemExit(code)

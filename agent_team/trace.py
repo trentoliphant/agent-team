@@ -3,16 +3,21 @@ from .evidence import validation_checks
 
 
 def trace_report(store, run):
-    context = {"round": 0, "sha": None, "review_sha": None}
+    context = {"round": 0, "sha": None, "review_sha": None, "base_sha": None}
     authors, reviews, calls, tests, timings = [], [], {}, {}, []
     for event in store.events(run["id"]):
         changes = event["changes"]
         context.update({k: changes[k] for k in context if k in changes})
+        if changes.get("sha"):
+            for author in authors:
+                if author["round"] == context["round"] and author["sha"] is None:
+                    author["sha"] = changes["sha"]
         for key, target in (("author_record", authors), ("review_record", reviews)):
             record = changes.get(key)
             if record:
                 target.append({"at": event["at"], "round": context["round"],
-                               "sha": context["review_sha"] if key == "review_record" else context["sha"],
+                               "sha": context["review_sha"] if key == "review_record" else None,
+                               "input_sha": context["sha"] or context["base_sha"] if key == "author_record" else None,
                                "record": record})
         for prefix, target in (("call", calls), ("test", tests)):
             for suffix in ("started", "finished"):
@@ -25,13 +30,26 @@ def trace_report(store, run):
     for key, target in (("author_record", authors), ("review_record", reviews)):
         if not target and run.get(key):
             target.append({"at": None, "round": run["round"], "sha": run.get("review_sha")
-                           if key == "review_record" else run.get("sha"), "record": run[key]})
+                           if key == "review_record" else None, "input_sha": None, "record": run[key]})
     current = run.get("review_record") or {}
     current_findings = (current.get("report") or {}).get("findings", [])
-    feedback = (run.get("cleanup") or ((run.get("revision_history") or [None])[-1])) or {}
-    expected = feedback.get("findings", []) if run.get("needs_revision") or run.get("cleanup") else []
     responses = ((run.get("author_record") or {}).get("report") or {}).get("responses", [])
-    answered = {r["finding"].strip() for r in responses}
+    feedback = [e for e in run.get("revision_history", []) if e.get("kind") == "review"]
+    if run.get("cleanup"):
+        feedback.append(run["cleanup"])
+    response_history = []
+    for entry in feedback:
+        expected = [f for f in (entry.get("review_report") or {"findings": entry.get("findings", [])})["findings"]
+                    if f.get("severity") in {"blocking", "minor"}]
+        round_ = entry.get("round")
+        response_round = round_ + 1 if round_ is not None else None
+        replying = [a for a in authors if a["round"] == response_round] or [None]
+        for author in replying:
+            replies = (author["record"]["report"].get("responses") or []) if author else []
+            locations = {" ".join(r["finding"].split()) for r in replies}
+            response_history.append({"round": response_round, "sha": author["sha"] if author else None,
+                "author_report_recorded": author is not None, "findings": expected, "responses": replies,
+                "unanswered": [f for f in expected if " ".join(f["location"].split()) not in locations]})
     return {
         "id": run["id"], "project": run["project"], "issue": run["issue"], "title": run["title"],
         "stage": run["stage"], "in_flight": run.get("in_flight", False), "round": run["round"], "pr": run.get("pr"),
@@ -43,7 +61,8 @@ def trace_report(store, run):
         "authors": authors, "reviews": reviews, "calls": list(calls.values()),
         "test_attempts": list(tests.values()), "timings": timings,
         "current_findings": current_findings, "responses": responses,
-        "unanswered_findings": [f for f in expected if f["location"].strip() not in answered],
+        "response_history": response_history,
+        "unanswered_findings": [f for e in response_history for f in e["unanswered"]],
         "superseded_evidence": run.get("superseded_evidence", []),
         "revision_history": run.get("revision_history", []), "decisions": run.get("decisions", []),
         "artifacts": str(store.run_root(run) / "artifacts"),
@@ -66,18 +85,23 @@ def format_trace(report):
             record = entry["record"]
             body = record["report"]
             lines += ["", f"{kind[:-1].capitalize()} round {entry['round']} · {record.get('family', 'unrecorded family')}"
-                      f" · {entry['sha'] or 'uncommitted work'}", body.get("summary", "")]
+                      f" · {entry['sha'] or 'commit not recorded'}", body.get("summary", "")]
             lines.append(f"CLI: {record.get('cli_version', 'not recorded')} · requested model: "
                          f"{record.get('requested_model', 'not recorded')} · observed: "
                          + (", ".join(record.get('observed_models') or []) or "not reported"))
+            if kind == "authors":
+                lines.append(f"Written against: {entry.get('input_sha') or 'not recorded'} · "
+                             f"candidate after author report: {entry['sha'] or 'not recorded'}")
             if body.get("limitations"):
                 lines.append("Limitations: " + body["limitations"])
             for response in body.get("responses", []):
                 lines.append(f"Response {response['finding']}: {response['response']}")
             for finding in body.get("findings", []):
                 lines.append(f"{finding['severity']} · {finding['location']}: {finding['evidence']} → {finding['request']}")
-    for finding in report["unanswered_findings"]:
-        lines.append(f"No response matched by location: {finding['location']} → {finding['request']}")
+    for entry in report["response_history"]:
+        for finding in entry["unanswered"]:
+            lines.append(f"Author round {entry['round']}: No response matched by location: "
+                         f"{finding['location']} → {finding['request']}")
     lines += ["", "Configured validation:"]
     for test in report["tests"]:
         lines.append(f"  {test['command']}: " + (f"exit {test['exit_code']}" if test["performed"] else "not performed"))
@@ -92,7 +116,9 @@ def format_trace(report):
             lines.append(f"  CLI-reported tokens (not subscription billing): {record['usage']}")
         lines.append("  " + call["artifacts"])
     for test in report["test_attempts"]:
-        lines.append(f"Test attempt round {test['round']}: {test['command']} · exit {test.get('exit_code', 'interrupted')}"
+        exit_text = f"exit {test['exit_code']}" if test.get("exit_code") is not None else (
+            "no exit code (" + test.get("outcome", "running or interrupted") + ")")
+        lines.append(f"Test attempt round {test['round']}: {test['command']} · {exit_text}"
                      + (f" · {test['duration_seconds']:.1f}s" if "duration_seconds" in test else ""))
         lines.append("  " + test["artifacts"])
     lines += ["", "Stage timing:"]

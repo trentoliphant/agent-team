@@ -1,5 +1,6 @@
 """Provider-free acceptance coverage for the human-first preview."""
 import json
+import io
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -9,8 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from agent_team.agents import Agents
-from agent_team.cli import dispatch, parser
-from agent_team.coordinator import Coordinator, outcome_comment
+from agent_team.cli import dispatch, parser, main
+from agent_team.coordinator import Coordinator, outcome_comment, feedback_findings, response_comment
 from agent_team.github import GitHub
 from agent_team.process import execute, metadata, TeamError, ModelCapacityError, QuotaError
 from agent_team.state import CapacityWait, Store
@@ -68,6 +69,12 @@ class ApprovalTests(unittest.TestCase):
             with self.subTest(value=value), patch.object(self.github,'pages',return_value=[self.comment]), \
                     patch.object(self.github,'api',return_value={'data':{'node':value}}):
                 self.assertFalse(self.github.authorized(self.project,self.issue))
+
+    def test_browser_line_endings_and_trailing_whitespace_preserve_exact_template(self):
+        self.comment['body'] = self.comment['body'].replace('\n','\r\n') + '\r\n  \t'
+        self.assertTrue(self.authorized())
+        self.comment['body'] = ' ' + self.comment['body']
+        self.assertFalse(self.authorized())
 
     def test_bot_or_untrusted_user_cannot_approve_before_any_write(self):
         for actor in ({'id': 7, 'type': 'Bot', 'login': 'worker[bot]'},
@@ -170,6 +177,12 @@ class ProcessTests(unittest.TestCase):
             for text, error in (('Selected model is at capacity', ModelCapacityError), ('Rate limit exceeded', QuotaError)):
                 with self.assertRaises(error):
                     call([{**final, 'is_error': True, 'result': text}])
+    def test_mixed_capacity_and_subscription_messages_keep_long_quota_classification(self):
+        for text in ('Usage limit reached; model is at capacity', 'Model is at capacity; rate limit exceeded'):
+            with self.subTest(text=text), self.assertRaises(QuotaError) as error:
+                Agents.raise_failure(text)
+            self.assertNotIsInstance(error.exception,ModelCapacityError)
+
 
 
 class RegistryTests(unittest.TestCase):
@@ -198,6 +211,50 @@ class RegistryTests(unittest.TestCase):
             db = sqlite3.connect(Path(temp)/'state.sqlite3')
             self.addCleanup(db.close)
             self.assertEqual(db.execute("SELECT value FROM meta WHERE key='registry_version'").fetchone()[0], '9.0.0')
+
+    def test_registry_suffix_and_unrecognized_stamps_fail_cleanly_in_cli(self):
+        for stamp in ('1.0rc1','future'):
+            with self.subTest(stamp=stamp), tempfile.TemporaryDirectory() as temp:
+                store=Store(temp)
+                store.db.execute("UPDATE meta SET value=? WHERE key='registry_version'",(stamp,))
+                store.db.commit();store.db.close()
+                error=io.StringIO()
+                with patch('sys.stderr',error), self.assertRaises(SystemExit) as exit_code:
+                    main(['--home',temp,'status'])
+                self.assertEqual(exit_code.exception.code,1)
+                self.assertIn('newer',error.getvalue())
+                self.assertNotIn('Traceback',error.getvalue())
+
+    def test_read_only_reopen_does_not_rewrite_unchanged_version_stamp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store=Store(temp)
+            store.db.executescript("CREATE TABLE stamp_writes(value TEXT); CREATE TRIGGER record_stamp AFTER INSERT ON meta "
+                                   "WHEN NEW.key='registry_version' BEGIN INSERT INTO stamp_writes VALUES(NEW.value); END;")
+            store.db.close()
+            store=Store(temp)
+            self.addCleanup(store.db.close)
+            self.assertEqual(store.db.execute('SELECT count(*) FROM stamp_writes').fetchone()[0],0)
+
+    def test_mixed_legacy_and_new_review_history_counts_every_review_once(self):
+        blocking={'severity':'blocking','location':'a:1','evidence':'bad','request':'fix'}
+        minor={'severity':'minor','location':'b:1','evidence':'style','request':'rename'}
+        first={'verdict':'changes_requested','summary':'bad','findings':[blocking]}
+        final={'verdict':'pass','summary':'ok','findings':[minor]}
+        run={'id':'r','round':1,'sha':'B','published_sha':'B','reviewed_sha':'B','review_sha':'B',
+             'revision_history':[{'kind':'review','round':0,'sha':'A','review_report':first,'findings':[blocking]}],
+             'review_history':[{'round':0,'sha':'A','record':{'report':first}},
+                               {'round':1,'sha':'B','record':{'report':final}}],
+             'review_record':{'report':final}}
+        self.assertIn('2 (1 blocking, 1 minor)',outcome_comment(run,'merged'))
+        run['review_history']=run['review_history'][1:]  # first review predates 0.2
+        self.assertIn('2 (1 blocking, 1 minor)',outcome_comment(run,'merged'))
+
+    def test_validation_feedback_is_not_a_missing_review_response(self):
+        run={'round':1,'author':'codex','author_record':{'report':{'responses':[]}},
+             'revision_history':[{'round':0,'kind':'validation','findings':[{'severity':'validation',
+                 'location':'false','request':'Make command pass'}]}]}
+        self.assertEqual(feedback_findings(run),[])
+        self.assertNotIn('No response matched',response_comment(run,'B'))
 
     def test_watch_advances_progress_and_polls_pending_capacity_and_flapping(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -372,6 +429,43 @@ class PreviewWorkflowTests(unittest.TestCase):
         run=self.team.resume(run['id'])
         self.assertEqual(run['capacity_attempts'],0)
 
+    def test_multi_round_trace_binds_candidates_and_preserves_unanswered_after_readiness(self):
+        self.preview()
+        self.agents.reject=1
+        run=self.tick(10)
+        self.assertEqual(run['stage'],'ready')
+        trace=trace_report(self.store,run)
+        authors={a['round']:a for a in trace['authors']}
+        first=run['revision_history'][0]['sha']
+        self.assertEqual(authors[0]['sha'],first)
+        self.assertEqual(authors[1]['input_sha'],first)
+        self.assertEqual(authors[1]['sha'],run['sha'])
+        self.assertFalse(run['needs_revision'])
+        self.assertEqual(trace['unanswered_findings'][0]['location'],'feature.txt:1')
+        self.assertIn('Author round 1: No response matched',format_trace(trace))
+        self.assertEqual(sum('approval' in e['changes'] for e in self.store.events(run['id'])),1)
+
+    def test_validation_only_revision_does_not_publish_unmatched_response_comment(self):
+        self.project['tests']=['false'];self.store.save_project(self.project)
+        self.assertEqual(self.tick(3)['stage'],'implement')
+        self.project['tests']=['test -f feature.txt'];self.store.save_project(self.project)
+        run=self.tick(5)
+        self.assertEqual(run['stage'],'ready')
+        self.assertFalse(any('-response-' in marker for _,marker in self.github.comments))
+        self.assertEqual(trace_report(self.store,run)['unanswered_findings'],[])
+
+    def test_validation_timeout_trace_retains_reason_and_partial_output(self):
+        run=self.tick()
+        with self.assertRaisesRegex(TeamError,'Timed out'):
+            self.team.validation_command({'timeout':.2},run,self.store.workspace(run),0,'printf partial; sleep 10')
+        trace=trace_report(self.store,run)
+        self.assertIsNone(trace['test_attempts'][0]['exit_code'])
+        self.assertIn('Timed out',trace['test_attempts'][0]['outcome'])
+        text=format_trace(trace)
+        self.assertIn('no exit code',text)
+        self.assertNotIn('exit None',text)
+        self.assertEqual((Path(trace['test_attempts'][0]['artifacts'])/'stdout.log').read_text(),'partial')
+
     def test_live_attempt_is_not_mislabeled_as_interrupted(self):
         run = self.tick()
         self.store.record_event(run['id'],call_started={'agent':'codex','role':'implement','round':0,
@@ -385,7 +479,7 @@ class PreviewWorkflowTests(unittest.TestCase):
     def test_legacy_trace_marks_missing_information_and_unanswered_findings(self):
         run=self.tick()
         finding={'severity':'blocking','location':'file:1','evidence':'bad','request':'fix'}
-        self.store.save(run,needs_revision=True,revision_history=[{'findings':[finding]}],
+        self.store.save(run,round=1,needs_revision=True,revision_history=[{'kind':'review','round':0,'findings':[finding]}],
                         author_record={'report':{'summary':'old','limitations':'','responses':[]}})
         trace=trace_report(self.store,run)
         self.assertEqual(trace['unanswered_findings'],[finding])

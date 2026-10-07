@@ -207,8 +207,8 @@ class Agents:
 
     @staticmethod
     def raise_failure(text):
-        # "Selected model is at capacity" is the provider being busy, not a failed run: wait and retry.
-        if re.search(r"(?:selected )?model is at capacity", text, re.I):
-            raise ModelCapacityError("Selected model is temporarily at capacity; retrying without model or API fallback")
+        # Exhaustion or ambiguous mixed messages keep the longer subscription wait.
         if re.search(r"usage limit|rate.?limit|quota (?:exceeded|exhausted)|hit your limit|insufficient_quota", text, re.I):
             raise QuotaError("Subscription capacity unavailable; queued for retry without API fallback")
+        if re.search(r"(?:selected )?model is at capacity", text, re.I):
+            raise ModelCapacityError("Selected model is temporarily at capacity; retrying without model or API fallback")
