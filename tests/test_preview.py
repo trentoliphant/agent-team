@@ -50,8 +50,8 @@ class ApprovalTests(unittest.TestCase):
         mutations = [('user', {'id': 7, 'type': 'Bot', 'login': 'maintainer'}),
                      ('updated_at', 'later'), ('body', '> ' + original['body']),
                      ('body', original['body'] + '\nI am quoting this template.'),
-                     ('created_at', None), ('body', original['body'].replace('Acceptance', 'different'))]
-        for key, value in mutations[:-1]:
+                     ('created_at', None)]
+        for key, value in mutations:
             with self.subTest(key=key, value=value):
                 self.comment = {**original, key: value}
                 self.assertFalse(self.authorized())
@@ -263,8 +263,9 @@ class PreviewWorkflowTests(unittest.TestCase):
         run = stages[-1]
         self.assertEqual(run['stage'],'ready')
         self.assertEqual(len(self.agents.calls),2)
-        self.assertTrue(all(r['progressed'] for r in stages[:-1]))
-        self.assertFalse(run['progressed'])
+        self.assertTrue(all(r.progressed for r in stages[:-1]))
+        self.assertFalse(run.progressed)
+        self.assertEqual(self.store.get(run['id']),run)
         self.assertNotIn('cleanup',run)
         trace = trace_report(self.store,run)
         self.assertEqual(len(trace['calls']),2)
@@ -370,6 +371,16 @@ class PreviewWorkflowTests(unittest.TestCase):
                 self.store.save(run,retry_at=0)
         run=self.team.resume(run['id'])
         self.assertEqual(run['capacity_attempts'],0)
+
+    def test_live_attempt_is_not_mislabeled_as_interrupted(self):
+        run = self.tick()
+        self.store.record_event(run['id'],call_started={'agent':'codex','role':'implement','round':0,
+                                                       'artifacts':'attempt','sha':None})
+        self.store.save(run,in_flight=True)
+        trace=trace_report(self.store,run)
+        self.assertTrue(trace['in_flight'])
+        self.assertIn('running or interrupted',format_trace(trace))
+        self.assertNotIn('interrupted; inspect recovery state',format_trace(trace))
 
     def test_legacy_trace_marks_missing_information_and_unanswered_findings(self):
         run=self.tick()

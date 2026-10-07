@@ -34,7 +34,7 @@ def trace_report(store, run):
     answered = {r["finding"].strip() for r in responses}
     return {
         "id": run["id"], "project": run["project"], "issue": run["issue"], "title": run["title"],
-        "stage": run["stage"], "round": run["round"], "pr": run.get("pr"),
+        "stage": run["stage"], "in_flight": run.get("in_flight", False), "round": run["round"], "pr": run.get("pr"),
         "approval": run.get("approval"), "candidate": run.get("sha"), "published": run.get("published_sha"),
         "validated": run.get("validated_sha"), "reviewed": run.get("reviewed_sha"),
         "review_sha": run.get("review_sha"), "evidence_retired": run.get("evidence_retired"),
@@ -86,7 +86,7 @@ def format_trace(report):
         duration = call.get("duration_seconds")
         record = call.get("record") or {}
         lines.append(f"  {call['role']} · {call['agent']} · round {call['round']} · "
-                     f"{call.get('outcome', 'interrupted; inspect recovery state')} · "
+                     f"{call.get('outcome', 'no finish recorded (running or interrupted)')} · "
                      + (f"{duration:.1f}s" if duration is not None else "duration not recorded"))
         if record.get("usage") is not None:
             lines.append(f"  CLI-reported tokens (not subscription billing): {record['usage']}")

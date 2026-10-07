@@ -19,6 +19,13 @@ from .state import ACTIVE, RECOVERY, CapacityWait, issue_fingerprint
 from .writing import DEFAULTS, effective, guidance
 from .pull_requests import PR_GRANTS, PR_MODES, REFUSED_REVISION, PullRequests, closure, pull_number
 
+
+class TickResult(dict):
+    """Run snapshot with ephemeral watch metadata outside serialized/persisted state."""
+    def __init__(self, run, progressed):
+        super().__init__(run)
+        self.progressed = progressed
+
 # Operator decisions at a handoff. Extensions are finite and must be authorized again when used up.
 ACTIONS = ("extend", "repair", "rescope", "stop")
 MAX_EXTENSION = 3
@@ -1090,7 +1097,7 @@ class Coordinator:
                 previous = before.get(result.get("id"), "prepare")
                 progressed = (result["stage"] in ACTIVE and result["stage"] != previous
                               and previous in ACTIVE and not result.get("error"))
-                return dict(result, progressed=progressed)
+                return TickResult(result, progressed)
             finally:
                 # Additive journal entries do not change run state or recovery decisions.
                 if result and result.get("id"):

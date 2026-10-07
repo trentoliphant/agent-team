@@ -344,7 +344,7 @@ def dispatch(args, store):
                     "stopped", "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
                     "idle"}):
                 break
-            if value.get("progressed") and immediate < 12:
+            if getattr(value, "progressed", value.get("progressed", False)) and immediate < 12:
                 immediate += 1
             else:
                 immediate = 0
