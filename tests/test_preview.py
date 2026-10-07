@@ -16,6 +16,7 @@ from agent_team.github import GitHub
 from agent_team.process import execute, metadata, TeamError, ModelCapacityError, QuotaError
 from agent_team.state import CapacityWait, Store
 from agent_team.trace import trace_report, format_trace
+from scripts.install_preview import main as install_preview
 import test_coordinator as workflow
 
 
@@ -112,6 +113,25 @@ class ApprovalTests(unittest.TestCase):
             api.assert_not_called()
             self.github.comment('owner/repo', 1, 'x', 'Changed')
             api.assert_called_once()
+
+
+class InstallerTests(unittest.TestCase):
+    def test_same_version_preview_updates_reinstall_the_requested_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            prefix, bin_dir = Path(temp).resolve()/'preview', Path(temp).resolve()/'bin'
+            for sha in ('a'*40,'b'*40):
+                with patch('sys.argv',['install_preview.py','--ref',sha,'--prefix',str(prefix),
+                                       '--bin-dir',str(bin_dir)]), patch('sys.stdout',io.StringIO()), \
+                        patch('scripts.install_preview.venv.EnvBuilder') as builder, \
+                        patch('scripts.install_preview.subprocess.run') as command:
+                    install_preview()
+                builder.return_value.create.assert_called_once_with(prefix/'venv')
+                args = command.call_args.args[0]
+                self.assertIn('--force-reinstall',args)
+                self.assertEqual(args[-1],f'git+https://github.com/trentoliphant/agent-team.git@{sha}')
+                wrapper = (bin_dir/'agent-team-preview').read_text()
+                self.assertIn(str(prefix/'state'),wrapper)
+                self.assertIn(str(prefix/'venv/bin/agent-team'),wrapper)
 
 
 class ProcessTests(unittest.TestCase):

@@ -24,7 +24,9 @@ def main():
             parser.error(f'Refusing to replace an unrelated command: {command}')
     environment = prefix/'venv'
     venv.EnvBuilder(with_pip=True).create(environment)
-    subprocess.run([str(environment/'bin/python'), '-m', 'pip', 'install', '--upgrade',
+    # Several reviewed preview commits can have the same package version. Pip's
+    # normal upgrade path may keep the old commit when the version is unchanged.
+    subprocess.run([str(environment/'bin/python'), '-m', 'pip', 'install', '--upgrade', '--force-reinstall',
                     f'git+https://github.com/trentoliphant/agent-team.git@{args.ref}'], check=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
     # Quote paths as shell code; the wrapper pins its state regardless of the caller's directory.

@@ -52,8 +52,8 @@ and bounded retries. No merge operation will be added.
 
 ## Review and acceptance
 
-Claude Opus 5.5 will independently review this plan before runtime changes and
-review the final candidate in a fresh session/checkout. Amend the plan when review
+Claude Opus 5.5 will independently review this plan before runtime changes. Claude
+Opus 5.5 or Fable 5.1 will review the final candidate in a fresh session/checkout. Amend the plan when review
 finds a material gap. Publish only after the full checks and independent review
 pass; final merging remains human. Do not run live autonomous target-project
 work or fabricate issue approval as part of testing.
