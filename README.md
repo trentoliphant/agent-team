@@ -20,6 +20,14 @@ API SDKs, server, or repository-installed agent framework.
   pause/resume, and read-only discovery that opens issues for human triage.
 - Never merges PRs, enables auto-merge, closes GitHub issues, or changes branch rules.
 
+## Preview on another project
+
+The [0.2 preview guide](docs/preview.md) explains the isolated
+`agent-team-preview` command, pinned installation, human approval, and a complete
+issue-to-PR trial. You can evaluate an unmerged version without replacing stable.
+New projects get four correction rounds, template status, and no automatic minor
+cleanup. Legacy registrations retain their policy until explicitly configured.
+
 ## Install
 
 Install Python 3.11+, Git, the [GitHub CLI](https://cli.github.com/),
@@ -127,6 +135,7 @@ write any project files. Register only repositories you trust to execute locally
 
 ```sh
 agent-team project add example your-account/your-repo \
+  --approver your-human-github-login \
   --test 'python3 -m unittest discover -s tests -v'
 agent-team project setup example
 agent-team project show example
@@ -181,16 +190,18 @@ Runs created before a project had companions cannot use them; close them and
 open a new linked issue.
 
 Choose a small GitHub issue with clear acceptance criteria, then approve its
-current content. Approval records a SHA-256 fingerprint in a GitHub comment and
+current content as a configured human approver. Approval creates an unedited
+exact-template comment from that human GitHub user ID and records a SHA-256 fingerprint, then
 adds `agent:ready`. Both the matching approval and label are required. A label
 alone cannot authorize a task that someone edits later.
 
 ```sh
 agent-team approve example 123   # authorize issue #123 as currently written
 agent-team run example           # advance one durable stage
-agent-team run example --watch   # poll every 30 seconds; Ctrl-C stops
+agent-team run example --watch   # advance on progress; poll waits every 30s; Ctrl-C stops
 agent-team status
 agent-team inspect RUN_ID
+agent-team trace RUN_ID           # local human development history
 ```
 
 The sequence is:
@@ -462,7 +473,10 @@ restores detailed ones for one project.
 
 When the effective shared or `status` instructions differ from the built-in
 defaults, the run's author agent rewrites each status update to follow them.
-For example, `agent-team writing set --project example --kind status
+New registrations use deterministic status text. Enable optional model drafts
+with `agent-team project configure example --status-mode model`; custom status
+instructions otherwise do not invoke a model. Legacy projects keep their existing
+behavior. For example, `agent-team writing set --project example --kind status
 --instructions 'Write in Spanish.'` changes that project's issue progress and
 ready comments. The coordinator publishes the agent's wording first, then the
 compact template's facts and safeguards unchanged. Each rewrite is an extra

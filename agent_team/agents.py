@@ -1,9 +1,11 @@
 """Subscription-only adapters for official local CLIs."""
+import copy
 import json
 from pathlib import Path
 import re
+import time
 
-from .process import execute, worker_env, TeamError, QuotaError
+from .process import execute, worker_env, TeamError, QuotaError, ModelCapacityError
 
 FAMILIES = {"codex": "openai", "claude": "anthropic"}
 # A blocking finding must be fixed before the change is ready; a minor one does not hold it back.
@@ -92,12 +94,21 @@ def subscription_status(agent):
 
 
 class Agents:
-    def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
+    def run(self, agent, role, prompt, cwd, artifacts, project, readable=(), response_locations=()):
         """`readable` lists coordinator-populated directories outside `cwd`, such as companion
         checkouts, that the agent must be able to inspect."""
+        if not isinstance(response_locations, (list, tuple)) or any(
+                not isinstance(location, str) for location in response_locations):
+            raise TeamError("Response locations must be a list or tuple of strings")
+        if response_locations and role != "implement":
+            raise TeamError("Response locations apply only to implementation reports")
+        locations = list(dict.fromkeys(response_locations))
         version = subscription_status(agent)
         schema = {"implement": AUTHOR_SCHEMA, "review": REVIEW_SCHEMA,
                   "discover": DISCOVERY_SCHEMA, "status": STATUS_SCHEMA}[role]
+        if locations:
+            schema = copy.deepcopy(schema)
+            schema["properties"]["responses"]["items"]["properties"]["finding"]["enum"] = locations
         artifacts = Path(artifacts)
         artifacts.mkdir(parents=True, exist_ok=True)
         schema_file = artifacts / "schema.json"
@@ -128,7 +139,8 @@ class Agents:
                     "--mcp-config", '{"mcpServers":{}}', "--setting-sources", "",
                     "--no-session-persistence", "--permission-mode", "dontAsk",
                     "--tools", toolset, "--allowedTools", toolset,
-                    "--max-turns", "120" if commands else "40", "-p", "--output-format", "json",
+                    "--max-turns", "120" if commands else "40", "-p", "--output-format", "stream-json",
+                    "--verbose", "--include-partial-messages",
                     "--json-schema", json.dumps(schema)]
             if commands:
                 # Bash is named in --tools, so restricted mode keeps it; it runs only inside the sandbox.
@@ -144,13 +156,24 @@ class Agents:
             if model:
                 args += ["--model", model]
         (artifacts / "prompt.txt").write_text(prompt)
+        started = time.monotonic()
         result = execute(args, cwd=cwd, env=env, input=prompt,
-                         timeout=project["timeout"], check=False)
+                         timeout=project["timeout"], check=False,
+                         stdout_path=artifacts / "stdout.log", stderr_path=artifacts / "stderr.log")
+        duration = time.monotonic() - started
         (artifacts / "stdout.log").write_text(result.stdout)
         (artifacts / "stderr.log").write_text(result.stderr)
         if agent == "claude":
             try:
-                envelope = json.loads(result.stdout)
+                messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+                if not messages or any(not isinstance(m, dict) for m in messages):
+                    raise ValueError("Invalid stream")
+                finals = [m for m in messages if m.get("type") == "result"]
+                # Accept the legacy single-envelope format for fixtures/older compatible CLIs.
+                envelope = finals[0] if len(finals) == 1 and messages[-1] is finals[0] else (
+                    messages[0] if len(messages) == 1 and "type" not in messages[0] else None)
+                if envelope is None:
+                    raise ValueError("Missing or ambiguous final result")
             except ValueError as exc:
                 if result.returncode:
                     self.raise_failure(result.stderr)
@@ -161,6 +184,7 @@ class Agents:
                 raise TeamError("Claude run failed; inspect local logs")
             report = envelope.get("structured_output")
             models = list(envelope.get("modelUsage", {}))
+            usage = envelope.get("usage")
         else:
             events = []
             for line in result.stdout.splitlines():
@@ -179,6 +203,14 @@ class Agents:
             except ValueError as exc:
                 raise TeamError("Codex returned malformed JSON") from exc
             models = sorted({e["model"] for e in events if isinstance(e.get("model"), str)})
+            usage = [e["usage"] for e in events if e.get("type") == "turn.completed" and "usage" in e] or None
+        # Keep a refused response's error short; generic verdict/severity enum errors
+        # retain their existing wording. Raw output remains in the attempt artifacts.
+        if locations and isinstance(report, dict) and isinstance(report.get("responses"), list):
+            for response in report["responses"]:
+                if (isinstance(response, dict) and isinstance(response.get("finding"), str)
+                        and response["finding"] not in locations):
+                    raise TeamError("Author response must use an exact current finding location")
         validate_report(report, schema)
         blocking = role == "review" and any(f["severity"] == "blocking" for f in report["findings"])
         if role == "review" and (report["verdict"] == "pass") == blocking:
@@ -186,13 +218,14 @@ class Agents:
             raise TeamError("Review verdict does not match its blocking findings; require an unambiguous verdict")
         record = dict(agent=agent, family=FAMILIES[agent], cli_version=version,
                       requested_model=model or "CLI default", observed_models=models,
-                      report=report)
+                      report=report, duration_seconds=duration, usage=usage, artifacts=str(artifacts))
         output_file.write_text(json.dumps(record, indent=2))
         return record
 
     @staticmethod
     def raise_failure(text):
-        # "Selected model is at capacity" is the provider being busy, not a failed run: wait and retry.
-        if re.search(r"usage limit|rate.?limit|quota (?:exceeded|exhausted)|hit your limit|insufficient_quota"
-                     r"|model is at capacity", text, re.I):
+        # Exhaustion or ambiguous mixed messages keep the longer subscription wait.
+        if re.search(r"usage limit|rate.?limit|quota (?:exceeded|exhausted)|hit your limit|insufficient_quota", text, re.I):
             raise QuotaError("Subscription capacity unavailable; queued for retry without API fallback")
+        if re.search(r"(?:selected )?model is at capacity", text, re.I):
+            raise ModelCapacityError("Selected model is temporarily at capacity; retrying without model or API fallback")

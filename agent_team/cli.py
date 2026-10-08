@@ -16,6 +16,7 @@ from .github import GitHub
 from .process import TeamError, execute
 from .state import CoordinatorBusy, Store, default_home
 from . import writing
+from .trace import trace_report, format_trace
 from .writing import KINDS
 
 
@@ -58,6 +59,8 @@ def parser():
     add.add_argument("--ready-label", default="agent:ready")
     add.add_argument("--codex-model")
     add.add_argument("--claude-model")
+    add.add_argument("--approver", action="append", metavar="LOGIN",
+                     help="Trusted human GitHub approver; repeatable; default is the authenticated human")
     companion_options(add)
     project.add_parser("list")
     for verb in ("show", "setup", "pause", "resume"):
@@ -71,6 +74,13 @@ def parser():
     configure.add_argument("--max-quota-retries", type=int)
     configure.add_argument("--codex-model")
     configure.add_argument("--claude-model")
+    configure.add_argument("--approver", action="append", metavar="LOGIN",
+                           help="Replace the trusted human approvers; repeatable")
+    configure.add_argument("--minor-cleanup", action=argparse.BooleanOptionalAction, default=None)
+    configure.add_argument("--status-mode", choices=["template", "model"])
+    configure.add_argument("--status-timeout", type=int)
+    configure.add_argument("--capacity-cooldown", type=int)
+    configure.add_argument("--max-capacity-retries", type=int)
     companion_options(configure)
     configure.add_argument("--no-companions", action="store_true",
                            help="Remove companions and the manifest; later runs are single-repository")
@@ -118,6 +128,12 @@ def parser():
     approve = commands.add_parser("approve", help="Approve current issue content and add the ready label")
     approve.add_argument("project")
     approve.add_argument("issue", type=int)
+    approval = commands.add_parser("approval-text", help="Read-only exact approval template for a human to post")
+    approval.add_argument("project")
+    approval.add_argument("issue", type=int)
+    trace = commands.add_parser("trace", help="Local development history, findings, tests, timings and artifacts")
+    trace.add_argument("run_id")
+    trace.add_argument("--json", action="store_true")
     status = commands.add_parser("status")
     status.add_argument("--project")
     status.add_argument("--json", action="store_true")
@@ -218,7 +234,7 @@ def dispatch(args, store):
             repo = github.repo(args.repo)
             if repo.get("archived"):
                 raise TeamError("Cannot register an archived repository")
-            options = {}
+            options = {"approvers": github.approvers(args.approver or [github.login()])}
             # Single-repository registrations store no companion settings at all.
             if args.companion:
                 options["companions"] = public_companions(github, args.companion)
@@ -235,13 +251,16 @@ def dispatch(args, store):
                 project = store.pause(args.name, verb == "pause")
             elif verb == "configure":
                 changes = {}
-                for key in ("timeout", "max_revisions", "quota_cooldown", "max_quota_retries", "codex_model", "claude_model"):
+                for key in ("timeout", "max_revisions", "quota_cooldown", "max_quota_retries", "codex_model", "claude_model",
+                            "minor_cleanup", "status_mode", "status_timeout", "capacity_cooldown", "max_capacity_retries"):
                     value = getattr(args, key)
                     if value is not None:
                         minimum = 0 if key == "max_revisions" else 1
-                        if isinstance(value, int) and value < minimum:
+                        if type(value) is int and value < minimum:
                             raise TeamError(f"{key} must be at least {minimum}")
                         changes[key] = value
+                if args.approver is not None:
+                    changes["approvers"] = github.approvers(args.approver)
                 if args.no_companions and (args.companion or args.companion_manifest is not None):
                     raise TeamError("--no-companions cannot be combined with companion settings")
                 remove = ("companions", "companion_manifest") if args.no_companions else ()
@@ -288,6 +307,12 @@ def dispatch(args, store):
             emit(team.queue(args.project))
         else:
             emit({"project": args.project, "saved_order": store.project(args.project)["queue_order"]})
+    elif args.command == "approval-text":
+        project = store.project(args.project)
+        print(github.approval_text(github.issue(project["repo"], args.issue)), end="")
+    elif args.command == "trace":
+        result = trace_report(store, store.get(args.run_id))
+        emit(result) if args.json else print(format_trace(result))
     elif args.command == "approve":
         emit(github.approve(store.project(args.project), args.issue))
     elif args.command == "select":
@@ -303,6 +328,7 @@ def dispatch(args, store):
         if args.interval < 1:
             raise TeamError("Polling interval must be positive")
         # Lock per tick, not across sleep, so pause/status remain usable.
+        immediate = 0
         while True:
             try:
                 if args.run_id:
@@ -318,7 +344,11 @@ def dispatch(args, store):
                     "stopped", "ready", "stale", "blocked", "handoff", "repair", "waiting", "paused", "closed", "merged",
                     "idle"}):
                 break
-            time.sleep(args.interval)
+            if getattr(value, "progressed", value.get("progressed", False)) and immediate < 12:
+                immediate += 1
+            else:
+                immediate = 0
+                time.sleep(args.interval)
     elif args.command == "status":
         runs = store.runs(args.project)
         if args.json:
@@ -390,8 +420,9 @@ def dispatch(args, store):
 def main(argv=None):
     os.umask(0o077)
     args = parser().parse_args(argv)
-    store = Store(args.home)
+    store = None
     try:
+        store = Store(args.home)
         if args.command in {"continue", "resume", "close", "decide", "adopt", "refresh"}:
             with store.repository_lock(store.get(args.run_id)["project"]):
                 code = dispatch(args, store)
@@ -411,7 +442,7 @@ def main(argv=None):
         elif args.command == "project" and args.project_command == "setup":
             with store.repository_lock(args.name):
                 code = dispatch(args, store)
-        elif (args.command in {"run", "status", "inspect", "handoff", "doctor", "smoke", "init"} or
+        elif (args.command in {"run", "status", "inspect", "trace", "approval-text", "handoff", "doctor", "smoke", "init"} or
                 (args.command == "pr" and args.pr_command == "show") or
                 (args.command == "project" and args.project_command in {"pause", "resume", "list", "show"}) or
                 (args.command == "writing" and args.writing_command == "show") or
@@ -427,5 +458,6 @@ def main(argv=None):
         print("Stopped. State retained; inspect before resuming.", file=sys.stderr)
         code = 130
     finally:
-        store.db.close()
+        if store is not None:
+            store.db.close()
     raise SystemExit(code)

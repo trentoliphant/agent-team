@@ -22,11 +22,26 @@ Do not use a personal subscription login as a shared account for other people.
 `agent-team project setup PROJECT` creates the ready and discovery labels.
 `agent-team approve PROJECT NUMBER` posts an approval of the current issue
 title/body fingerprint and applies the ready label. Both are required for intake;
-approval must be written by the coordinator's current GitHub identity. Approve
+approval must be a new unedited exact-template comment from a configured human
+GitHub User ID. The coordinator's bot identity cannot approve. Approve
 only issues whose scope and acceptance criteria are clear enough for autonomous
 work. Later edits invalidate approval; edits during a run stop that run.
-Removing the label stops further work on the next active stage. Discovered issues
+Removing the label or deleting/editing the approval stops further work on the next active stage. Discovered issues
 remain unready until triaged. One registered project corresponds to one repository.
+
+Configure human approvers with `project add ... --approver HUMAN_LOGIN` or
+`project configure PROJECT --approver HUMAN_LOGIN` (repeatable; replaces the list).
+Logins resolve to immutable numeric User IDs, so renaming a login does not transfer
+trust. Under a bot coordinator identity, use `approval-text PROJECT ISSUE`; a human
+posts its output verbatim as a new GitHub issue comment and adds the ready label.
+Legacy personal registrations without a list trust their authenticated User
+identity. Legacy bot-approved queued and active work requires new human approval. Edited
+0.1 approvals, including re-approvals made in place, also need a new human comment.
+Browser CRLF line endings and trailing whitespace are normalized; substantive
+template text must remain exact in both REST and GraphQL reads.
+GitHub machine-user PATs have User type; exclude them from the trusted list.
+Shared human credentials cannot prove human intent. Use a dedicated coordinator
+identity and enforce human merges with repository branch rules.
 
 Status is maintained in one marked comment per issue. Review evidence and the
 ready-for-maintainer summary are marked comments on the PR. A failed validation

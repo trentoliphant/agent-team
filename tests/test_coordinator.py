@@ -32,6 +32,9 @@ class FakeGitHub:
     def issues(self, project, ready=True):
         return self.items
 
+    def approval_evidence(self, project, issue):
+        return {"comment_id": 99, "user_id": 1, "login": "human", "created_at": "now", "updated_at": "now"} if self.authorized(project, issue) else None
+
     def authorized(self, project, issue):
         return issue.get("approved", True)
 
@@ -84,11 +87,13 @@ class FakeAgents:
         self.minor = []  # per-pass minor findings; a pass with none is used when exhausted
         self.idle = False  # True: the author changes nothing
         self.responses = []
+        self.response_locations = {}
 
-    def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
+    def run(self, agent, role, prompt, cwd, artifacts, project, readable=(), response_locations=()):
         self.calls.append((agent, role))
         self.prompts[role] = prompt
         self.readable[role] = [Path(p) for p in readable]
+        self.response_locations[role] = list(response_locations)
         if self.quota:
             self.quota = False
             raise QuotaError("quota exhausted")
@@ -128,7 +133,8 @@ class WorkflowTests(unittest.TestCase):
         self.remote = self.root / "remote.git"
         execute(["git", "clone", "--bare", str(source), str(self.remote)])
         self.store = Store(self.root / "state")
-        self.project = self.store.register("demo", "example/demo", "main", ["test -f feature.txt"])
+        self.project = self.store.register("demo", "example/demo", "main", ["test -f feature.txt"],
+                                           max_revisions=2, minor_cleanup=True, status_mode="model")
         self.github = FakeGitHub(self.remote)
         self.agents = FakeAgents()
         self.team = Coordinator(self.store, self.github, self.agents)
@@ -2020,9 +2026,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(text, response)
         self.assertEqual(git(self.store.workspace(run), "log", "-1", "--format=%s"),
                          f"Revision 1: address 1 minor finding on {first[:7]}")
-        # The description is the author's first report; the cleanup summary does not replace it.
+        # Original scope is retained and the latest revision is shown separately.
         self.assertIn("Added feature", self.github.pull["body"])
-        self.assertNotIn("Renamed a variable", self.github.pull["body"])
+        self.assertIn("Latest implementation update: Renamed a variable", self.github.pull["body"])
 
     def test_cleanup_round_without_changes_keeps_the_passing_review(self):
         self.agents.minor = [[self.MINOR]]
@@ -2215,8 +2221,8 @@ class WorkflowTests(unittest.TestCase):
         self.tick(8)
         self.assertIn("opens a local network port cannot pass here", self.agents.prompts["review"])
         prompt = self.agents.prompts["implement"]
-        self.assertIn("The PR description is already written", prompt)
-        self.assertIn("Findings from earlier rounds, already answered; keep those fixes in place:\n"
+        self.assertIn("The original PR summary is retained", prompt)
+        self.assertIn("Findings from earlier rounds; keep existing fixes and note any unanswered or disputed requests:\n"
                       "- revision 0, feature.txt:1: Fix the bug", prompt)
         self.assertIn('"request": "Add a test"', prompt)  # the latest feedback, in full
         self.assertIn("return one responses entry", prompt)

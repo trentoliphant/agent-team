@@ -108,3 +108,22 @@ External local changes require contributor declarations before re-entry. The
 reviewer's family must not have contributed. Rejected commits and revision limits
 remain attached to the run; another entry point cannot reroll them. Existing PR
 adoption is a separate companion feature. No partial operation permits merging.
+
+## Human issue approval in 0.2
+
+Configured approvers resolve to immutable numeric GitHub User IDs. Approval
+evidence requires exact template equality after normalizing CRLF line endings
+and trailing whitespace and nonempty equal creation/update
+timestamps plus GraphQL `lastEditedAt == null` (REST timestamps have second
+precision). The GraphQL reread must match the same human author and exact body;
+quoting a template or editing another person's comment cannot grant
+authorization. The coordinator records comment ID, approver identity and issue
+fingerprint and rechecks them before each active stage. An edited approval must
+be replaced by a new human comment. `approve` rejects bot or untrusted identities
+before any writes. `approval-text` only prints the template for a human.
+
+GitHub User type also covers machine-user PATs. Account metadata cannot prove
+human intent when a trusted person's credentials are shared with automation.
+Keep those accounts out of the approver list; use separate coordinator credentials
+and GitHub branch protections. These controls do not prevent an actor who can
+change the coordinator registry or its code from changing its policy.
