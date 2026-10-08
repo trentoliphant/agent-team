@@ -1895,6 +1895,51 @@ class WorkflowTests(unittest.TestCase):
         self.store.db.commit()
         self.assertEqual(self.tick()["stage"], "validate")
 
+    def test_review_capacity_deferrals_create_no_checkouts(self):
+        run = self.tick(4)
+        self.assertEqual(run["stage"], "review")
+        calls = list(self.agents.calls)
+        run_root = self.store.run_root(run)
+        # Preserve an existing quota failure count across capacity-only waits.
+        self.store.save(run, quota_attempts=1)
+        for reason in ("busy", "cooldown"):
+            with self.subTest(reason=reason):
+                if reason == "cooldown":
+                    with self.assertRaises(QuotaError), self.store.subscription(run["reviewer"], 60):
+                        raise QuotaError("quota")
+                lock = self.store.file_lock(f"subscription-{run['reviewer']}.lock")
+                if reason == "busy":
+                    lock.__enter__()
+                try:
+                    for _ in range(5):
+                        self.store.save(run, retry_at=0)
+                        run = self.tick()
+                        self.assertEqual(run["stage"], "quota_wait")
+                        self.assertEqual(run["resume_stage"], "review")
+                        self.assertEqual(run["quota_attempts"], 1)
+                        self.assertEqual(self.agents.calls, calls)
+                        self.assertEqual(list(run_root.glob("review-*")), [])
+                finally:
+                    if reason == "busy":
+                        lock.__exit__(None, None, None)
+        self.store.db.execute("DELETE FROM meta WHERE key=?", (f"quota-{run['reviewer']}",))
+        self.store.db.commit()
+        self.store.save(run, retry_at=0)
+        original_run = self.agents.run
+
+        def inspect_review(agent, role, prompt, cwd, *args, **kwargs):
+            self.assertEqual(role, "review")
+            self.assertEqual(git(cwd, "rev-parse", "HEAD"), run["sha"])
+            self.assertEqual(git(cwd, "status", "--porcelain"), "")
+            self.assertNotEqual(Path(cwd), self.store.workspace(run))
+            return original_run(agent, role, prompt, cwd, *args, **kwargs)
+
+        with patch.object(self.agents, "run", side_effect=inspect_review):
+            result = self.tick()
+        self.assertEqual(result["stage"], "ci")
+        self.assertEqual(len(list(run_root.glob("review-*"))), 1)
+        self.assertEqual(self.agents.calls, calls + [(run["reviewer"], "review")])
+
     def test_interruption_requires_explicit_resume(self):
         run = self.tick()
         self.store.save(run, in_flight=True)
