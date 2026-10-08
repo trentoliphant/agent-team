@@ -5,17 +5,19 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent_team.agents import Agents
+from agent_team.agents import Agents, AUTHOR_SCHEMA
 from agent_team.github import GitHub
 from agent_team.process import TeamError, QuotaError
 
 
 class AdapterTests(unittest.TestCase):
-    def call(self, agent, payload, *, exit_code=0, stderr="", role="review", readable=()):
+    def call(self, agent, payload, *, exit_code=0, stderr="", role="review", readable=(),
+             report=None, response_locations=()):
         self.commands = []
         self.environments = []
         self.workspaces = []
-        report = ({"message": "Status"} if role == "status" else {"issues": []} if role == "discover" else
+        self.schemas = []
+        report = report or ({"message": "Status"} if role == "status" else {"issues": []} if role == "discover" else
                   
                   {"verdict": "pass", "summary": "ok", "findings": []})
 
@@ -24,6 +26,8 @@ class AdapterTests(unittest.TestCase):
             self.workspaces.append((kwargs["cwd"], Path(kwargs["cwd"]).exists(),
                                     (Path(kwargs["cwd"]) / ".git").exists()))
             self.environments.append(kwargs.get("env", {}))
+            schema_file = Path(kwargs["cwd"]) / "artifacts/schema.json"
+            self.schemas.append(json.loads(schema_file.read_text()))
             if args[0] == "codex":
                 Path(args[args.index("-o") + 1]).write_text(json.dumps(report))
             return subprocess.CompletedProcess(args, exit_code, json.dumps(payload), stderr)
@@ -32,7 +36,7 @@ class AdapterTests(unittest.TestCase):
             with patch("agent_team.agents.subscription_status", return_value="test-version"), \
                     patch("agent_team.agents.execute", side_effect=fake_execute):
                 return Agents().run(agent, role, "Review", Path(temp), Path(temp) / "artifacts", {"timeout": 30},
-                                    readable=readable)
+                                    readable=readable, response_locations=response_locations)
 
     def test_codex_uses_subscription_and_a_sandbox_for_every_role(self):
         result = self.call("codex", {"type": "turn.completed"})
@@ -47,6 +51,55 @@ class AdapterTests(unittest.TestCase):
             with self.subTest(role=role):
                 self.call("codex", {"type": "turn.completed"}, role=role)
                 self.assertEqual(self.commands[-1][self.commands[-1].index("--sandbox") + 1], "read-only")
+
+    def test_current_response_locations_constrain_both_cli_schemas_without_mutating_defaults(self):
+        original = json.dumps(AUTHOR_SCHEMA, sort_keys=True)
+        locations = ['a.py:1', ' b.py:2  — "label"\n(symbol) ']
+        report = {"summary": "Fixed", "limitations": "Earlier notes", "responses": [
+            {"finding": location, "response": "Changed"} for location in locations]}
+        for agent in ('codex', 'claude'):
+            with self.subTest(agent=agent):
+                payload = ({"type": "turn.completed"} if agent == 'codex' else
+                           {"is_error": False, "structured_output": report})
+                result = self.call(agent, payload, role='implement', report=report,
+                                   response_locations=locations + locations[:1])
+                self.assertEqual(result['report'], report)
+                schema = self.schemas[-1]
+                self.assertEqual(schema['properties']['responses']['items']['properties']['finding']['enum'],
+                                 locations)
+                if agent == 'claude':
+                    command = self.commands[-1]
+                    self.assertEqual(json.loads(command[command.index('--json-schema') + 1]), schema)
+                self.assertEqual(json.dumps(AUTHOR_SCHEMA, sort_keys=True), original)
+                self.call(agent, payload, role='implement', report=report)
+                self.assertEqual(self.schemas[-1], AUTHOR_SCHEMA)
+
+    def test_paraphrased_response_is_refused_without_echoing_current_locations(self):
+        location = 'private-detail.py:1 (before function)'
+        report = {"summary": "Fixed", "limitations": "", "responses": [
+            {"finding": 'private-detail.py:1 — fixed', "response": "Changed"}]}
+        for agent in ('codex', 'claude'):
+            with self.subTest(agent=agent):
+                payload = ({"type": "turn.completed"} if agent == 'codex' else
+                           {"is_error": False, "structured_output": report})
+                with self.assertRaisesRegex(TeamError, '^Author response must use an exact current finding location$'):
+                    self.call(agent, payload, role='implement', report=report, response_locations=[location])
+                self.assertEqual(len(self.commands), 1)
+                self.assertEqual(self.schemas[-1]['properties']['responses']['items']['properties']['finding']['enum'],
+                                 [location])
+
+    def test_response_location_context_is_refused_before_subscription_or_dispatch(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch('agent_team.agents.subscription_status') as auth, \
+                patch('agent_team.agents.execute') as dispatch:
+            for role, locations in [('review', ['a.py']), ('status', ['a.py']),
+                                    ('implement', 'a.py'), ('implement', [1])]:
+                with self.subTest(role=role, locations=locations), self.assertRaises(TeamError):
+                    Agents().run('codex', role, '', Path(temp), Path(temp)/'artifacts', {},
+                                 response_locations=locations)
+            auth.assert_not_called()
+            dispatch.assert_not_called()
+            self.assertFalse((Path(temp)/'artifacts').exists())
 
     def test_codex_status_runs_read_only_outside_git(self):
         result = self.call("codex", {"type": "turn.completed"}, role="status")

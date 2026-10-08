@@ -374,8 +374,8 @@ class PreviewWorkflowTests(unittest.TestCase):
     def test_review_git_object_mutation_rejected_but_report_and_logs_remain(self):
         run = self.tick(4)
         original = self.agents.run
-        def mutating(agent,role,prompt,cwd,artifacts,project,readable=()):
-            record = original(agent,role,prompt,cwd,artifacts,project,readable)
+        def mutating(agent,role,prompt,cwd,artifacts,project,readable=(),**options):
+            record = original(agent,role,prompt,cwd,artifacts,project,readable,**options)
             if role == 'review':
                 execute(['git','-C',str(cwd),'hash-object','-w','--stdin'],input='fake object')
             return record
@@ -394,8 +394,8 @@ class PreviewWorkflowTests(unittest.TestCase):
                 self.setUp()
                 self.tick(4)
                 original = self.agents.run
-                def mutating(agent,role,prompt,cwd,artifacts,project,readable=()):
-                    record = original(agent,role,prompt,cwd,artifacts,project,readable)
+                def mutating(agent,role,prompt,cwd,artifacts,project,readable=(),**options):
+                    record = original(agent,role,prompt,cwd,artifacts,project,readable,**options)
                     path = Path(cwd)/'.git'/rel
                     path.parent.mkdir(parents=True,exist_ok=True)
                     path.write_text('a refs/replace/fake\n' if rel == 'packed-refs' else 'fake')

@@ -1,5 +1,6 @@
 """Regressions from the first live preview trial; no provider or GitHub calls."""
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -146,3 +147,42 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('revision summary and limitations are appended', self.agents.prompts['implement'])
         self.github.create_pr(self.project, run, pr_body(run))
         self.assertEqual(self.github.pull['body'], body)
+
+
+class ResponseContractTests(unittest.TestCase):
+    setUp = workflow.WorkflowTests.setUp
+    tearDown = workflow.WorkflowTests.tearDown
+    tick = workflow.WorkflowTests.tick
+
+    def test_current_review_and_cleanup_locations_exclude_earlier_and_validation_findings(self):
+        location = ' a.py:2  — "symbol"\n(before class) '
+        old = {'kind': 'review', 'round': 0, 'sha': 'OLD', 'findings': [finding('earlier.py:1')]}
+        for kind in ('review', 'cleanup', 'validation', 'initial'):
+            with self.subTest(kind=kind):
+                if kind != 'review':
+                    self.tearDown()
+                    self.setUp()
+                run = self.tick()
+                current = {'kind': 'review' if kind == 'cleanup' else kind, 'round': 1,
+                           'sha': 'CURRENT', 'findings': [finding(location), finding(location)]}
+                changes = {'round': 2, 'feedback': 'Current feedback', 'revision_history': [old, current]}
+                if kind == 'cleanup':
+                    changes.update(cleanup=current, revision_history=[old])
+                elif kind == 'initial':
+                    changes.update(round=0, revision_history=[])
+                self.store.save(run, **changes)
+                record = {'report': {'summary': 'Fixed', 'limitations': 'Earlier notes', 'responses': []}}
+                with patch.object(self.team, 'call_agent', return_value=record) as call:
+                    self.team.implement(self.project, run)
+                prompt = call.call_args.args[2]
+                if kind in ('review', 'cleanup'):
+                    self.assertEqual(call.call_args.kwargs['response_locations'], [location])
+                    self.assertIn(json.dumps([location], ensure_ascii=False), prompt)
+                    self.assertIn('covers ONLY these current finding locations', prompt)
+                    self.assertIn('notes on earlier-round or other requests in summary or limitations', prompt)
+                    self.assertIn('answers all current findings sharing it', prompt)
+                    self.assertIn('Findings from earlier rounds', prompt)
+                    self.assertIn('earlier.py:1', prompt)
+                else:
+                    self.assertNotIn('response_locations', call.call_args.kwargs)
+                    self.assertNotIn('covers ONLY', prompt)

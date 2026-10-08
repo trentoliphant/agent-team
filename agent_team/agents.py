@@ -1,4 +1,5 @@
 """Subscription-only adapters for official local CLIs."""
+import copy
 import json
 from pathlib import Path
 import re
@@ -93,12 +94,21 @@ def subscription_status(agent):
 
 
 class Agents:
-    def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
+    def run(self, agent, role, prompt, cwd, artifacts, project, readable=(), response_locations=()):
         """`readable` lists coordinator-populated directories outside `cwd`, such as companion
         checkouts, that the agent must be able to inspect."""
+        if not isinstance(response_locations, (list, tuple)) or any(
+                not isinstance(location, str) for location in response_locations):
+            raise TeamError("Response locations must be a list or tuple of strings")
+        if response_locations and role != "implement":
+            raise TeamError("Response locations apply only to implementation reports")
+        locations = list(dict.fromkeys(response_locations))
         version = subscription_status(agent)
         schema = {"implement": AUTHOR_SCHEMA, "review": REVIEW_SCHEMA,
                   "discover": DISCOVERY_SCHEMA, "status": STATUS_SCHEMA}[role]
+        if locations:
+            schema = copy.deepcopy(schema)
+            schema["properties"]["responses"]["items"]["properties"]["finding"]["enum"] = locations
         artifacts = Path(artifacts)
         artifacts.mkdir(parents=True, exist_ok=True)
         schema_file = artifacts / "schema.json"
@@ -194,6 +204,13 @@ class Agents:
                 raise TeamError("Codex returned malformed JSON") from exc
             models = sorted({e["model"] for e in events if isinstance(e.get("model"), str)})
             usage = [e["usage"] for e in events if e.get("type") == "turn.completed" and "usage" in e] or None
+        # Keep a refused response's error short; generic verdict/severity enum errors
+        # retain their existing wording. Raw output remains in the attempt artifacts.
+        if locations and isinstance(report, dict) and isinstance(report.get("responses"), list):
+            for response in report["responses"]:
+                if (isinstance(response, dict) and isinstance(response.get("finding"), str)
+                        and response["finding"] not in locations):
+                    raise TeamError("Author response must use an exact current finding location")
         validate_report(report, schema)
         blocking = role == "review" and any(f["severity"] == "blocking" for f in report["findings"])
         if role == "review" and (report["verdict"] == "pass") == blocking:

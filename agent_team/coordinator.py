@@ -1771,6 +1771,14 @@ class Coordinator:
                      "read-only dependencies; edits there are discarded: " +
                      "; ".join(f"../{companions.basename(p['repo'])} = {p['repo']} at {p['rev']}" for p in pins) +
                      (f". Pins come from the committed manifest {manifest}" if manifest else "") + ".\n")
+        locations = list(dict.fromkeys(f["location"] for f in feedback_findings(run)))
+        response_scope = (
+            "The responses list covers ONLY these current finding locations:\n" +
+            json.dumps(locations, ensure_ascii=False) + "\n"
+            "Copy each entire location verbatim: do not shorten it or add labels or annotations. "
+            "Use at most one entry per exact location; that entry answers all current findings sharing it. "
+            "Put notes on earlier-round or other requests in summary or limitations, not responses. "
+            if locations else "")
         prompt = (GUIDANCE + self.style(project, "pr") +
                   ("The original PR summary is retained. Your revision summary and limitations are appended "
                    "as round-labelled implementation notes; report this revision's work and limitations.\n"
@@ -1783,11 +1791,12 @@ class Coordinator:
                   "Edit files directly. " + COMMANDS + "Run the configured validation commands before you finish "
                   "and fix what fails. The coordinator runs them again afterwards, and its results are the ones "
                   "published. For each review finding in the feedback, return one responses entry that names the "
-                  "finding by its location and says in one or two sentences what you changed, or why you disagree. "
-                  "Return an empty responses list when the feedback has no review findings. "
+                  "finding by its location and says in one or two sentences what you changed, or why you disagree. " +
+                  response_scope + "Return an empty responses list when the feedback has no review findings. "
                   "Report limitations honestly; do not claim tests you did not run.")
         record = self.call_agent(run["author"], "implement", prompt, cwd,
-                                 self.store.artifacts(run) / f"author-{run['round']}", project, readable=readable)
+                                 self.store.artifacts(run) / f"author-{run['round']}", project, readable=readable,
+                                 **({"response_locations": locations} if locations else {}))
         assert_metadata(cwd, run["git_metadata"])
         if git(cwd, "rev-parse", "HEAD") != before:
             raise TeamError("Worker changed commit history; manual inspection required")

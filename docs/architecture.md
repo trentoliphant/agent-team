@@ -199,6 +199,16 @@ preceding whitespace, different line ranges, and ambiguous pairs do not match.
 This associates author claims with findings; it does not prove fixes or change
 review verdicts. Repeated-finding classification remains exact.
 
+For current review feedback, the implementation prompt and both CLI output
+schemas list the exact permitted response locations. Earlier-round notes belong
+in the summary or limitations. One response may answer all current findings at
+the same location; at most one response per location is prompt guidance, not a
+uniqueness constraint. The first response is linked if duplicates are returned.
+Initial implementation and validation-only revisions retain the original report
+schema. A paraphrased current location is refused as a malformed report, with
+edited work and raw attempt artifacts preserved; the run needs inspected recovery.
+Historical reports are not rewritten. These links remain author claims.
+
 When minor cleanup is enabled (or on legacy registrations), a review that
 passes with minor findings starts one cleanup round, when the run
 is an ordinary issue run with revision budget left. The author addresses the

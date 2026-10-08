@@ -452,10 +452,10 @@ class CompanionTests(unittest.TestCase):
                 self.assertEqual(self.tick(4)["stage"], "review")
                 original = self.agents.run
 
-                def mutating(agent, role, prompt, cwd, artifacts, project, readable=()):
+                def mutating(agent, role, prompt, cwd, artifacts, project, readable=(), **options):
                     if role == "review":
                         mutate(Path(cwd).parent / "lib")
-                    return original(agent, role, prompt, cwd, artifacts, project, readable)
+                    return original(agent, role, prompt, cwd, artifacts, project, readable, **options)
 
                 with patch.object(self.agents, "run", side_effect=mutating):
                     run = self.tick()

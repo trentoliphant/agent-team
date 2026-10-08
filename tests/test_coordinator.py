@@ -87,11 +87,13 @@ class FakeAgents:
         self.minor = []  # per-pass minor findings; a pass with none is used when exhausted
         self.idle = False  # True: the author changes nothing
         self.responses = []
+        self.response_locations = {}
 
-    def run(self, agent, role, prompt, cwd, artifacts, project, readable=()):
+    def run(self, agent, role, prompt, cwd, artifacts, project, readable=(), response_locations=()):
         self.calls.append((agent, role))
         self.prompts[role] = prompt
         self.readable[role] = [Path(p) for p in readable]
+        self.response_locations[role] = list(response_locations)
         if self.quota:
             self.quota = False
             raise QuotaError("quota exhausted")
