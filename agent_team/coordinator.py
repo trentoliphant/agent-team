@@ -205,9 +205,15 @@ def response_comment(run, sha):
              f"Author `{run['author']}` ({FAMILIES[run['author']]}), revision {run['round']}."]
     for number, entry in enumerate(responses, 1):
         lines += ["", f"**{number}. {entry['finding']}**", "", entry["response"]]
-    answered = {normalized(entry["finding"]) for entry in responses}
-    for finding in feedback_findings(run):
-        if normalized(finding["location"]) not in answered:
+    findings = feedback_findings(run)
+    matches = evidence.response_matches(findings, responses)
+    answered = {match["finding"] for match in matches}
+    for match in matches:
+        if match["kind"] == "annotation":
+            lines += ["", "Response matched ignoring a trailing location annotation: "
+                      + findings[match["finding"]]["location"]]
+    for index, finding in enumerate(findings):
+        if index not in answered:
             lines += ["", f"**No response matched by location: {finding['location']}**", finding["request"]]
     return "\n".join(lines)
 
@@ -280,18 +286,31 @@ def outcome_comment(run, stage):
 
 
 def pr_body(run):
-    # The description is the author's first report. Later rounds answer findings in comments instead.
+    # Preserve original scope; revisions append their notes rather than erase old limitations.
     report = run.get("description") or run["author_record"]["report"]
+    latest = run["author_record"]["report"]
+    history = run.get("description_history")
+    if not history:
+        history = [dict(report, round="initial")]
+        if any(latest.get(k) != report.get(k) for k in ("summary", "limitations")):
+            history.append(dict(latest, round=(run.get("authored_rounds") or ["latest recorded"])[-1]))
+    revision = (f"Latest implementation update: {latest['summary']}\n\n"
+                if latest["summary"] != report["summary"] else "")
+    notes = "".join(f"Implementation notes — round {entry['round']} "
+                    f"(recorded before coordinator validation): {entry['limitations']}\n\n"
+                    for entry in history if entry.get("limitations"))
     partial = (f"Selected operations: {', '.join(run.get('requested_operations', []))}. "
                f"Unperformed operations: {', '.join(run.get('unperformed_operations', run.get('omitted_operations', []))) or 'none'}. "
                "Publication does not certify unperformed checks.\n\n") if run.get("stop_after") else ""
     return ((f"Closes #{run['issue']}\n\n" if run["issue"] else "") + f"{report['summary']}\n\n"
-            f"Limitations: {report['limitations']}\n\n" + partial +
+            + revision + notes + partial +
             (f"Declared contributors: {', '.join(run.get('contributors', []))}. Assigned author "
              if run.get("selection") and not run["author_record"].get("agent") else "Author ") +
             f"`{run['author']}` ({FAMILIES[run['author']]}); independent reviewer "
             f"`{run['reviewer']}` ({FAMILIES[run['reviewer']]}). Run `{run['id']}`.\n\n"
-            f"Validation: {validation_text(run['tests'])}\n\n"
+            f"Coordinator validation of `{run.get('validated_sha') or 'none recorded'}`: "
+            f"{validation_text(run['tests'], run.get('validation_plan'))}. "
+            "These commit-bound results supersede implementation-time test-status claims above.\n\n"
             + companion_line(run.get("validated_companions"))
             + "".join(f"Adopted direct repair `{a['sha']}` after revision {a['round'] - 1}: declared contributors "
                       f"{', '.join(a['declared'])}; model families {', '.join(a['families'])}.\n\n"
@@ -1753,7 +1772,8 @@ class Coordinator:
                      "; ".join(f"../{companions.basename(p['repo'])} = {p['repo']} at {p['rev']}" for p in pins) +
                      (f". Pins come from the committed manifest {manifest}" if manifest else "") + ".\n")
         prompt = (GUIDANCE + self.style(project, "pr") +
-                  ("The PR description is already written. Your summary describes this revision only.\n"
+                  ("The original PR summary is retained. Your revision summary and limitations are appended "
+                   "as round-labelled implementation notes; report this revision's work and limitations.\n"
                    if run.get("description") else "Your summary and limitations become the PR description.\n") +
                   f"\n{'Revise' if run.get('adopted_pr') else 'Implement'} {subject(run)}: "
                   f"{run['title']}\n\n{run['body']}\n\n"
@@ -1771,12 +1791,18 @@ class Coordinator:
         assert_metadata(cwd, run["git_metadata"])
         if git(cwd, "rev-parse", "HEAD") != before:
             raise TeamError("Worker changed commit history; manual inspection required")
+        descriptions = list(run.get("description_history") or [])
+        if not descriptions and run.get("description"):
+            descriptions.append(dict(run["description"], round="initial"))
+        descriptions.append({"round": run["round"],
+                             **{k: record["report"][k] for k in ("summary", "limitations")}})
         # Keep attribution until validation commits the candidate, including
         # when a human contributes after an implementation stop boundary.
         self.store.save(run, commit_contributors=sorted(set(run.get("commit_contributors") or []) |
                                                        {FAMILIES[run["author"]]}),
                         attributed_context=self.evidence_context(project, run), author_record=record,
                         description=run.get("description") or {k: record["report"][k] for k in ("summary", "limitations")},
+                        description_history=descriptions,
                         authored_rounds=run.get("authored_rounds", []) + [run["round"]],
                         stage=self.successor(run, "revision" if run["stage"] == "revision" else "implement", "validate"))
 

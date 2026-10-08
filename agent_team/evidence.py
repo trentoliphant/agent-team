@@ -1,12 +1,39 @@
 """Pure evidence records. Helpers take and return plain dictionaries and import nothing from the
 coordinator, so any caller can build or render review, validation and CI evidence the same way."""
 import time
+import re
 
 REVIEWER = ("agent", "family", "cli_version", "requested_model", "observed_models")
 # What CI reported and what it was bound to; a change in any of them is a new observation.
 BINDING = ("sha", "base", "state", "companions", "generation")
 # Every compared field of a recorded observation, including which operation read it and its effect.
 RECORD = BINDING + ("operation", "readiness_changed")
+
+
+def response_matches(findings, responses):
+    """Match author claims, never proof of fixes. Exact matching retains legacy set
+    semantics; unmatched locations may ignore one trailing annotation only when
+    the remaining finding/response pair is unique. Raw records stay unchanged.
+    """
+    normalize = lambda text: " ".join(text.split())
+    locations = [normalize(f["location"]) for f in findings]
+    replies = [normalize(r["finding"]) for r in responses]
+    exact = {i: replies.index(location) for i, location in enumerate(locations) if location in replies}
+    matches = [{"finding": i, "response": j, "kind": "exact"} for i, j in exact.items()]
+    used = {j for j, reply in enumerate(replies) if reply in locations}
+    def canonical(text):
+        annotation = re.search(r"\s+\(([^()]+)\)$", text)
+        if annotation and annotation.group(1).strip():
+            return text[:annotation.start()].strip() or text
+        return text
+    pending = [i for i in range(len(findings)) if i not in exact]
+    remaining = [j for j in range(len(responses)) if j not in used]
+    for key in {canonical(locations[i]) for i in pending}:
+        left = [i for i in pending if canonical(locations[i]) == key]
+        right = [j for j in remaining if canonical(replies[j]) == key]
+        if len(left) == len(right) == 1:
+            matches.append({"finding": left[0], "response": right[0], "kind": "annotation"})
+    return sorted(matches, key=lambda match: match["finding"])
 
 
 def validation_checks(tests, planned=None):

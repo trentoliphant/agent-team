@@ -2024,9 +2024,9 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(text, response)
         self.assertEqual(git(self.store.workspace(run), "log", "-1", "--format=%s"),
                          f"Revision 1: address 1 minor finding on {first[:7]}")
-        # The description is the author's first report; the cleanup summary does not replace it.
+        # Original scope is retained and the latest revision is shown separately.
         self.assertIn("Added feature", self.github.pull["body"])
-        self.assertNotIn("Renamed a variable", self.github.pull["body"])
+        self.assertIn("Latest implementation update: Renamed a variable", self.github.pull["body"])
 
     def test_cleanup_round_without_changes_keeps_the_passing_review(self):
         self.agents.minor = [[self.MINOR]]
@@ -2219,7 +2219,7 @@ class WorkflowTests(unittest.TestCase):
         self.tick(8)
         self.assertIn("opens a local network port cannot pass here", self.agents.prompts["review"])
         prompt = self.agents.prompts["implement"]
-        self.assertIn("The PR description is already written", prompt)
+        self.assertIn("The original PR summary is retained", prompt)
         self.assertIn("Findings from earlier rounds; keep existing fixes and note any unanswered or disputed requests:\n"
                       "- revision 0, feature.txt:1: Fix the bug", prompt)
         self.assertIn('"request": "Add a test"', prompt)  # the latest feedback, in full

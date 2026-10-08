@@ -1,5 +1,5 @@
 """Local development history from durable evidence and the append-only journal."""
-from .evidence import validation_checks
+from .evidence import validation_checks, response_matches
 
 
 def trace_report(store, run):
@@ -46,10 +46,12 @@ def trace_report(store, run):
         replying = [a for a in authors if a["round"] == response_round] or [None]
         for author in replying:
             replies = (author["record"]["report"].get("responses") or []) if author else []
-            locations = {" ".join(r["finding"].split()) for r in replies}
+            matches = response_matches(expected, replies)
+            answered = {match["finding"] for match in matches}
             response_history.append({"round": response_round, "sha": author["sha"] if author else None,
                 "author_report_recorded": author is not None, "findings": expected, "responses": replies,
-                "unanswered": [f for f in expected if " ".join(f["location"].split()) not in locations]})
+                "matches": matches,
+                "unanswered": [f for i, f in enumerate(expected) if i not in answered]})
     return {
         "id": run["id"], "project": run["project"], "issue": run["issue"], "title": run["title"],
         "stage": run["stage"], "in_flight": run.get("in_flight", False), "round": run["round"], "pr": run.get("pr"),
@@ -99,6 +101,10 @@ def format_trace(report):
             for finding in body.get("findings", []):
                 lines.append(f"{finding['severity']} · {finding['location']}: {finding['evidence']} → {finding['request']}")
     for entry in report["response_history"]:
+        for match in entry.get("matches", []):
+            if match["kind"] == "annotation":
+                lines.append(f"Author round {entry['round']}: Response matched ignoring a trailing "
+                             "location annotation: " + entry["findings"][match["finding"]]["location"])
         for finding in entry["unanswered"]:
             lines.append(f"Author round {entry['round']}: No response matched by location: "
                          f"{finding['location']} → {finding['request']}")

@@ -184,7 +184,20 @@ commit, confirms each fix, and checks what changed since. An author revision
 receives the latest findings in full and one line for each earlier finding, runs
 the validation commands before handing off, and answers each finding; the answers
 are published as a comment with the new commit. The PR description is the
-author's first report and is not replaced by later rounds.
+author's original scope summary plus the latest revision summary. Round-labelled
+implementation notes retain reported limitations and are explicitly historical:
+the coordinator's separate validation results name the exact tested commit and
+supersede implementation-time test-status claims. Republication refreshes this
+coordinator-owned description; human edits to it can be overwritten on a later
+revision. Descriptions of adopted human PRs remain human-owned.
+
+Response matching uses whitespace-normalized exact locations first. A remaining
+finding may match a remaining response after removing a final parenthetical
+annotation preceded by whitespace, only if the pair is unique. The trace and
+response comment identify these relaxed matches. Function-call suffixes without
+preceding whitespace, different line ranges, and ambiguous pairs do not match.
+This associates author claims with findings; it does not prove fixes or change
+review verdicts. Repeated-finding classification remains exact.
 
 When minor cleanup is enabled (or on legacy registrations), a review that
 passes with minor findings starts one cleanup round, when the run
