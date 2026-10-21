@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from agent_team import evidence
+from agent_team import coordinator, evidence
 from agent_team.agents import Agents, FAMILIES, REVIEW_SCHEMA, subscription_status, validate_report
 from agent_team.coordinator import Coordinator, GUIDANCE
 from agent_team.process import execute, git, worker_env, TeamError, QuotaError
@@ -373,6 +373,68 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.github.comments, {})
         self.assertEqual(self.github.statuses, [])
         self.assertNotIn("publish", run["performed_operations"])
+
+    def private_primary(self):
+        """Offline stand-in for a private primary repository: fetches from it fail unless the
+        command carries the scoped gh credential helper, as they do with prompts disabled."""
+        mock = coordinator.git
+        local, fetches = mock.side_effect, []
+        scoped = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
+
+        def private_git(cwd, *args):
+            if "fetch" in args and "https://github.com/example/demo.git" in args:
+                index = args.index("fetch")
+                fetches.append(args[index + 3])
+                if list(args[index - 4:index]) != scoped:
+                    raise TeamError("could not read Username for 'https://github.com': terminal prompts disabled")
+            return local(cwd, *args)
+
+        mock.side_effect = private_git
+        self.addCleanup(setattr, mock, "side_effect", local)
+        return fetches
+
+    def assert_no_stored_credentials(self, run):
+        self.assertNotIn("credential", (self.store.workspace(run) / ".git" / "config").read_text())
+        self.assertFalse({"GH_TOKEN", "GITHUB_TOKEN", "GIT_ASKPASS"} & set(worker_env()))
+
+    def test_selected_review_fetches_private_base_with_scoped_credentials(self):
+        fetches = self.private_primary()
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "review"], [], task="Review private feature", ref=sha,
+                               contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        self.assertEqual((run["stage"], run["validated_sha"], run["reviewed_sha"]), ("stopped", sha, sha))
+        # Input inspection, then the validate-to-review compatibility check.
+        self.assertEqual((set(fetches[:-1]), fetches[-1]), ({sha}, "refs/heads/main"))
+        self.assertEqual([role for _, role in self.agents.calls], ["review"])
+        self.assert_no_stored_credentials(run)
+
+    def test_changed_private_base_is_refused_then_refreshed_with_scoped_credentials(self):
+        fetches = self.private_primary()
+        sha = self.existing_feature()
+        run = self.team.select("demo", ["validate", "review"], [], task="Review private feature", ref=sha,
+                               contributors=["human"])
+        run = self.selected_ticks(run, 2)
+        self.assertEqual(run["validated_sha"], sha)
+        before = len(fetches)
+        base = self.advance_base()
+        run = self.selected_ticks(run, 1)
+        self.assertEqual(fetches[before:], ["refs/heads/main"])
+        self.assertEqual((run["stage"], run["validated_sha"], run.get("reviewed_sha")), ("stale", None, None))
+        self.assertIn("Base changed", run["error"])
+        self.assertEqual(self.agents.calls, [])
+        self.assert_no_stored_credentials(run)
+        # Refresh integration and selected re-entry fetch the private base the same way.
+        before = len(fetches)
+        run = self.team.refresh(run["id"], authorize_edit=True)
+        self.assertEqual((fetches[before:], run["stage"], run["next_stage"], run["base_sha"]),
+                         (["refs/heads/main"], "stopped", "validate", base))
+        before = len(fetches)
+        run = self.team.select("demo", ["validate", "review"], [], run_id=run["id"], contributors=["human"])
+        run = self.selected_ticks(run, 3)
+        self.assertEqual((fetches[before:], run["stage"], run["reviewed_sha"]),
+                         (["refs/heads/main"] * 2, "stopped", run["sha"]))
+        self.assert_no_stored_credentials(run)
 
     def test_discovery_and_issue_preparation_stop_without_source_edits(self):
         run = self.team.select("demo", ["discovery"], [], task="Investigate onboarding gaps")
