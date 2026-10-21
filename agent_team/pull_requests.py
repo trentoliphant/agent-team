@@ -94,7 +94,7 @@ class PullRequests:
     def inspect(self, project, cwd, number):
         git = core.git
         base = git(cwd, "rev-parse", "HEAD")
-        git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/pull/{number}/head")
+        core.fetch_primary(cwd, project, f"refs/pull/{number}/head")
         head = git(cwd, "rev-parse", "FETCH_HEAD^{commit}")
         merge_base = git(cwd, "merge-base", base, head)
         trailers = git(cwd, "log", "--format=%(trailers:key=Agent-Family,valueonly)", f"{merge_base}..{head}")

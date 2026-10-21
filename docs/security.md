@@ -55,7 +55,9 @@ Official references:
 The coordinator uses `gh`'s existing identity or a dedicated GitHub App token
 provided to the coordinator process. GitHub credentials are not forwarded in the
 worker environment. Git push destinations are constructed from the registered
-repository. Coordinator Git calls ignore global/system configuration and disable
+repository. Clones, fetches, and pushes of the registered repository pass
+`gh auth git-credential` on that command only, so private repositories work and
+no credential setting is written to a checkout. Coordinator Git calls ignore global/system configuration and disable
 filesystem monitors and hooks. Local config, excludes, and attributes are
 fingerprinted before workers run; changes block later coordinator Git operations.
 Worker Git configuration does not inherit global credential helpers. An empty

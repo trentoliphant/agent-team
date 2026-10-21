@@ -70,6 +70,13 @@ Do not delegate work. Return only the requested structured report.
 """
 
 
+def fetch_primary(cwd, project, ref):
+    """Fetch from the registered repository with command-scoped gh credentials, as clone and push do.
+    Nothing is written to the checkout's configuration; companions stay anonymous."""
+    return git(cwd, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+               "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", ref)
+
+
 def report_text(record):
     return json.dumps(record, indent=2, ensure_ascii=False)
 
@@ -1018,7 +1025,7 @@ class Coordinator:
     def inspect_input(self, project, cwd, ref, contributors):
         """Check external input before claiming scope or installing an author checkout."""
         base = git(cwd, "rev-parse", "HEAD")
-        git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", ref)
+        fetch_primary(cwd, project, ref)
         candidate = git(cwd, "rev-parse", "FETCH_HEAD^{commit}")
         if any(candidate in r.get("rejected_shas", []) for r in self.store.repository_runs(project["name"])):
             raise TeamError("Input commit was rejected; continue the existing run and its budget")
@@ -1288,8 +1295,7 @@ class Coordinator:
                 raise TeamError("Candidate or configuration changed; evidence invalidated. Inspect and select the recorded next stage")
         # Fetch only after metadata/scope checks. Base drift cannot reuse evidence.
         cwd = self.store.workspace(run)
-        git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git",
-            f"refs/heads/{base_ref(project, run)}")
+        fetch_primary(cwd, project, f"refs/heads/{base_ref(project, run)}")
         base = git(cwd, "rev-parse", "FETCH_HEAD")
         if base != run["base_sha"]:
             cleared = (retire_evidence(run, "Remote base changed") if run.get("adopted_pr")
@@ -2069,8 +2075,7 @@ class Coordinator:
                                                    after=context))
             raise ReentryRequired("Candidate or configuration changed; new validation and review are required")
         cwd = self.store.workspace(run)
-        git(cwd, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git",
-            f"refs/heads/{base_ref(project, run)}")
+        fetch_primary(cwd, project, f"refs/heads/{base_ref(project, run)}")
         if git(cwd, "rev-parse", "FETCH_HEAD") != run["base_sha"]:
             self.store.save(run, **retire_evidence(run, "Remote base changed", before=run.get("validated_context")))
             raise ReentryRequired("Base changed; explicit refresh and new evidence are required", stale=True)
@@ -2614,8 +2619,7 @@ class Coordinator:
             fresh = self.store.run_root(run) / f"refresh-{time.time_ns()}"
             execute(["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "clone", "--no-local",
                      str(cwd), str(fresh)], env=git_env(), timeout=project["timeout"])
-            git(fresh, "fetch", "--no-tags", f"https://github.com/{project['repo']}.git",
-                f"refs/heads/{project['base']}")
+            fetch_primary(fresh, project, f"refs/heads/{project['base']}")
             base = git(fresh, "rev-parse", "FETCH_HEAD")
             git(fresh, "-c", "user.name=Agent Team", "-c", "user.email=agent-team@users.noreply.github.com",
                 "-c", "commit.gpgsign=false", "merge", "--no-edit", base)
@@ -2816,8 +2820,7 @@ class Coordinator:
                             "(previous work retained)") from None
         # Like remote adoption, integrate the current registered base before validation, so the
         # validated and published candidate is not built on a stale base.
-        git(fresh, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-            "fetch", "--no-tags", f"https://github.com/{project['repo']}.git", f"refs/heads/{base_ref(project, run)}")
+        fetch_primary(fresh, project, f"refs/heads/{base_ref(project, run)}")
         base_sha = git(fresh, "rev-parse", "FETCH_HEAD")
         # An unmerged base is not reachable from the candidate; this ref keeps the exact object for review.
         git(fresh, "update-ref", BASE_OBJECT_REF, base_sha)

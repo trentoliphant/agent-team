@@ -53,6 +53,25 @@ class PullRequestTests(existing.ExistingPullRequestFixture):
                            validation_failed=False)
         self.assertEqual(review["findings"][0]["location"], "feature.txt:1")
 
+    def test_private_pull_and_base_fetches_use_scoped_credentials(self):
+        # Offline stand-in for a private primary repository with prompts disabled.
+        scoped, fetches = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], []
+
+        def private_git(cwd, *args):
+            if "fetch" in args and "https://github.com/example/demo.git" in args:
+                index = args.index("fetch")
+                fetches.append(args[index + 3])
+                if list(args[index - 4:index]) != scoped:
+                    raise TeamError("could not read Username for 'https://github.com': terminal prompts disabled")
+            return self.local_git(cwd, *args)
+
+        head = self.open_pr()
+        with patch("agent_team.coordinator.git", side_effect=private_git):
+            run = self.ticks(self.adopt_pr(), 3)
+        self.assert_reviewed(run, head)
+        self.assertEqual((fetches[0], fetches[-1]), ("refs/pull/7/head", "refs/heads/main"))
+        self.assertNotIn("credential", (self.store.workspace(run) / ".git" / "config").read_text())
+
     def test_adoption_refuses_invalid_requests(self):
         self.open_pr()
         for mode, grants, message in (
